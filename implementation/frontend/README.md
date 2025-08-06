@@ -1,52 +1,41 @@
-# NeuraForge Frontend
+# NeuraForge: Advanced Multi-Agent Interface
 
-<p align="center">
-  <img src="public/favicon.svg" alt="NeuraForge Logo" width="120" height="120" />
-</p>
+## Overview
+NeuraForge is a powerful multi-agent AI interface that enables seamless interaction between various specialized AI agents. The system combines a modern, responsive UI with robust functionality to create an intuitive and efficient user experience.
 
-<p align="center">
-  <b>Advanced AI-powered chat interface with LLaMA 3.1 integration</b><br/>
-  Built with Next.js 14, React and TailwindCSS
-</p>
+## Features
+- **Multi-Agent Collaboration**: Orchestrate interactions between specialized AI agents (Research, Creative, Finance, Enterprise)
+- **Responsive Design**: Full mobile/tablet support with optimized sidebar interactions
+- **Theme Support**: Light and dark mode with automatic system preference detection
+- **Interactive UI**: Modern animations and transitions with Framer Motion
+- **Advanced Chat Interface**: Message reactions, copy functionality, and regeneration options
+- **Memory Integration**: Persistent context across conversations
+- **Enhanced Input**: Rich text input with suggestions and advanced settings
+- **Real-time WebSocket Communication**: Streaming responses from the backend API
+- **API Integration**: Seamless connection with the NeuraForge backend services
 
-<p align="center">
-  <img src="https://img.shields.io/badge/next.js-14.0.0-black?style=flat-square" alt="Next.js" />
-  <img src="https://img.shields.io/badge/react-18.0.0-blue?style=flat-square" alt="React" />
-  <img src="https://img.shields.io/badge/tailwindcss-3.3.0-38bdf8?style=flat-square" alt="TailwindCSS" />
-  <img src="https://img.shields.io/badge/typescript-5.0.0-3178c6?style=flat-square" alt="TypeScript" />
-</p>
+## Tech Stack
+- **Frontend**: React, TypeScript, Tailwind CSS, Shadcn UI
+- **State Management**: React Query for server state, React hooks for local state
+- **Styling**: Tailwind CSS with custom theme variables
+- **Animation**: Framer Motion for fluid UI transitions
+- **Routing**: React Router for navigation
+- **API Communication**: Fetch API and WebSockets for backend integration
 
----
-
-## 🚀 Features
-
-- ✨ Modern, responsive UI with glassmorphism design
-- 💬 Real-time chat interface with NeuraForge AI
-- 🖥️ Code block formatting with syntax highlighting
-- 🌙 Automatic dark mode support
-- 🔄 Connection status indicators
-- 📊 AI confidence scoring visualization
-- ⚡ Performance optimized animations
-- 📱 Mobile-friendly responsive layout
-
-![Screenshot of NeuraForge UI](https://via.placeholder.com/800x450?text=NeuraForge+UI+Screenshot)
-
-## 🛠️ Getting Started
+## Getting Started
 
 ### Prerequisites
 
-- **Node.js 18+** (LTS recommended)
-- **npm** or **yarn**
-- **NeuraForge backend server** running (default: http://localhost:8000)
-- **Ollama** with LLaMA 3.1:8b model loaded
+- Node.js 18+ (Latest LTS recommended)
+- npm or yarn
+- NeuraForge backend running (see backend setup instructions)
 
 ### Installation
 
-1. Clone the repository (if not done already):
+1. Navigate to the frontend directory:
 
 ```bash
-git clone https://github.com/yourusername/neuraforge.git
-cd neuraforge/implementation/frontend
+cd implementation/frontend
 ```
 
 2. Install dependencies:
@@ -54,10 +43,18 @@ cd neuraforge/implementation/frontend
 ```bash
 npm install
 # or
-yarn install
+yarn
 ```
 
-3. Run the development server:
+3. Create a `.env.local` file with your backend API URL:
+
+```
+VITE_API_URL=http://localhost:8000
+```
+
+### Development
+
+Start the development server:
 
 ```bash
 npm run dev
@@ -65,75 +62,42 @@ npm run dev
 yarn dev
 ```
 
-4. Open [http://localhost:3000](http://localhost:3000) with your browser to see the app.
+The application will be available at [http://localhost:3000](http://localhost:3000).
 
-## ⚙️ Environment Variables
+## Architecture
 
-Configure the API URL by creating a `.env.local` file in the root directory:
+### Key Components
 
-```env
-# API URL (default: http://localhost:8000)
-NEXT_PUBLIC_API_URL=http://localhost:8000
+- **ChatInterface**: Main chat interface with message display
+- **PromptInput**: Input area for sending messages with options
+- **AgentBubble**: Message bubble with agent information
+- **AgentSidebar**: Shows active agents and their status
+- **ConversationHistory**: Displays past conversations
+- **API Service**: Handles communication with the backend
 
-# Enable/disable additional debugging (optional)
-NEXT_PUBLIC_DEBUG_MODE=false
-```
+### API Integration
 
-## 🏗️ Project Structure
+The frontend communicates with the NeuraForge backend API:
 
-```
-src/
-├── app/                # Next.js App Router
-│   ├── globals.css     # Global styles
-│   ├── layout.tsx      # Root layout
-│   └── page.tsx        # Home page
-├── components/         # React components
-│   └── ChatInterface.tsx  # Main chat interface
-└── ...
-```
+- REST API for stateless requests
+- WebSocket for real-time message streaming
+- Environment variables for configuration
 
-## 📦 Building for Production
+## Troubleshooting
 
-```bash
-npm run build
-# or
-yarn build
-```
+### Connection Issues
 
-Then start the production server:
+If you experience connection issues:
 
-```bash
-npm run start
-# or
-yarn start
-```
+1. Ensure the backend server is running
+2. Check your `.env.local` configuration
+3. Verify network connectivity and CORS settings
+4. Check the browser console for any error messages
 
-## 🧩 Tech Stack
+### Build Problems
 
-- **Next.js 14** - React framework with server-side rendering
-- **React 18** - UI library
-- **TypeScript** - Type safety
-- **Tailwind CSS** - Utility-first styling
-- **Socket.io** - For future WebSocket support
+If you encounter build issues:
 
-## 🔮 Upcoming Features
-
-- [ ] Streaming responses with WebSockets
-- [ ] Multi-modal capabilities (image generation, understanding)
-- [ ] Conversation history and export
-- [ ] Custom themes and UI personalization
-- [ ] Offline mode with local storage
-
-## 📄 License
-
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## 🤝 Contributing
-
-Contributions are welcome! Feel free to open issues or submit pull requests.
-
----
-
-<p align="center">
-  Made with ❤️ by the NeuraForge Team
-</p>
+1. Clear node_modules and reinstall dependencies
+2. Ensure you're using a compatible Node.js version
+3. Check for TypeScript errors in your code

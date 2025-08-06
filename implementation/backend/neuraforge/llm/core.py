@@ -34,6 +34,46 @@ from pydantic import BaseModel, Field
 load_dotenv()
 
 
+def get_llm_model(model_name=None, temperature=0.7, streaming=True):
+    """Get an instance of the LLM model for use in agents and other components.
+    
+    Args:
+        model_name: Name of the model to use, defaults to the LLM_MODEL env var or 'llama3.1:8b'
+        temperature: Temperature setting for the model (0-1)
+        streaming: Whether to enable streaming output
+        
+    Returns:
+        An instance of the LLM ready for use with LangChain
+    """
+    config = LLMConfig(
+        model_name=model_name or os.getenv("LLM_MODEL", "llama3.1:8b"),
+        temperature=temperature,
+        streaming=streaming
+    )
+    
+    # Use the direct LLM instance rather than the NeuraForgeLLM wrapper
+    # for better compatibility with agent frameworks
+    if USE_NEW_OLLAMA:
+        # Use the newer OllamaLLM from langchain_ollama
+        llm = LLMClass(
+            model=config.model_name,
+            temperature=config.temperature,
+            top_p=config.top_p, 
+            streaming=config.streaming,
+            base_url=config.base_url,
+        )
+    else:
+        # Use the older Ollama from langchain_community with compatible parameters
+        llm = LLMClass(
+            model=config.model_name,
+            temperature=config.temperature,
+            top_p=config.top_p,
+            base_url=config.base_url,
+        )
+    
+    return llm
+
+
 class LLMConfig(BaseModel):
     """Configuration for LLM."""
 

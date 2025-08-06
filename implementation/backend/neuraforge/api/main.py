@@ -67,20 +67,32 @@ async def root():
 @app.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest):
     """Chat endpoint for non-streaming responses."""
-    # Simple implementation for Phase 1
-    # Will be replaced with proper agent routing in Phase 2
-    
-    # Format messages for LLM
-    formatted_prompt = "\n".join([f"{m.role}: {m.content}" for m in request.messages])
-    
-    # Generate response from LLM
-    response = neuraforge_llm.generate(formatted_prompt)
-    
-    return ChatResponse(
-        content=response,
-        agent_info="core_llm",
-        confidence_score=0.95,
-    )
+    try:
+        if not request.messages:
+            return ChatResponse(
+                content="No messages provided. Please send at least one message.",
+                agent_info="system",
+                confidence_score=1.0,
+            )
+        
+        # Format messages for LLM
+        formatted_prompt = "\n".join([f"{m.role}: {m.content}" for m in request.messages])
+        
+        # Generate response from LLM
+        response = neuraforge_llm.generate(formatted_prompt)
+        
+        return ChatResponse(
+            content=response,
+            agent_info="Financial Agent",
+            confidence_score=0.95,
+        )
+    except Exception as e:
+        print(f"Error generating response: {str(e)}")
+        return ChatResponse(
+            content="I apologize, but I encountered an error while processing your request. Please try again.",
+            agent_info="system",
+            confidence_score=0.0,
+        )
 
 
 # WebSocket connection for streaming responses
@@ -94,21 +106,36 @@ async def websocket_chat(websocket: WebSocket):
             # Receive message from client
             data = await websocket.receive_json()
             
-            # Simple implementation for Phase 1
-            # Will be replaced with proper agent routing in Phase 2
+            # Process the message using the LLM
             messages = data.get("messages", [])
+            if not messages:
+                await websocket.send_json({
+                    "content": "No messages provided. Please send at least one message.",
+                    "agent_info": "system",
+                    "confidence_score": 1.0,
+                })
+                continue
+                
+            # Format messages for LLM
             formatted_prompt = "\n".join([f"{m['role']}: {m['content']}" for m in messages])
             
-            # For Phase 1, just echo back a basic response
-            # In later phases, this will use the LLM and agents
-            response = f"NeuraForge received: {formatted_prompt[:50]}..."
-            
-            # Send response to client
-            await websocket.send_json({
-                "content": response,
-                "agent_info": "core_llm",
-                "confidence_score": 0.95,
-            })
+            # Generate response from LLM
+            try:
+                response = neuraforge_llm.generate(formatted_prompt)
+                
+                # Send response to client
+                await websocket.send_json({
+                    "content": response,
+                    "agent_info": "Financial Agent",
+                    "confidence_score": 0.95,
+                })
+            except Exception as e:
+                print(f"Error generating response: {str(e)}")
+                await websocket.send_json({
+                    "content": "I apologize, but I encountered an error while processing your request. Please try again.",
+                    "agent_info": "system",
+                    "confidence_score": 0.0,
+                })
     
     except WebSocketDisconnect:
         print("Client disconnected")
