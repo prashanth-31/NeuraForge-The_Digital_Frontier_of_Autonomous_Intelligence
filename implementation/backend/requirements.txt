@@ -1,0 +1,23 @@
+# Requirements file for Python 3.9 environment
+# Core dependencies
+pydantic
+python-dotenv
+
+# LangChain packages
+langchain
+langchain-core
+langchain-community
+
+# Web framework
+fastapi
+uvicorn
+
+# Database and storage
+redis
+psycopg2-binary
+qdrant-client
+
+# LLM integration
+ollama
+
+# Note: Dependencies will be automatically resolved by pip

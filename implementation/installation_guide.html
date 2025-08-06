@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NeuraForge - Installation Guide</title>
+  <style>
+    :root {
+      --neural-primary: #7C3AED;
+      --neural-light: #8B5CF6;
+      --neural-dark: #6D28D9;
+      --neural-accent: #F472B6;
+      --forge-primary: #059669;
+      --forge-light: #10B981;
+      --forge-dark: #047857;
+      --forge-accent: #FBBF24;
+    }
+    
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      line-height: 1.6;
+      color: #333;
+      background: linear-gradient(135deg, #f5f7fa 0%, #e4eaef 100%);
+      padding: 0;
+      margin: 0;
+      min-height: 100vh;
+    }
+    
+    .container {
+      max-width: 900px;
+      margin: 0 auto;
+      padding: 40px 20px;
+    }
+    
+    header {
+      background: linear-gradient(to right, var(--neural-dark), var(--neural-primary), var(--forge-primary));
+      color: white;
+      padding: 30px 20px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      margin-bottom: 40px;
+      position: relative;
+      overflow: hidden;
+    }
+    
+    header::before {
+      content: '';
+      position: absolute;
+      top: -50%;
+      left: -50%;
+      width: 200%;
+      height: 200%;
+      background: radial-gradient(circle, rgba(255, 255, 255, 0.1) 1px, transparent 1px),
+                  radial-gradient(circle, rgba(255, 255, 255, 0.1) 1px, transparent 1px);
+      background-size: 40px 40px;
+      background-position: 0 0, 20px 20px;
+      transform: rotate(30deg);
+      z-index: 1;
+      opacity: 0.5;
+    }
+    
+    .header-content {
+      position: relative;
+      z-index: 2;
+      max-width: 900px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+    }
+    
+    .logo {
+      width: 60px;
+      height: 60px;
+      background: rgba(255, 255, 255, 0.2);
+      border-radius: 12px;
+      margin-right: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 10px;
+    }
+    
+    .logo svg {
+      width: 100%;
+      height: 100%;
+    }
+    
+    .title-block h1 {
+      font-size: 2.4rem;
+      font-weight: 700;
+      margin: 0;
+      line-height: 1.2;
+      letter-spacing: -0.02em;
+    }
+    
+    .title-block p {
+      font-size: 1rem;
+      opacity: 0.8;
+      margin-top: 5px;
+    }
+    
+    .card {
+      background: white;
+      border-radius: 12px;
+      padding: 30px;
+      margin-bottom: 25px;
+      box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+    }
+    
+    h2 {
+      color: var(--neural-primary);
+      margin-bottom: 20px;
+      font-weight: 600;
+    }
+    
+    h3 {
+      margin: 25px 0 15px;
+      color: var(--forge-dark);
+    }
+    
+    p {
+      margin-bottom: 20px;
+    }
+    
+    ul, ol {
+      margin-bottom: 20px;
+      margin-left: 20px;
+    }
+    
+    li {
+      margin-bottom: 8px;
+    }
+    
+    code {
+      font-family: 'Cascadia Code', 'Source Code Pro', Menlo, Monaco, Consolas, monospace;
+      background-color: #f5f7fa;
+      padding: 3px 6px;
+      border-radius: 4px;
+      font-size: 0.9em;
+      border: 1px solid #e1e4e8;
+    }
+    
+    pre {
+      background-color: #f8f9fb;
+      padding: 15px;
+      border-radius: 6px;
+      overflow-x: auto;
+      border: 1px solid #e1e4e8;
+      margin-bottom: 20px;
+    }
+    
+    pre code {
+      background-color: transparent;
+      padding: 0;
+      border: none;
+    }
+    
+    .steps {
+      counter-reset: step;
+    }
+    
+    .step {
+      position: relative;
+      padding-left: 60px;
+      margin-bottom: 30px;
+      counter-increment: step;
+    }
+    
+    .step::before {
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 40px;
+      height: 40px;
+      background: linear-gradient(135deg, var(--neural-primary), var(--neural-dark));
+      color: white;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: bold;
+      font-size: 18px;
+      box-shadow: 0 4px 10px rgba(124, 58, 237, 0.3);
+    }
+    
+    .step h3 {
+      margin-top: 0;
+      padding-top: 5px;
+    }
+    
+    .note {
+      background-color: #f0f4ff;
+      border-left: 4px solid var(--neural-primary);
+      padding: 15px 20px;
+      margin: 20px 0;
+      border-radius: 4px;
+    }
+    
+    .note strong {
+      color: var(--neural-dark);
+    }
+    
+    .cta {
+      display: inline-block;
+      padding: 12px 24px;
+      background: linear-gradient(to right, var(--neural-primary), var(--forge-primary));
+      color: white;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 500;
+      margin-top: 10px;
+      box-shadow: 0 4px 12px rgba(124, 58, 237, 0.2);
+      transition: all 0.3s ease;
+    }
+    
+    .cta:hover {
+      box-shadow: 0 6px 16px rgba(124, 58, 237, 0.4);
+      transform: translateY(-2px);
+    }
+    
+    .tag {
+      display: inline-block;
+      padding: 4px 10px;
+      background-color: #e0e7ff;
+      color: var(--neural-dark);
+      border-radius: 20px;
+      font-size: 0.85em;
+      font-weight: 500;
+      margin-right: 8px;
+    }
+    
+    footer {
+      text-align: center;
+      padding: 30px 20px;
+      color: #666;
+      font-size: 0.9em;
+    }
+    
+    @media (max-width: 768px) {
+      .container {
+        padding: 20px 15px;
+      }
+      
+      header {
+        padding: 20px 15px;
+      }
+      
+      .logo {
+        width: 40px;
+        height: 40px;
+      }
+      
+      .title-block h1 {
+        font-size: 1.8rem;
+      }
+      
+      .card {
+        padding: 20px;
+      }
+      
+      .step {
+        padding-left: 50px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-content">
+      <div class="logo">
+        <svg viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M12 3C7.03 3 3 7.03 3 12C3 16.97 7.03 21 12 21C16.97 21 21 16.97 21 12C21 7.03 16.97 3 12 3ZM12 19C8.13 19 5 15.87 5 12C5 8.13 8.13 5 12 5C15.87 5 19 8.13 19 12C19 15.87 15.87 19 12 19Z" fill="white" />
+          <path d="M12 8C9.79 8 8 9.79 8 12C8 14.21 9.79 16 12 16C14.21 16 16 14.21 16 12C16 9.79 14.21 8 12 8ZM18 12C18 15.31 15.31 18 12 18C8.69 18 6 15.31 6 12C6 8.69 8.69 6 12 6C15.31 6 18 8.69 18 12Z" fill="white" />
+          <path d="M12 10C10.9 10 10 10.9 10 12C10 13.1 10.9 14 12 14C13.1 14 14 13.1 14 12C14 10.9 13.1 10 12 10Z" fill="white" />
+        </svg>
+      </div>
+      <div class="title-block">
+        <h1>NeuraForge Installation Guide</h1>
+        <p>Setup instructions for running the NeuraForge AI platform</p>
+      </div>
+    </div>
+  </header>
+  
+  <div class="container">
+    <div class="card">
+      <h2>Getting Started with NeuraForge</h2>
+      <p>
+        Welcome to NeuraForge! This guide will help you set up and run both the backend and frontend components
+        of the NeuraForge platform on your local machine.
+      </p>
+      <div class="tags">
+        <span class="tag">Python Backend</span>
+        <span class="tag">FastAPI</span>
+        <span class="tag">Next.js Frontend</span>
+        <span class="tag">LLaMA 3.1</span>
+      </div>
+    </div>
+    
+    <div class="card">
+      <h2>Prerequisites</h2>
+      <p>Before you begin, make sure you have the following installed:</p>
+      <ul>
+        <li><strong>Python 3.9+</strong> - Required for the backend server</li>
+        <li><strong>Node.js 18+</strong> - Required for the frontend application</li>
+        <li><strong>npm</strong> - Node package manager (included with Node.js)</li>
+        <li><strong>Ollama</strong> - For running LLM models locally</li>
+      </ul>
+      
+      <div class="note">
+        <strong>Note:</strong> This guide assumes you've already installed Ollama with the LLaMA 3.1:8b model. If you haven't, please visit <a href="https://ollama.com" target="_blank">Ollama's website</a> for installation instructions.
+      </div>
+    </div>
+    
+    <div class="card">
+      <h2>Installation Steps</h2>
+      
+      <div class="steps">
+        <div class="step">
+          <h3>Install Node.js</h3>
+          <p>If you don't have Node.js installed, download and install it from the <a href="https://nodejs.org" target="_blank">official Node.js website</a>.</p>
+          <p>To verify the installation, open a command prompt or terminal and run:</p>
+          <pre><code>node --version
+npm --version</code></pre>
+          <p>You should see version numbers if the installation was successful.</p>
+        </div>
+        
+        <div class="step">
+          <h3>Start the Backend Server</h3>
+          <p>Navigate to the backend directory and run the setup script:</p>
+          <pre><code>cd implementation\backend
+setup_and_install.bat
+run_server.bat</code></pre>
+          <p>This will start the FastAPI server at <code>http://localhost:8000</code>.</p>
+        </div>
+        
+        <div class="step">
+          <h3>Install Frontend Dependencies</h3>
+          <p>Open a new command prompt or terminal window, navigate to the frontend directory:</p>
+          <pre><code>cd implementation\frontend
+npm install</code></pre>
+          <p>This will install all the required dependencies for the Next.js frontend.</p>
+        </div>
+        
+        <div class="step">
+          <h3>Start the Frontend Development Server</h3>
+          <p>In the frontend directory, run:</p>
+          <pre><code>npm run dev</code></pre>
+          <p>This will start the development server at <code>http://localhost:3000</code>.</p>
+        </div>
+        
+        <div class="step">
+          <h3>Access the Application</h3>
+          <p>Open your browser and navigate to <code>http://localhost:3000</code> to access NeuraForge.</p>
+          <p>Make sure both the backend (port 8000) and frontend (port 3000) servers are running simultaneously.</p>
+        </div>
+      </div>
+    </div>
+    
+    <div class="card">
+      <h2>Troubleshooting</h2>
+      
+      <h3>Backend Issues</h3>
+      <ul>
+        <li><strong>Import errors:</strong> Make sure you've run the setup script which installs the local package</li>
+        <li><strong>Ollama connection:</strong> Ensure Ollama is running with the LLaMA 3.1:8b model loaded</li>
+        <li><strong>Port conflict:</strong> If port 8000 is already in use, you can modify the port in server.py</li>
+      </ul>
+      
+      <h3>Frontend Issues</h3>
+      <ul>
+        <li><strong>Node.js errors:</strong> Make sure you have a compatible Node.js version (v18 or higher)</li>
+        <li><strong>API connection:</strong> Check that the backend server is running and accessible</li>
+        <li><strong>Build errors:</strong> Try deleting the .next folder and node_modules, then reinstall with npm install</li>
+      </ul>
+    </div>
+    
+    <div class="card">
+      <h2>Next Steps</h2>
+      <p>After successful installation, you can:</p>
+      <ul>
+        <li>Experiment with different LLM models in Ollama</li>
+        <li>Modify the frontend UI in the src/components directory</li>
+        <li>Extend the backend API functionality in the neuraforge/api directory</li>
+      </ul>
+      
+      <a href="http://localhost:3000" class="cta">Launch NeuraForge</a>
+    </div>
+  </div>
+  
+  <footer>
+    <p>&copy; 2023 NeuraForge Team. All rights reserved.</p>
+  </footer>
+</body>
+</html>

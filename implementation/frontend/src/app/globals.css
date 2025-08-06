@@ -1,0 +1,192 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Lexend:wght@300;400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+
+:root {
+  --foreground-rgb: 0, 0, 0;
+  --background-start-rgb: 248, 250, 252;
+  --background-end-rgb: 241, 245, 249;
+  --neural-primary: 124, 58, 237;
+  --forge-primary: 5, 150, 105;
+  --neural-accent: 244, 114, 182;
+  --forge-accent: 251, 191, 36;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --foreground-rgb: 255, 255, 255;
+    --background-start-rgb: 15, 23, 42;
+    --background-end-rgb: 30, 41, 59;
+  }
+}
+
+body {
+  color: rgb(var(--foreground-rgb));
+  background: linear-gradient(
+      to bottom,
+      transparent,
+      rgb(var(--background-end-rgb))
+    )
+    rgb(var(--background-start-rgb));
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+  overflow-x: hidden;
+}
+
+@layer components {
+  .glass-card {
+    @apply bg-white/80 dark:bg-gray-900/80 backdrop-blur-md rounded-xl shadow-glass border border-gray-100 dark:border-gray-800;
+  }
+  
+  .btn-primary {
+    @apply bg-gradient-to-r from-neural-main to-neural-dark hover:from-neural-dark hover:to-neural-darker text-white font-medium px-4 py-2 rounded-lg shadow-md transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-neural-light focus:ring-opacity-50;
+  }
+  
+  .btn-secondary {
+    @apply bg-white dark:bg-gray-800 text-neural-main dark:text-white border border-neural-light/30 hover:border-neural-light font-medium px-4 py-2 rounded-lg shadow-sm transition-all duration-200 focus:outline-none focus:ring-2 focus:ring-neural-light focus:ring-opacity-30;
+  }
+  
+  .input-primary {
+    @apply flex-1 border border-gray-200 dark:border-gray-700 rounded-lg px-4 py-3 bg-white dark:bg-gray-800 shadow-inner focus:outline-none focus:ring-2 focus:ring-neural-light/50 transition-all duration-200;
+  }
+
+  .animate-in {
+    @apply opacity-0;
+    animation: fadeIn 0.5s ease-out forwards;
+  }
+
+  /* Message animations */
+  .message-user {
+    animation: slideInRight 0.3s ease-out forwards;
+  }
+  
+  .message-assistant {
+    animation: slideInLeft 0.3s ease-out forwards;
+  }
+
+  /* Gradient text */
+  .gradient-text {
+    @apply text-transparent bg-clip-text bg-gradient-to-r from-neural-main to-forge-main;
+    animation: gradientMove 3s ease infinite;
+    background-size: 200% auto;
+  }
+  
+  /* Pulse animation for elements */
+  .pulse-animation {
+    animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+  }
+
+  /* Floating animation for containers */
+  .float-animation {
+    animation: float 6s ease-in-out infinite;
+  }
+  
+  /* Neural pattern background */
+  .neural-pattern {
+    background-image: url('/neural-pattern.svg');
+    background-repeat: repeat;
+    background-size: 80px 80px;
+    @apply bg-opacity-5 dark:bg-opacity-10;
+  }
+  
+  /* Typing indicator */
+  .typing-indicator span {
+    width: 8px;
+    height: 8px;
+    margin: 0 1px;
+    background-color: currentColor;
+    border-radius: 50%;
+    display: inline-block;
+    opacity: 0.4;
+  }
+  
+  .typing-indicator span:nth-child(1) {
+    animation: bouncing 1s infinite 0.2s;
+  }
+  .typing-indicator span:nth-child(2) {
+    animation: bouncing 1s infinite 0.4s;
+  }
+  .typing-indicator span:nth-child(3) {
+    animation: bouncing 1s infinite 0.6s;
+  }
+  
+  /* Glass morphism for containers */
+  .glassmorphism {
+    @apply bg-white/40 dark:bg-gray-900/40;
+    backdrop-filter: blur(12px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 0 8px 32px rgba(31, 38, 135, 0.15);
+  }
+  
+  /* Shadow for messages */
+  .shadow-message {
+    box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.1);
+  }
+  
+  /* Neural network inspired background animation */
+  .neural-bg {
+    position: relative;
+    overflow: hidden;
+  }
+  
+  .neural-bg::before {
+    content: '';
+    position: absolute;
+    top: -50%;
+    left: -50%;
+    width: 200%;
+    height: 200%;
+    background: radial-gradient(circle, rgba(var(--neural-primary), 0.1) 1px, transparent 1px),
+                radial-gradient(circle, rgba(var(--forge-primary), 0.1) 1px, transparent 1px);
+    background-size: 40px 40px;
+    background-position: 0 0, 20px 20px;
+    transform: rotate(30deg);
+    animation: patternShift 60s linear infinite;
+    z-index: -1;
+    opacity: 0.5;
+  }
+}
+
+/* Animation keyframes */
+@keyframes fadeIn {
+  0% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+@keyframes slideInRight {
+  0% { transform: translateX(20px); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes slideInLeft {
+  0% { transform: translateX(-20px); opacity: 0; }
+  100% { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes gradientMove {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.7; }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes bouncing {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-5px); }
+}
+
+@keyframes patternShift {
+  0% { transform: rotate(30deg) translateY(0); }
+  50% { transform: rotate(60deg) translateY(-20px); }
+  100% { transform: rotate(30deg) translateY(0); }
+}
