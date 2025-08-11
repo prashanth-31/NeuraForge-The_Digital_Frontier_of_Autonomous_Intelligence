@@ -1,116 +1,53 @@
-"""Creative Agent for NeuraForge.
+"""CreativeAgent: ideation, copywriting, and imaginative tasks."""
+from __future__ import annotations
 
-This module implements a specialized agent for handling creative tasks,
-including content generation, writing, storytelling, and creative problem-solving.
-"""
-
-import logging
-from typing import Dict, List, Optional, Any, Union
-
-from langchain.llms.base import BaseLLM
-from langchain.callbacks.base import BaseCallbackHandler
+from typing import Any, Dict
 
 from .base_agent import BaseAgent, AgentInput, AgentOutput
+from langchain.tools import BaseTool
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
+from ..tools import similar_meaning_tool, rhymes_tool
 
-logger = logging.getLogger(__name__)
+REACT_PROMPT = PromptTemplate(
+    input_variables=["input", "tool_names", "tools"],
+    template=(
+        "You are a creative writing assistant. Use tools when helpful.\n"
+        "Available tools: {tool_names}\n"
+        "{tools}\n"
+        "Creative Brief: {input}\n"
+        "Follow the ReAct format:\nThought: ...\nAction: one of [{tool_names}]\nAction Input: <args as JSON>\nObservation: ...\n... (repeat up to 5 steps)\nFinal Answer: <your answer>\n"
+    ),
+)
+
 
 class CreativeAgent(BaseAgent):
-    """Specialized agent for creative and generative tasks."""
-    
-    def __init__(
-        self, 
-        agent_id: str,
-        llm: BaseLLM,
-        callbacks: List[BaseCallbackHandler] = None
-    ):
-        """Initialize the creative agent.
-        
-        Args:
-            agent_id: Unique identifier for the agent
-            llm: The language model to use
-            callbacks: Optional list of callback handlers
-        """
-        # Creative agent-specific prompt template
-        prompt_template = """
-        You are a Creative Agent specializing in content generation, writing, and creative problem-solving.
-        Your goal is to provide imaginative, original, and engaging content.
-        
-        You excel at:
-        - Generating creative writing (stories, poems, scripts)
-        - Brainstorming innovative ideas and solutions
-        - Crafting engaging marketing and communication content
-        - Adapting writing style to different tones and audiences
-        - Providing creative perspectives on problems
-        
-        Always prioritize originality and creativity while maintaining coherence and purpose.
-        
-        Chat history:
-        {chat_history}
-        
-        Human: {input}
-        Creative Agent:
-        """
-        
+    def __init__(self, agent_id: str, llm, callbacks=None) -> None:
         super().__init__(
             agent_id=agent_id,
             agent_name="Creative Agent",
             agent_type="creative",
             llm=llm,
-            prompt_template=prompt_template,
-            callbacks=callbacks
+            callbacks=callbacks,
+            system_prompt=(
+                "You are a creative writing assistant."
+                " Offer imaginative, engaging ideas with clear structure."
+            ),
         )
-        
-        # Creative-specific tools could be added here
-        # self.tools.append(metaphor_generator)
-        # self.tools.append(story_structure_tool)
-        
-        logger.info(f"Creative Agent initialized with ID: {agent_id}")
-    
+        tools: list[BaseTool] = [similar_meaning_tool, rhymes_tool]
+        agent = create_react_agent(self.llm, tools, REACT_PROMPT)
+        self.executor = AgentExecutor(agent=agent, tools=tools, max_iterations=5, verbose=False)
+
     async def process(self, agent_input: AgentInput) -> AgentOutput:
-        """Process the input and generate a creative response.
-        
-        Args:
-            agent_input: The input to process
-            
-        Returns:
-            AgentOutput: The creative agent's response
-        """
-        # Extract the latest user message
-        user_messages = [msg["content"] for msg in agent_input.messages if msg["role"] == "user"]
-        if not user_messages:
+        prompt = agent_input.messages[-1]["content"] if agent_input.messages else ""
+        try:
+            result = await self.executor.ainvoke({"input": prompt})
+            answer = result.get("output") or result
+            md = {"used_tools": [t.name for t in self.executor.tools]}
+            return AgentOutput(content=str(answer), confidence_score=0.85, metadata=md)
+        except Exception as e:
             return AgentOutput(
-                content="I don't see any creative tasks. How can I help you with content creation or creative thinking?",
-                agent_info="Creative Agent: Specialized in creative writing and innovative thinking",
-                confidence_score=0.9
+                content=f"Creative agent error: {str(e)}",
+                confidence_score=0.0,
+                metadata={"error": str(e)},
             )
-        
-        latest_user_message = user_messages[-1]
-        
-        # Format chat history for context
-        chat_history = self._format_chat_history(agent_input.messages[:-1])  # Exclude the latest message
-        
-        # Process with LLM
-        response = await self.chain.arun(
-            input=latest_user_message,
-            chat_history=chat_history
-        )
-        
-        # Calculate confidence score
-        confidence_score = self._calculate_confidence(response)
-        
-        # Special adjustment for creative agent confidence
-        # Creative agents should be more confident on creative requests
-        if any(keyword in latest_user_message.lower() for keyword in 
-               ["write", "create", "generate", "design", "story", "poem", "creative", "imagine", "brainstorm"]):
-            confidence_score = min(0.95, confidence_score + 0.1)
-        
-        return AgentOutput(
-            content=response,
-            agent_info="Creative Agent: Specialized in creative writing and innovative thinking",
-            confidence_score=confidence_score,
-            metadata={
-                "agent_type": "creative",
-                "query_type": "generative",
-                "tools_used": []  # Will be populated when tools are implemented
-            }
-        )

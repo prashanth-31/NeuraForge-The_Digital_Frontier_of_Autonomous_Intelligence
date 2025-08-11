@@ -19,5 +19,13 @@ qdrant-client
 
 # LLM integration
 ollama
+langchain-ollama
+
+# HTTP clients and retries
+httpx
+tenacity
+
+# HTML parsing for web scraping
+beautifulsoup4
 
 # Note: Dependencies will be automatically resolved by pip

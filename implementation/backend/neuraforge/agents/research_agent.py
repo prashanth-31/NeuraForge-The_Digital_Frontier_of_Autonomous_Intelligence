@@ -1,117 +1,110 @@
-"""Research Agent for NeuraForge.
+"""ResearchAgent: focuses on factual queries and retrieval-like responses."""
+from __future__ import annotations
 
-This module implements a specialized agent for handling research-related tasks,
-including factual information retrieval, data analysis, and academic research.
-"""
-
-import logging
-from typing import Dict, List, Optional, Any, Union
-
-from langchain.llms.base import BaseLLM
-from langchain.callbacks.base import BaseCallbackHandler
+from typing import Any, Dict
+from datetime import datetime, timezone
 
 from .base_agent import BaseAgent, AgentInput, AgentOutput
+from langchain.tools import BaseTool
+from langchain.agents import AgentExecutor, create_react_agent
+from langchain_core.prompts import PromptTemplate
+from ..tools import (
+    wikipedia_summary_tool,
+    arxiv_search_tool,
+    crossref_search_tool,
+    papers_search_tool,
+    web_scrape_tool,
+    web_search_tool,
+)
 
-logger = logging.getLogger(__name__)
+REACT_PROMPT = PromptTemplate(
+    input_variables=["input", "tool_names", "tools", "today"],
+    template=(
+        "You are a precise research assistant. Today is {today}.\n"
+        "Always use tools for factual or recent data.\n"
+    "If the query asks for papers, arXiv results, citations, or 'latest', you MUST first use arxiv_search.\n"
+    "If the user provides a URL or asks to summarize a web page/site, use web_scrape.\n"
+    "If the query is open-ended or asks for the latest info, first use web_search to find sources, then web_scrape top results.\n"
+        "Do not fabricate papers or links. Do NOT say you can't provide real-time information—browse instead using the tools.\n"
+        "\nAvailable tools: {tool_names}\n"
+        "{tools}\n"
+        "Question: {input}\n"
+        "Follow the ReAct format strictly:\n"
+        "Thought: Decide if a tool is needed.\n"
+        "Action: one of [{tool_names}]\n"
+        "Action Input: <args as JSON>\n"
+        "Observation: <tool output>\n"
+        "... (repeat up to 5 steps)\n"
+        "Final Answer: A concise, up-to-date answer using verified data with 2-4 citations (titles + direct URLs). Start with 'As of {today}, ...'.\n"
+    ),
+)
+
 
 class ResearchAgent(BaseAgent):
-    """Specialized agent for research and factual information tasks."""
-    
-    def __init__(
-        self, 
-        agent_id: str,
-        llm: BaseLLM,
-        callbacks: List[BaseCallbackHandler] = None
-    ):
-        """Initialize the research agent.
-        
-        Args:
-            agent_id: Unique identifier for the agent
-            llm: The language model to use
-            callbacks: Optional list of callback handlers
-        """
-        # Research agent-specific prompt template
-        prompt_template = """
-        You are a Research Agent specializing in factual information, data analysis, and scholarly knowledge.
-        Your goal is to provide accurate, well-sourced information on any topic.
-        
-        You excel at:
-        - Finding and presenting factual information
-        - Analyzing data and explaining trends
-        - Summarizing research papers and academic content
-        - Providing balanced perspectives on complex topics
-        - Citing sources and maintaining academic integrity
-        
-        When you don't know something, acknowledge it rather than making up information.
-        Always prioritize accuracy over speculation.
-        
-        Chat history:
-        {chat_history}
-        
-        Human: {input}
-        Research Agent:
-        """
-        
+    def __init__(self, agent_id: str, llm, callbacks=None) -> None:
         super().__init__(
             agent_id=agent_id,
             agent_name="Research Agent",
             agent_type="research",
             llm=llm,
-            prompt_template=prompt_template,
-            callbacks=callbacks
+            callbacks=callbacks,
+            system_prompt=(
+                "You are a precise research assistant."
+                " Answer with accurate facts, cite assumptions, and avoid speculation."
+            ),
         )
-        
-        # Research-specific tools could be added here
-        # self.tools.append(web_search_tool)
-        # self.tools.append(academic_database_tool)
-        
-        logger.info(f"Research Agent initialized with ID: {agent_id}")
-    
+        tools: list[BaseTool] = [
+            wikipedia_summary_tool,
+            arxiv_search_tool,
+            crossref_search_tool,
+            papers_search_tool,
+            web_scrape_tool,
+            web_search_tool,
+        ]
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        prompt_with_date = REACT_PROMPT.partial(today=today_str)
+        agent = create_react_agent(self.llm, tools, prompt_with_date)
+        self.executor = AgentExecutor(agent=agent, tools=tools, max_iterations=5, verbose=False)
+
     async def process(self, agent_input: AgentInput) -> AgentOutput:
-        """Process the input and generate a research-focused response.
-        
-        Args:
-            agent_input: The input to process
-            
-        Returns:
-            AgentOutput: The research agent's response
-        """
-        # Extract the latest user message
-        user_messages = [msg["content"] for msg in agent_input.messages if msg["role"] == "user"]
-        if not user_messages:
-            return AgentOutput(
-                content="I don't see any questions to research. How can I help you with your research needs?",
-                agent_info="Research Agent: Specialized in factual information and data analysis",
-                confidence_score=0.9
+        question = agent_input.messages[-1]["content"] if agent_input.messages else ""
+        # Prefer tools when papers=true metadata is set
+        force_papers = False
+        try:
+            force_papers = bool((agent_input.metadata or {}).get("papers"))
+        except Exception:
+            force_papers = False
+        ql = question.lower()
+        if force_papers or any(k in ql for k in ["arxiv", "paper", "papers", "latest", "rag", "retrieval-augmented"]):
+            question = f"{question}\n\nTool hint: Use papers_search (and/or arxiv_search) to fetch current papers before answering."
+        # If a URL is present, hint to use web_scrape
+        if any(ql.count(proto) for proto in ["http://", "https://"]):
+            question = f"{question}\n\nTool hint: Use web_scrape to extract factual content from the URL before answering."
+        # If it's open-ended and time-sensitive, hint to search then scrape
+        if any(
+            k in ql for k in [
+                "latest",
+                "news",
+                "update",
+                "today",
+                "release",
+                "launch",
+                "announce",
+                "timeline",
+                "date",
+            ]
+        ) and "http" not in ql:
+            question = (
+                f"{question}\n\nTool hint: Use web_search to find 2-3 relevant sources, then web_scrape to verify details before the final answer."
             )
-        
-        latest_user_message = user_messages[-1]
-        
-        # Format chat history for context
-        chat_history = self._format_chat_history(agent_input.messages[:-1])  # Exclude the latest message
-        
-        # Process with LLM
-        response = await self.chain.arun(
-            input=latest_user_message,
-            chat_history=chat_history
-        )
-        
-        # Calculate confidence score
-        confidence_score = self._calculate_confidence(response)
-        
-        # Special adjustment for research agent confidence
-        # Research agents should be more confident on factual questions
-        if any(keyword in latest_user_message.lower() for keyword in 
-               ["what is", "define", "explain", "who", "when", "where", "why", "how does", "statistics"]):
-            confidence_score = min(0.95, confidence_score + 0.1)
-        
-        return AgentOutput(
-            content=response,
-            agent_info="Research Agent: Specialized in factual information and data analysis",
-            confidence_score=confidence_score,
-            metadata={
-                "agent_type": "research",
-                "query_type": "informational",
-                "tools_used": []  # Will be populated when tools are implemented
-            }
-        )
+        try:
+            result = await self.executor.ainvoke({"input": question})
+            answer = result.get("output") or result
+            md = {"used_tools": [t.name for t in self.executor.tools]}
+            return AgentOutput(content=str(answer), confidence_score=0.9, metadata=md)
+        except Exception as e:
+            return AgentOutput(
+                content=f"Research agent error: {str(e)}",
+                confidence_score=0.0,
+                metadata={"error": str(e)},
+            )

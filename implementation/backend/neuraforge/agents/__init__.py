@@ -1,6 +1,6 @@
-"""Agent module for NeuraForge.
+"""Agents package for NeuraForge.
 
-This module provides specialized agents for different domains and tasks.
+Exposes the base agent interfaces and specialized agents used by the task orchestrator.
 """
 
 from .base_agent import BaseAgent, AgentInput, AgentOutput
@@ -10,11 +10,11 @@ from .financial_agent import FinancialAgent
 from .enterprise_agent import EnterpriseAgent
 
 __all__ = [
-    'BaseAgent',
-    'AgentInput',
-    'AgentOutput',
-    'ResearchAgent',
-    'CreativeAgent',
-    'FinancialAgent',
-    'EnterpriseAgent',
+    "BaseAgent",
+    "AgentInput",
+    "AgentOutput",
+    "ResearchAgent",
+    "CreativeAgent",
+    "FinancialAgent",
+    "EnterpriseAgent",
 ]

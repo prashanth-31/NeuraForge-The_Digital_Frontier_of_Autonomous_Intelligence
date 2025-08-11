@@ -158,12 +158,32 @@ class TaskOrchestrator:
             raise HTTPException(status_code=400, detail="No user messages found in task")
         
         latest_user_message = user_messages[-1]
+        lower_msg = latest_user_message.lower()
+        has_url = ("http://" in lower_msg) or ("https://" in lower_msg)
+        time_keywords = [
+            "latest",
+            "today",
+            "breaking",
+            "release",
+            "launch",
+            "announce",
+            "news",
+            "timeline",
+            "date",
+            "update",
+        ]
+        is_time_sensitive = any(k in lower_msg for k in time_keywords)
         
         # Route the task to the appropriate agent
         try:
             # First determine which agent should handle this task
-            router_result = self.router_chain.route(latest_user_message)
-            selected_agent_type = router_result.get("destination", "enterprise").lower()
+            # Pre-route override: force research for URLs or time-sensitive queries
+            if has_url or is_time_sensitive:
+                selected_agent_type = "research"
+                router_result = {"destination": "research", "confidence": 0.9, "reasoning": "Time-sensitive/URL override"}
+            else:
+                router_result = self.router_chain.route(latest_user_message)
+                selected_agent_type = router_result.get("destination", "enterprise").lower()
             confidence = float(router_result.get("confidence", 0.7))
             reasoning = router_result.get("reasoning", "Default routing")
             

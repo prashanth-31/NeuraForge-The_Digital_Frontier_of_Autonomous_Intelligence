@@ -1,7 +1,5 @@
-import { Badge } from "@/components/ui/badge";
 import { Card } from "@/components/ui/card";
-import { Brain, Search, Palette, TrendingUp, Building, User } from "lucide-react";
-import { cn } from "@/lib/utils";
+import { Brain, User } from "lucide-react";
 import { motion } from "framer-motion";
 
 export interface Agent {
@@ -14,35 +12,13 @@ export interface Agent {
   metadata?: string[];
 }
 
-const agentIcons = {
-  research: Search,
-  creative: Palette,
-  finance: TrendingUp,
-  enterprise: Building,
-};
-
-const agentColors = {
-  research: 'agent-research',
-  creative: 'agent-creative', 
-  finance: 'agent-finance',
-  enterprise: 'agent-enterprise',
-};
-
-const agentDescriptions = {
-  research: 'Specialized in factual information and data analysis',
-  creative: 'Specialized in creative content and innovative thinking',
-  finance: 'Specialized in financial analysis and planning',
-  enterprise: 'Specialized in business strategy and operations',
-};
-
 interface AgentBubbleProps {
   agent: Agent;
   isUserMessage?: boolean;
 }
 
 export const AgentBubble = ({ agent, isUserMessage = false }: AgentBubbleProps) => {
-  const Icon = isUserMessage ? User : agentIcons[agent.type] || Brain;
-  const colorClass = !isUserMessage ? agentColors[agent.type] : '';
+  const Icon = isUserMessage ? User : Brain;
   
   const bubbleVariants = {
     hidden: { opacity: 0, y: 20 },
@@ -88,47 +64,11 @@ export const AgentBubble = ({ agent, isUserMessage = false }: AgentBubbleProps) 
       animate="visible"
       variants={bubbleVariants}
     >
-      <div className={cn(
-        "w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 border",
-        agent.type === 'research' && "bg-agent-research/10 border-agent-research/20",
-        agent.type === 'creative' && "bg-agent-creative/10 border-agent-creative/20",
-        agent.type === 'finance' && "bg-agent-finance/10 border-agent-finance/20",
-        agent.type === 'enterprise' && "bg-agent-enterprise/10 border-agent-enterprise/20"
-      )}>
-        <Icon className={cn(
-          "w-5 h-5",
-          agent.type === 'research' && "text-agent-research",
-          agent.type === 'creative' && "text-agent-creative",
-          agent.type === 'finance' && "text-agent-finance",
-          agent.type === 'enterprise' && "text-agent-enterprise"
-        )} />
+      <div className="w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 border bg-muted/30 border-border/50">
+        <Icon className="w-5 h-5 text-primary" />
       </div>
       
       <div className="flex-1 space-y-2">
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="font-medium text-foreground">{agent.name}</span>
-          <Badge 
-            variant="secondary" 
-            className={cn(
-              "text-xs px-2 py-0.5 border",
-              agent.type === 'research' && "bg-agent-research/10 text-agent-research border-agent-research/20",
-              agent.type === 'creative' && "bg-agent-creative/10 text-agent-creative border-agent-creative/20",
-              agent.type === 'finance' && "bg-agent-finance/10 text-agent-finance border-agent-finance/20",
-              agent.type === 'enterprise' && "bg-agent-enterprise/10 text-agent-enterprise border-agent-enterprise/20"
-            )}
-          >
-            {agent.confidence}% confidence
-          </Badge>
-          <Badge variant="outline" className="text-xs hidden sm:inline-flex">
-            {agentDescriptions[agent.type] || 'NeuraForge Assistant'}
-          </Badge>
-          {agent.metadata?.map((tag, index) => (
-            <Badge key={index} variant="outline" className="text-xs">
-              {tag}
-            </Badge>
-          ))}
-        </div>
-        
         <Card className="p-4 bg-card border border-border/50 shadow-sm hover:shadow-md transition-shadow duration-200">
           <p className="text-card-foreground whitespace-pre-line">{agent.response}</p>
         </Card>
