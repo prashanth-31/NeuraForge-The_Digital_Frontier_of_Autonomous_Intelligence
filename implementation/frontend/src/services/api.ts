@@ -173,7 +173,7 @@ export class NeuraForgeAPI {
       confidence: response.agent?.confidence ? Math.round(response.agent.confidence * 100) : 95,
       status: 'complete',
       response: response.content,
-      metadata: response.metadata ? Object.keys(response.metadata) : undefined
+      metadata: response.metadata || undefined
     };
   }
 

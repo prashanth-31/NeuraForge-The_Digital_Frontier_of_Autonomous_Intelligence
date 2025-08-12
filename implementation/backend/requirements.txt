@@ -28,4 +28,13 @@ tenacity
 # HTML parsing for web scraping
 beautifulsoup4
 
+# Optional JS rendering for scraping (enable if you plan to use render_js=True)
+playwright
+
+# Web search backend for DuckDuckGoSearchRun
+duckduckgo-search
+
+# Testing
+pytest
+
 # Note: Dependencies will be automatically resolved by pip

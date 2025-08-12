@@ -1,6 +1,7 @@
 """NeuraForge backend server entry point."""
 
 import os
+import logging
 
 import uvicorn
 from dotenv import load_dotenv
@@ -11,6 +12,7 @@ from neuraforge.api import app
 load_dotenv()
 
 if __name__ == "__main__":
+    logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"), format="[%(asctime)s] %(levelname)s %(name)s: %(message)s")
     # Get configuration from environment variables
     # Use 127.0.0.1 for local development (direct browser access)
     # Use 0.0.0.0 only if you need to access the API from other devices on your network

@@ -9,7 +9,7 @@ export interface Agent {
   confidence: number;
   status: 'active' | 'thinking' | 'complete' | 'idle';
   response?: string;
-  metadata?: string[];
+  metadata?: string[] | Record<string, any>;
 }
 
 interface AgentBubbleProps {
@@ -69,8 +69,31 @@ export const AgentBubble = ({ agent, isUserMessage = false }: AgentBubbleProps) 
       </div>
       
       <div className="flex-1 space-y-2">
-        <Card className="p-4 bg-card border border-border/50 shadow-sm hover:shadow-md transition-shadow duration-200">
+        <Card className="p-4 space-y-3 bg-card border border-border/50 shadow-sm hover:shadow-md transition-shadow duration-200">
           <p className="text-card-foreground whitespace-pre-line">{agent.response}</p>
+          {agent.metadata && typeof agent.metadata === 'object' && !Array.isArray(agent.metadata) && (
+            <div className="pt-2 border-t border-border/30 text-xs space-y-1">
+              {'citations' in agent.metadata && Array.isArray((agent.metadata as any).citations) && (
+                <div>
+                  <span className="font-semibold">Sources:</span>
+                  <ul className="list-disc ml-4 mt-1 space-y-0.5">
+                    {(agent.metadata as any).citations.slice(0,4).map((c:string, i:number) => (
+                      <li key={i} className="truncate"><a href={c} target="_blank" rel="noopener noreferrer" className="text-primary underline">{c}</a></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {'used_tools' in agent.metadata && Array.isArray((agent.metadata as any).used_tools) && (
+                <div className="text-muted-foreground">Tools: {(agent.metadata as any).used_tools.join(', ')}</div>
+              )}
+              {'autobrowse' in agent.metadata && (agent.metadata as any).autobrowse && (
+                <div className="text-green-600 dark:text-green-400">Auto-browsed ✅</div>
+              )}
+              {'autobrowse_skipped' in agent.metadata && (agent.metadata as any).autobrowse_skipped && (
+                <div className="text-yellow-600 dark:text-yellow-400">Auto-browse skipped (fallback)</div>
+              )}
+            </div>
+          )}
         </Card>
         
         {agent.status === 'thinking' && (
