@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from ..services.memory import HybridMemoryService
 from ..services.llm import LLMService
+from ..services.memory import HybridMemoryService
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from ..services.retrieval import ContextAssembler
 
 
 class Tool(Protocol):
@@ -18,6 +21,7 @@ class Tool(Protocol):
 class AgentContext:
     memory: HybridMemoryService
     llm: LLMService
+    context: "ContextAssembler | None" = None
 
 
 class BaseAgent(Protocol):

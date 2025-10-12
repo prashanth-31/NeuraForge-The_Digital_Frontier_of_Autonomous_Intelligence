@@ -1,4 +1,4 @@
-implementation/backend/myenv/
+implementation/backend/.venv/
 implementation/frontend/node_modules/
 implementation/Ollama
 

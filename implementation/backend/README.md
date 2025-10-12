@@ -40,6 +40,7 @@ Adjust the secrets and connection strings as needed for your local setup.
 ### 3. Run services locally
 
 ```powershell
+poetry run alembic upgrade head
 poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -49,6 +50,8 @@ Optional: bring up the full stack with Docker Compose from the repository root.
 cd ..
 docker compose up --build
 ```
+
+`docker compose` automatically runs migrations on container startup; rerun `poetry run alembic upgrade head` locally whenever models change.
 
 ### 4. Run tests & quality gates
 

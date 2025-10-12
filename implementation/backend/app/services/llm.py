@@ -94,7 +94,20 @@ class LLMService:
 
 def _extract_content(result: Any) -> str:
     if isinstance(result, AIMessage):
-        return result.content
+        content = result.content
+        if isinstance(content, list):
+            # Join list elements as string, handling dicts if present
+            return " ".join(
+                str(item) if not isinstance(item, dict) else str(item)
+                for item in content
+            )
+        return str(content)
     if hasattr(result, "content"):
-        return str(result.content)
+        content = result.content
+        if isinstance(content, list):
+            return " ".join(
+                str(item) if not isinstance(item, dict) else str(item)
+                for item in content
+            )
+        return str(content)
     return str(result)

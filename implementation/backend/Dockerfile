@@ -12,7 +12,8 @@ RUN apt-get update \
 RUN curl -sSL https://install.python-poetry.org | python - \
     && ln -s /root/.local/bin/poetry /usr/local/bin/poetry
 
-COPY pyproject.toml poetry.lock* README.md ./
+COPY pyproject.toml poetry.lock* README.md alembic.ini ./
+COPY alembic ./alembic
 
 RUN poetry install --no-interaction --no-ansi --only main
 

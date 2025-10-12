@@ -42,6 +42,37 @@ class ObservabilitySettings(BaseModel):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
 
 
+class MemorySettings(BaseModel):
+    read_preference: Literal["cache-first", "store-first", "cache-only", "store-only"] = "cache-first"
+    working_memory_ttl: int = Field(600, ge=1)
+    ephemeral_ttl: int = Field(600, ge=1)
+    batch_size: int = Field(50, ge=1)
+    redis_namespace: str = Field("neuraforge", min_length=1)
+
+
+class EmbeddingSettings(BaseModel):
+    default_model: str = Field("all-MiniLM-L6-v2", min_length=1)
+    fallback_model: str = Field("nomic-embed-text", min_length=1)
+    cache_namespace: str = Field("neuraforge:embedding", min_length=1)
+    cache_ttl_seconds: int = Field(86_400, ge=0)
+    preferred_dimension: int | None = Field(None, ge=1, description="Optional expected vector dimension.")
+    cache_enabled: bool = Field(True)
+
+
+class RetrievalSettings(BaseModel):
+    semantic_limit: int = Field(5, ge=1)
+    episodic_limit: int = Field(5, ge=0)
+    max_context_chars: int = Field(2_000, ge=200)
+    relevance_threshold: float = Field(0.0, ge=0.0)
+
+
+class ConsolidationSettings(BaseModel):
+    enabled: bool = Field(False)
+    interval_seconds: int = Field(300, ge=30)
+    batch_size: int = Field(25, ge=1)
+    max_tasks: int = Field(100, ge=1)
+
+
 class Settings(BaseSettings):
     environment: Literal["local", "test", "production"] = Field("local")
     api_v1_prefix: str = Field("/api/v1")
@@ -51,7 +82,11 @@ class Settings(BaseSettings):
     qdrant: QdrantSettings
     ollama: OllamaSettings
     auth: AuthSettings
-    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)
+    observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)  # type: ignore[arg-type]
+    memory: MemorySettings = Field(default_factory=MemorySettings)  # type: ignore[arg-type]
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)  # type: ignore[arg-type]
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)  # type: ignore[arg-type]
+    consolidation: ConsolidationSettings = Field(default_factory=ConsolidationSettings)  # type: ignore[arg-type]
 
     backend_base_url: str = Field("http://localhost:8000")
 

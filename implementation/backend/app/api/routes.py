@@ -19,8 +19,10 @@ from ..core.logging import get_logger
 from ..dependencies import get_hybrid_memory, get_task_queue
 from ..orchestration.graph import Orchestrator
 from ..schemas.tasks import TaskRequest, TaskResponse, TaskResult
+from ..services.embedding import EmbeddingService
 from ..services.llm import LLMService
 from ..services.memory import HybridMemoryService
+from ..services.retrieval import ContextAssembler, RetrievalService
 
 logger = get_logger(name=__name__)
 
@@ -77,9 +79,24 @@ async def submit_task(
                 }
                 await memory.store_ephemeral_memory(task_id, {"result": failure})
                 return
-            context = AgentContext(memory=memory, llm=llm_service)
-            result = await orchestrator.route_task(state, context=context)
-            await memory.store_ephemeral_memory(task_id, {"result": result})
+            embedding_service: EmbeddingService | None = None
+            context_assembler: ContextAssembler | None = None
+            try:
+                embedding_service = EmbeddingService.from_settings(settings, memory_service=memory)
+                retrieval_service = RetrievalService.from_settings(settings, memory=memory, embedder=embedding_service)
+                context_assembler = ContextAssembler(retrieval=retrieval_service)
+            except Exception as exc:  # pragma: no cover - embedding optional
+                logger.warning("embedding_initialization_failed", error=str(exc))
+                embedding_service = None
+                context_assembler = None
+
+            try:
+                agent_context = AgentContext(memory=memory, llm=llm_service, context=context_assembler)
+                result = await orchestrator.route_task(state, context=agent_context)
+                await memory.store_ephemeral_memory(task_id, {"result": result})
+            finally:
+                if embedding_service is not None:
+                    await embedding_service.aclose()
 
     await queue.enqueue(_job)
     return TaskResponse(task_id=task_id, status="queued")
@@ -146,9 +163,20 @@ async def submit_task_stream(
                         )
                         return
 
-                    context = AgentContext(memory=memory, llm=llm_service)
+                    embedding_service: EmbeddingService | None = None
+                    context_assembler: ContextAssembler | None = None
                     try:
-                        result = await orchestrator.route_task(state, context=context, progress_cb=progress)
+                        embedding_service = EmbeddingService.from_settings(settings, memory_service=memory)
+                        retrieval_service = RetrievalService.from_settings(settings, memory=memory, embedder=embedding_service)
+                        context_assembler = ContextAssembler(retrieval=retrieval_service)
+                    except Exception as exc:  # pragma: no cover - optional fallback
+                        logger.warning("embedding_initialization_failed", error=str(exc))
+                        embedding_service = None
+                        context_assembler = None
+
+                    try:
+                        agent_context = AgentContext(memory=memory, llm=llm_service, context=context_assembler)
+                        result = await orchestrator.route_task(state, context=agent_context, progress_cb=progress)
                     except Exception as exc:  # pragma: no cover - surfaced via SSE
                         failure = {
                             **state,
@@ -162,6 +190,9 @@ async def submit_task_stream(
                             {"task_id": task_id, "error": failure["error"], "timestamp": failure["timestamp"]},
                         )
                         return
+                    finally:
+                        if embedding_service is not None:
+                            await embedding_service.aclose()
 
                     await memory.store_ephemeral_memory(task_id, {"result": result})
                     await emit(

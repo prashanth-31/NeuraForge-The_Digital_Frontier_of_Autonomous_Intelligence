@@ -11,6 +11,7 @@ langchain-community
 langchain-ollama
 langgraph
 sentence-transformers
+httpx
 python-jose[cryptography]
 python-multipart
 numpy

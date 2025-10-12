@@ -1,24 +1,26 @@
 import { createClient } from "@supabase/supabase-js";
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { createMockSupabaseClient } from "./mockClient";
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string | undefined;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
 
-if (!supabaseUrl || !supabaseAnonKey) {
-  // eslint-disable-next-line no-console
-  console.warn(
-    "Supabase credentials are not configured. Authentication features will be disabled until VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set.",
-  );
-}
+let supabase: SupabaseClient;
 
-export const supabase = createClient(
-  supabaseUrl ?? "https://placeholder.supabase.co",
-  supabaseAnonKey ?? "public-anon-key",
-  {
+if (!supabaseUrl || !supabaseAnonKey) {
+  console.warn(
+    "Supabase credentials are not configured. Falling back to mock authentication. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to use Supabase.",
+  );
+  supabase = createMockSupabaseClient();
+} else {
+  supabase = createClient(supabaseUrl, supabaseAnonKey, {
     auth: {
       persistSession: true,
       autoRefreshToken: true,
       detectSessionInUrl: false,
       storageKey: "neuraforge-auth",
     },
-  },
-);
+  });
+}
+
+export { supabase };

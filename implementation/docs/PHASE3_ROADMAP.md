@@ -53,6 +53,7 @@ Deliver a production-ready hybrid memory subsystem that fuses Redis (working mem
 - Update `README` and architecture docs with memory service usage guides and diagrams.
 - Provide sample notebooks or scripts demonstrating memory ingest + retrieval.
 - Add onboarding checklist covering environment variables, local service startup, and test execution.
+- Publish consolidated history of Phase 1–3 deliverables and outcomes (`docs/PHASE_HISTORY.md`).
 
 ## Timeline (Indicative, 3 Sprints)
 - **Sprint 1**: Provision services, finalize schemas, scaffold repositories, baseline tests.
