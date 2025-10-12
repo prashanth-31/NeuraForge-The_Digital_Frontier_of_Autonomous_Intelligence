@@ -4,7 +4,7 @@ from functools import lru_cache
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, PostgresDsn, RedisDsn
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class RedisSettings(BaseModel):
@@ -55,10 +55,11 @@ class Settings(BaseSettings):
 
     backend_base_url: str = Field("http://localhost:8000")
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        env_nested_delimiter = "__"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        env_nested_delimiter="__",
+    )
 
 
 @lru_cache(maxsize=1)

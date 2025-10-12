@@ -6,6 +6,7 @@ from fastapi import Depends
 
 from .core.config import Settings, get_settings
 from .queue.manager import TaskQueueManager
+from .services.llm import LLMService
 from .services.memory import HybridMemoryService
 
 
@@ -27,3 +28,9 @@ async def get_hybrid_memory(
     memory = HybridMemoryService.from_settings(settings)
     async with memory.lifecycle():
         yield memory
+
+
+async def get_llm_service(
+    settings: Settings = Depends(get_settings),
+) -> AsyncIterator[LLMService]:
+    yield LLMService.from_settings(settings)

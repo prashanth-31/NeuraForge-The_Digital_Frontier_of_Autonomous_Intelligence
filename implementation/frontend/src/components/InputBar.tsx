@@ -1,13 +1,24 @@
 import { Send, Paperclip, Settings2 } from "lucide-react";
+import { useState } from "react";
+
+import { useTaskContext } from "@/contexts/TaskContext";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
-import { useState } from "react";
 
 const InputBar = () => {
   const [message, setMessage] = useState("");
+  const { submitTask, isStreaming } = useTaskContext();
+
+  const handleSubmit = async () => {
+    if (!message.trim()) {
+      return;
+    }
+    await submitTask(message);
+    setMessage("");
+  };
 
   return (
-    <div className="fixed bottom-0 left-56 right-72 bg-card border-t border-border shadow-soft z-40">
+    <div className="border-t border-border bg-card shadow-soft sticky bottom-0">
       <div className="p-4">
         <div className="max-w-4xl mx-auto">
           <div className="relative flex items-end gap-3">
@@ -20,29 +31,32 @@ const InputBar = () => {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    // Handle send
+                    void handleSubmit();
                   }
                 }}
+                disabled={isStreaming}
               />
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
-                <Button variant="ghost" size="icon" className="h-8 w-8">
+                <Button type="button" variant="ghost" size="icon" className="h-8 w-8" disabled>
                   <Paperclip className="h-4 w-4" />
                 </Button>
-                <Button variant="ghost" size="icon" className="h-8 w-8">
+                <Button type="button" variant="ghost" size="icon" className="h-8 w-8" disabled>
                   <Settings2 className="h-4 w-4" />
                 </Button>
               </div>
             </div>
-            <Button 
+            <Button
               size="icon"
               className="h-[52px] w-[52px] bg-primary hover:bg-primary/90 transition-smooth hover:scale-105"
+              onClick={() => void handleSubmit()}
+              disabled={isStreaming}
             >
               <Send className="h-5 w-5" />
             </Button>
           </div>
           <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
             <span>Shift + Enter for new line • Enter to send</span>
-            <span>Collaborative Mode</span>
+            <span>{isStreaming ? "Agents responding..." : "Collaborative Mode"}</span>
           </div>
         </div>
       </div>

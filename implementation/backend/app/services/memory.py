@@ -36,6 +36,7 @@ class HybridMemoryService:
         self._pg_pool = pg_pool
         self._qdrant = qdrant_client
         self._exit_stack = AsyncExitStack()
+        self._ephemeral_cache: dict[str, dict[str, Any]] = {}
 
     @classmethod
     def from_settings(cls, settings: Settings) -> "HybridMemoryService":
@@ -91,17 +92,35 @@ class HybridMemoryService:
     async def store_ephemeral_memory(self, task_id: str, payload: dict[str, Any]) -> None:
         if self._pg_pool is None:
             logger.warning("postgres_not_configured", task_id=task_id)
-            return
-        async with self._pg_pool.acquire() as connection:
-            await connection.execute(
-                """
-                INSERT INTO agent_task_log(task_id, payload)
-                VALUES($1, $2::jsonb)
-                ON CONFLICT (task_id) DO UPDATE SET payload = EXCLUDED.payload
-                """,
-                task_id,
-                payload,
-            )
+        else:
+            async with self._pg_pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO agent_task_log(task_id, payload)
+                    VALUES($1, $2::jsonb)
+                    ON CONFLICT (task_id) DO UPDATE SET payload = EXCLUDED.payload
+                    """,
+                    task_id,
+                    payload,
+                )
+        self._ephemeral_cache[task_id] = payload
+
+    async def fetch_ephemeral_memory(self, task_id: str) -> dict[str, Any] | None:
+        if self._pg_pool is not None:
+            async with self._pg_pool.acquire() as connection:
+                record = await connection.fetchrow(
+                    """
+                    SELECT payload
+                    FROM agent_task_log
+                    WHERE task_id = $1
+                    """,
+                    task_id,
+                )
+                if record is not None and "payload" in record:
+                    payload = record["payload"]
+                    self._ephemeral_cache[task_id] = payload
+                    return payload
+        return self._ephemeral_cache.get(task_id)
 
     async def store_semantic_memory(
         self,

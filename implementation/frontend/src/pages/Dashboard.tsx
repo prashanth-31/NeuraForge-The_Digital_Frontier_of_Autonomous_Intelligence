@@ -1,5 +1,4 @@
-import Navbar from "@/components/Navbar";
-import Sidebar from "@/components/Sidebar";
+import AppLayout from "@/components/AppLayout";
 import { Card } from "@/components/ui/card";
 import { Activity, Brain, Zap, Users } from "lucide-react";
 
@@ -12,18 +11,15 @@ const stats = [
 
 const Dashboard = () => {
   return (
-    <div className="min-h-screen bg-background">
-      <Navbar />
-      <Sidebar />
-      
-      <main className="fixed top-16 left-56 right-0 bottom-0 overflow-auto p-6">
-        <div className="max-w-7xl mx-auto">
-          <div className="mb-8">
+    <AppLayout>
+      <div className="flex-1 overflow-auto p-6">
+        <div className="max-w-7xl mx-auto space-y-8">
+          <div>
             <h1 className="text-3xl font-bold text-foreground mb-2">Dashboard</h1>
             <p className="text-muted-foreground">Monitor your AI collaboration metrics</p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
             {stats.map((stat) => (
               <Card key={stat.label} className="p-6 hover-lift transition-smooth">
                 <div className="flex items-center justify-between mb-4">
@@ -35,7 +31,7 @@ const Dashboard = () => {
             ))}
           </div>
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-16">
             <Card className="p-6">
               <h3 className="text-lg font-semibold mb-4 text-foreground">Recent Activity</h3>
               <div className="space-y-4">
@@ -44,7 +40,9 @@ const Dashboard = () => {
                     <div className="w-2 h-2 rounded-full bg-primary mt-2" />
                     <div>
                       <p className="text-sm font-medium text-foreground">Agent collaboration completed</p>
-                      <p className="text-xs text-muted-foreground mt-1">{i} hour{i > 1 ? 's' : ''} ago</p>
+                      <p className="text-xs text-muted-foreground mt-1">
+                        {i} hour{i > 1 ? "s" : ""} ago
+                      </p>
                     </div>
                   </div>
                 ))}
@@ -70,8 +68,8 @@ const Dashboard = () => {
             </Card>
           </div>
         </div>
-      </main>
-    </div>
+      </div>
+    </AppLayout>
   );
 };
 

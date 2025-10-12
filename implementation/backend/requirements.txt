@@ -8,6 +8,7 @@ asyncpg
 qdrant-client[grpc]
 langchain
 langchain-community
+langchain-ollama
 langgraph
 sentence-transformers
 python-jose[cryptography]
@@ -16,3 +17,4 @@ numpy
 scipy
 pandas
 python-dotenv
+prometheus-client

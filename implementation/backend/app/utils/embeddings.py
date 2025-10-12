@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Iterable, Sequence
+from typing import Sequence
 
 try:
     from sentence_transformers import SentenceTransformer

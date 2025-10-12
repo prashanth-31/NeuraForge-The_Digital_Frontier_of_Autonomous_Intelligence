@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from ..services.memory import HybridMemoryService
+from ..services.llm import LLMService
 
 
 class Tool(Protocol):
@@ -16,6 +17,7 @@ class Tool(Protocol):
 @dataclass
 class AgentContext:
     memory: HybridMemoryService
+    llm: LLMService
 
 
 class BaseAgent(Protocol):
