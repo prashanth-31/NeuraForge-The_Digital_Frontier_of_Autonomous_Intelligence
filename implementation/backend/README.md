@@ -1,101 +1,85 @@
 # NeuraForge Backend
 
-This is the backend component of the NeuraForge project, implementing the AI agent framework, API, and core functionality.
+Foundational FastAPI + LangGraph service scaffold with hybrid memory, task queue, and observability hooks.
 
-## Project Structure
+## Features
 
-```
-backend/
-├── myenv/                  # Python virtual environment
-├── neuraforge/             # Main package
-│   ├── __init__.py
-│   ├── api/                # API implementation
-│   │   ├── __init__.py
-│   │   └── main.py
-│   ├── llm/                # LLM integration
-│   │   ├── __init__.py
-│   │   └── core.py
-│   └── agents/             # Agent implementations
-│       ├── __init__.py
-│       ├── base_agent.py
-│       ├── creative_agent.py
-│       ├── enterprise_agent.py
-│       ├── financial_agent.py
-│       └── research_agent.py
-├── pyproject.toml          # Project metadata
-├── requirements.txt        # Dependencies
-├── server.py               # Main server entry point
-├── setup.py                # Package setup script
-└── tests/                  # Test suite
-    ├── __init__.py
-    ├── conftest.py
-    ├── test_orchestration.py
-    └── agents/             # Agent-specific tests
-        ├── __init__.py
-        ├── test_financial_agent.py
-        ├── test_financial_agent_manual.py
-        ├── test_financial_agent_with_tools.py
-        └── simple_financial_test.py
-```
+- **Config management** via Pydantic Settings with `.env` support.
+- **FastAPI** REST interface with `/api/v1` namespace and health checks.
+- **Task queue** abstraction (Redis-backed when available, in-memory fallback).
+- **Hybrid memory** service stubs for Redis, PostgreSQL, and Qdrant.
+- **Agent scaffolding** for research, finance, creative, and enterprise domains.
+- **Benchmark harness** for agent evaluation metrics.
+- **Security baseline** with JWT helpers.
+- **Docker Compose** stack wiring all infrastructure dependencies locally.
 
 ## Getting Started
 
-1. Activate the virtual environment:
-   ```
-   myenv\Scripts\activate
-   ```
+### 1. Install dependencies
 
-2. Install dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+```powershell
+poetry install
+```
 
-3. Start the server:
-   ```
-   python server.py
-   ```
+Or with raw `pip` inside `.venv`:
 
-## Testing
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+```
 
-For detailed testing instructions, see [tests/README.md](tests/README.md).
+### 2. Copy environment template
 
-Quick testing options:
+```powershell
+Copy-Item .env.example .env
+```
 
-1. Setup the test environment:
-   ```
-   setup_tests.bat
-   ```
+Adjust the secrets and connection strings as needed for your local setup.
 
-2. Run Financial Agent tests:
-   ```
-   cd tests/agents
-   run_financial_tests.bat
-   ```
+### 3. Run services locally
 
-3. Run a simple Financial Agent test with minimal dependencies:
-   ```
-   python tests/agents/simple_financial_test.py
-   ```
+```powershell
+poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
 
-## Financial Agent
+Optional: bring up the full stack with Docker Compose from the repository root.
 
-The Financial Agent is a specialized agent for financial analysis, planning, and investment guidance. It can:
+```powershell
+cd ..
+docker compose up --build
+```
 
-1. Answer questions about financial concepts and strategies
-2. Provide budgeting and financial planning advice
-3. Offer general investment guidance
-4. Perform financial calculations (in the enhanced version)
+### 4. Run tests & quality gates
 
-For detailed testing instructions for the Financial Agent, see [tests/agents/README_FINANCIAL_TESTING.md](tests/agents/README_FINANCIAL_TESTING.md).
+```powershell
+poetry run pytest
+poetry run ruff check app
+```
 
-## Dependencies
+Coverage (optional):
 
-- Python 3.9+
-- FastAPI
-- LangChain
-- Ollama (for LLM access)
-- Uvicorn (ASGI server)
+```powershell
+poetry run coverage run -m pytest
+poetry run coverage report
+```
 
-## Configuration
+## Architecture Notes
 
-The backend can be configured through environment variables or a `.env` file.
+- `app/core` contains configuration, logging, and security utilities.
+- `app/services` encapsulates memory providers with graceful degradation when backing services are offline.
+- `app/queue` hosts the asynchronous task queue manager, which automatically uses Redis when configured.
+- `app/orchestration` is prepared for LangGraph-based agent routing.
+- `app/monitoring` includes a benchmarking helper for evaluating agent outputs.
+- Tests cover API health and benchmark summarization as a baseline; expand with integration tests as features grow.
+
+## Phase 1 Checklist
+
+- [x] Poetry-based project scaffolding with pinned dependencies.
+- [x] FastAPI service stub (`app/main.py`) and health endpoint.
+- [x] Structured logging configured via `structlog`.
+- [x] Task queue + hybrid memory abstractions with graceful fallbacks.
+- [x] Docker Compose stack for Redis, PostgreSQL, Qdrant, Ollama, Prometheus, Grafana.
+- [x] Baseline tests (`tests/test_health.py`) and lint command (`ruff`).
+
+See `docs/architecture.md` for the full multi-phase roadmap.

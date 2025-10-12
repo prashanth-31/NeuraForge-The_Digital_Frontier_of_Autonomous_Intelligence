@@ -1,103 +1,73 @@
-# NeuraForge: Advanced Multi-Agent Interface
+# Welcome to your Lovable project
 
-## Overview
-NeuraForge is a powerful multi-agent AI interface that enables seamless interaction between various specialized AI agents. The system combines a modern, responsive UI with robust functionality to create an intuitive and efficient user experience.
+## Project info
 
-## Features
-- **Multi-Agent Collaboration**: Orchestrate interactions between specialized AI agents (Research, Creative, Finance, Enterprise)
-- **Responsive Design**: Full mobile/tablet support with optimized sidebar interactions
-- **Theme Support**: Light and dark mode with automatic system preference detection
-- **Interactive UI**: Modern animations and transitions with Framer Motion
-- **Advanced Chat Interface**: Message reactions, copy functionality, and regeneration options
-- **Memory Integration**: Persistent context across conversations
-- **Enhanced Input**: Rich text input with suggestions and advanced settings
-- **Real-time WebSocket Communication**: Streaming responses from the backend API
-- **API Integration**: Seamless connection with the NeuraForge backend services
+**URL**: https://lovable.dev/projects/b15277ae-a5c1-426d-93c0-1726a9c08dfb
 
-## Tech Stack
-- **Frontend**: React, TypeScript, Tailwind CSS, Shadcn UI
-- **State Management**: React Query for server state, React hooks for local state
-- **Styling**: Tailwind CSS with custom theme variables
-- **Animation**: Framer Motion for fluid UI transitions
-- **Routing**: React Router for navigation
-- **API Communication**: Fetch API and WebSockets for backend integration
+## How can I edit this code?
 
-## Getting Started
+There are several ways of editing your application.
 
-### Prerequisites
+**Use Lovable**
 
-- Node.js 18+ (Latest LTS recommended)
-- npm or yarn
-- NeuraForge backend running (see backend setup instructions)
+Simply visit the [Lovable Project](https://lovable.dev/projects/b15277ae-a5c1-426d-93c0-1726a9c08dfb) and start prompting.
 
-### Installation
+Changes made via Lovable will be committed automatically to this repo.
 
-1. Navigate to the frontend directory:
+**Use your preferred IDE**
 
-```bash
-cd implementation/frontend
-```
+If you want to work locally using your own IDE, you can clone this repo and push changes. Pushed changes will also be reflected in Lovable.
 
-2. Install dependencies:
+The only requirement is having Node.js & npm installed - [install with nvm](https://github.com/nvm-sh/nvm#installing-and-updating)
 
-```bash
-npm install
-# or
-yarn
-```
+Follow these steps:
 
-3. Create a `.env.local` file with your backend API URL:
+```sh
+# Step 1: Clone the repository using the project's Git URL.
+git clone <YOUR_GIT_URL>
 
-```
-VITE_API_URL=http://localhost:8000
-```
+# Step 2: Navigate to the project directory.
+cd <YOUR_PROJECT_NAME>
 
-### Development
+# Step 3: Install the necessary dependencies.
+npm i
 
-Start the development server:
-
-```bash
+# Step 4: Start the development server with auto-reloading and an instant preview.
 npm run dev
-# or
-yarn dev
 ```
 
-The application will be available at [http://localhost:3000](http://localhost:3000).
+**Edit a file directly in GitHub**
 
-## Architecture
+- Navigate to the desired file(s).
+- Click the "Edit" button (pencil icon) at the top right of the file view.
+- Make your changes and commit the changes.
 
-### Key Components
+**Use GitHub Codespaces**
 
-- **ChatInterface**: Main chat interface with message display
-- **PromptInput**: Input area for sending messages with options
-- **AgentBubble**: Message bubble with agent information
-- **AgentSidebar**: Shows active agents and their status
-- **ConversationHistory**: Displays past conversations
-- **API Service**: Handles communication with the backend
+- Navigate to the main page of your repository.
+- Click on the "Code" button (green button) near the top right.
+- Select the "Codespaces" tab.
+- Click on "New codespace" to launch a new Codespace environment.
+- Edit files directly within the Codespace and commit and push your changes once you're done.
 
-### API Integration
+## What technologies are used for this project?
 
-The frontend communicates with the NeuraForge backend API:
+This project is built with:
 
-- REST API for stateless requests
-- WebSocket for real-time message streaming
-- Environment variables for configuration
+- Vite
+- TypeScript
+- React
+- shadcn-ui
+- Tailwind CSS
 
-## Troubleshooting
+## How can I deploy this project?
 
-### Connection Issues
+Simply open [Lovable](https://lovable.dev/projects/b15277ae-a5c1-426d-93c0-1726a9c08dfb) and click on Share -> Publish.
 
-If you experience connection issues:
+## Can I connect a custom domain to my Lovable project?
 
-1. Ensure the backend server is running
-2. Check your `.env.local` configuration
-3. Verify network connectivity and CORS settings
-4. Check the browser console for any error messages
+Yes, you can!
 
-### Build Problems
+To connect a domain, navigate to Project > Settings > Domains and click Connect Domain.
 
-If you encounter build issues:
-
-1. Clear node_modules and reinstall dependencies
-2. Ensure you're using a compatible Node.js version
-3. Check for TypeScript errors in your code
+Read more here: [Setting up a custom domain](https://docs.lovable.dev/features/custom-domain#custom-domain)

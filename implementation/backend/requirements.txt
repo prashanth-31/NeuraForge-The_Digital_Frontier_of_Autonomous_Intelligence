@@ -1,40 +1,18 @@
-# Requirements file for Python 3.9 environment
-# Core dependencies
-pydantic
-python-dotenv
-
-# LangChain packages
-langchain
-langchain-core
-langchain-community
-
-# Web framework
 fastapi
-uvicorn
-
-# Database and storage
+uvicorn[standard]
+pydantic
+pydantic-settings
+structlog
 redis
-psycopg2-binary
-qdrant-client
-
-# LLM integration
-ollama
-langchain-ollama
-
-# HTTP clients and retries
-httpx
-tenacity
-
-# HTML parsing for web scraping
-beautifulsoup4
-
-# Optional JS rendering for scraping (enable if you plan to use render_js=True)
-playwright
-
-# Web search backend for DuckDuckGoSearchRun
-duckduckgo-search
-
-# Testing
-pytest
-
-# Note: Dependencies will be automatically resolved by pip
+asyncpg
+qdrant-client[grpc]
+langchain
+langchain-community
+langgraph
+sentence-transformers
+python-jose[cryptography]
+python-multipart
+numpy
+scipy
+pandas
+python-dotenv
