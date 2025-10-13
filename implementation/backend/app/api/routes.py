@@ -23,6 +23,8 @@ from ..services.embedding import EmbeddingService
 from ..services.llm import LLMService
 from ..services.memory import HybridMemoryService
 from ..services.retrieval import ContextAssembler, RetrievalService
+from ..services.scoring import ConfidenceScorer
+from ..services.tools import get_tool_service
 
 logger = get_logger(name=__name__)
 
@@ -40,6 +42,21 @@ def _format_sse(event: str, data: dict[str, Any]) -> str:
 @router.get("/health", tags=["health"])
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@router.get("/diagnostics/mcp", tags=["diagnostics"])
+async def mcp_diagnostics(settings: Settings = Depends(get_settings)) -> dict[str, Any]:
+    if not settings.tools.mcp.enabled:
+        return {"enabled": False}
+    try:
+        service = await get_tool_service()
+    except Exception as exc:  # pragma: no cover - returns snapshot on failure
+        return {
+            "enabled": True,
+            "status": "unavailable",
+            "error": str(exc),
+        }
+    return service.get_diagnostics()
 
 
 @router.post("/submit_task", response_model=TaskResponse, tags=["tasks"])
@@ -91,7 +108,20 @@ async def submit_task(
                 context_assembler = None
 
             try:
-                agent_context = AgentContext(memory=memory, llm=llm_service, context=context_assembler)
+                tool_service = None
+                if settings.tools.mcp.enabled:
+                    try:
+                        tool_service = await get_tool_service()
+                    except Exception as exc:  # pragma: no cover - optional tool layer
+                        logger.warning("tool_service_unavailable", error=str(exc))
+
+                agent_context = AgentContext(
+                    memory=memory,
+                    llm=llm_service,
+                    context=context_assembler,
+                    tools=tool_service,
+                    scorer=ConfidenceScorer(settings.scoring),
+                )
                 result = await orchestrator.route_task(state, context=agent_context)
                 await memory.store_ephemeral_memory(task_id, {"result": result})
             finally:
@@ -175,8 +205,41 @@ async def submit_task_stream(
                         context_assembler = None
 
                     try:
-                        agent_context = AgentContext(memory=memory, llm=llm_service, context=context_assembler)
-                        result = await orchestrator.route_task(state, context=agent_context, progress_cb=progress)
+                        tool_service = None
+                        if settings.tools.mcp.enabled:
+                            try:
+                                tool_service = await get_tool_service()
+                            except Exception as exc:  # pragma: no cover - optional tool layer
+                                logger.warning("tool_service_unavailable", error=str(exc))
+                        async def tool_event(payload: dict[str, Any]) -> None:
+                            event_payload = dict(payload)
+                            event_payload.setdefault("timestamp", _now_iso())
+                            event_payload["task_id"] = task_id
+                            await emit("tool_invocation", event_payload)
+
+                        async def run_agents(active_tools: Any | None) -> dict[str, Any]:
+                            agent_context = AgentContext(
+                                memory=memory,
+                                llm=llm_service,
+                                context=context_assembler,
+                                tools=active_tools,
+                                scorer=ConfidenceScorer(settings.scoring),
+                            )
+                            return await orchestrator.route_task(state, context=agent_context, progress_cb=progress)
+
+                        if tool_service is not None:
+                            await emit(
+                                "mcp_status",
+                                {
+                                    "task_id": task_id,
+                                    "timestamp": _now_iso(),
+                                    "status": tool_service.get_diagnostics(),
+                                },
+                            )
+                            async with tool_service.instrument(tool_event):
+                                result = await run_agents(tool_service)
+                        else:
+                            result = await run_agents(None)
                     except Exception as exc:  # pragma: no cover - surfaced via SSE
                         failure = {
                             **state,
@@ -241,13 +304,9 @@ async def get_task_history(
 
     formatted: list[TaskResult] = []
     for item in outputs:
-        raw_content = item.get("content", {})
-        if isinstance(raw_content, str):
-            content: dict[str, Any] = {"text": raw_content}
-        elif isinstance(raw_content, dict):
-            content = raw_content
-        else:
-            content = {"value": raw_content}
+        raw_content = item.get("summary") or item.get("content") or ""
+        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+        content: dict[str, Any] = {"text": raw_content, "metadata": metadata}
 
         formatted.append(
             TaskResult(

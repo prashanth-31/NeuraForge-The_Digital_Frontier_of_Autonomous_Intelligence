@@ -116,8 +116,13 @@ class ConsolidationJob:
             if isinstance(outputs, list) and outputs:
                 fragments: list[str] = []
                 for entry in outputs[-3:]:
-                    agent = entry.get("agent", "unknown") if isinstance(entry, dict) else "unknown"
-                    content = self._normalize_content(entry.get("content") if isinstance(entry, dict) else entry)
+                    if isinstance(entry, dict):
+                        agent = entry.get("agent", "unknown")
+                        content_value = entry.get("summary") or entry.get("content")
+                    else:
+                        agent = "unknown"
+                        content_value = entry
+                    content = self._normalize_content(content_value)
                     fragments.append(f"{agent}: {content}")
                 prompt = result.get("prompt") or payload.get("prompt") or ""
                 return f"Task {task_id}\nPrompt: {prompt}\n" + "\n".join(fragments)

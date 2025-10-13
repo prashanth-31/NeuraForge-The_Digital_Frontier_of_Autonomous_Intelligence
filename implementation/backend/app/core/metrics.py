@@ -58,6 +58,55 @@ CONTEXT_ASSEMBLY_CHARS = Histogram(
     labelnames=("agent",),
 )
 
+TOOL_INVOCATIONS_TOTAL = Counter(
+    "neuraforge_tool_invocations_total",
+    "Number of tool invocations per tool",
+    labelnames=("tool", "cached"),
+)
+
+TOOL_ERRORS_TOTAL = Counter(
+    "neuraforge_tool_errors_total",
+    "Tool invocation failures",
+    labelnames=("tool",),
+)
+
+TOOL_LATENCY_SECONDS = Histogram(
+    "neuraforge_tool_latency_seconds",
+    "Latency for tool invocations",
+    labelnames=("tool",),
+)
+
+MCP_REQUEST_TOTAL = Counter(
+    "neuraforge_mcp_request_total",
+    "Total MCP HTTP requests by endpoint and outcome",
+    labelnames=("method", "endpoint", "outcome"),
+)
+
+MCP_REQUEST_LATENCY_SECONDS = Histogram(
+    "neuraforge_mcp_request_latency_seconds",
+    "Latency for MCP HTTP requests",
+    labelnames=("method", "endpoint", "status"),
+)
+
+MCP_CIRCUIT_OPEN_TOTAL = Counter(
+    "neuraforge_mcp_circuit_open_total",
+    "Count of MCP circuit breaker blocks",
+    labelnames=("endpoint",),
+)
+
+MCP_CIRCUIT_TRIP_TOTAL = Counter(
+    "neuraforge_mcp_circuit_trip_total",
+    "Count of MCP circuit breaker trips",
+    labelnames=("endpoint",),
+)
+
+CONFIDENCE_COMPONENT_VALUE = Histogram(
+    "neuraforge_confidence_component_value",
+    "Observed component contributions to agent confidence scores",
+    labelnames=("agent", "component"),
+    buckets=(0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0),
+)
+
 
 def observe_agent_latency(*, agent: str, latency: float) -> None:
     AGENT_LATENCY_SECONDS.labels(agent=agent).observe(latency)
@@ -102,3 +151,31 @@ def bind_event_payload(agent: str, task_id: str, event: str, **extra: Any) -> di
     payload = {"agent": agent, "task_id": task_id, "event": event}
     payload.update(extra)
     return payload
+
+
+def observe_tool_invocation(*, tool: str, latency: float, cached: bool) -> None:
+    TOOL_INVOCATIONS_TOTAL.labels(tool=tool, cached=str(cached)).inc()
+    TOOL_LATENCY_SECONDS.labels(tool=tool).observe(latency)
+
+
+def increment_tool_error(*, tool: str) -> None:
+    TOOL_ERRORS_TOTAL.labels(tool=tool).inc()
+
+
+def observe_confidence_component(*, agent: str, component: str, value: float) -> None:
+    CONFIDENCE_COMPONENT_VALUE.labels(agent=agent, component=component).observe(value)
+
+
+def observe_mcp_request(*, method: str, endpoint: str, status: int | None, success: bool, latency: float) -> None:
+    status_label = str(status) if status is not None else "error"
+    outcome = "success" if success else "failure"
+    MCP_REQUEST_TOTAL.labels(method=method.upper(), endpoint=endpoint, outcome=outcome).inc()
+    MCP_REQUEST_LATENCY_SECONDS.labels(method=method.upper(), endpoint=endpoint, status=status_label).observe(latency)
+
+
+def increment_mcp_circuit_open(*, endpoint: str) -> None:
+    MCP_CIRCUIT_OPEN_TOTAL.labels(endpoint=endpoint).inc()
+
+
+def increment_mcp_circuit_trip(*, endpoint: str) -> None:
+    MCP_CIRCUIT_TRIP_TOTAL.labels(endpoint=endpoint).inc()

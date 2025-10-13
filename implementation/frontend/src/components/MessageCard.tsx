@@ -7,11 +7,36 @@ interface MessageCardProps {
   timestamp: string;
   agentName?: string;
   confidence?: number;
+  confidenceBreakdown?: Record<string, number>;
+  toolMetadata?: {
+    name?: string;
+    resolved?: string;
+    cached?: boolean;
+    latency?: number;
+  };
 }
 
-const MessageCard = ({ role, content, timestamp, agentName, confidence }: MessageCardProps) => {
+const COMPONENT_ORDER = ["base", "evidence", "tool_reliability", "self_assessment"];
+
+const MessageCard = ({
+  role,
+  content,
+  timestamp,
+  agentName,
+  confidence,
+  confidenceBreakdown,
+  toolMetadata,
+}: MessageCardProps) => {
   const isAssistant = role !== "user";
   const isSystem = role === "system";
+  const breakdownEntries = confidenceBreakdown
+    ? Object.entries(confidenceBreakdown).sort((a, b) => {
+        const left = COMPONENT_ORDER.indexOf(a[0]);
+        const right = COMPONENT_ORDER.indexOf(b[0]);
+        const fallback = COMPONENT_ORDER.length;
+        return (left === -1 ? fallback : left) - (right === -1 ? fallback : right);
+      })
+    : undefined;
 
   return (
     <div
@@ -53,6 +78,32 @@ const MessageCard = ({ role, content, timestamp, agentName, confidence }: Messag
         <div className="text-sm text-foreground/90 leading-relaxed whitespace-pre-wrap">
           {content}
         </div>
+        {breakdownEntries && (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {breakdownEntries.map(([key, value]) => (
+              <span
+                key={key}
+                className="text-[10px] uppercase tracking-wide bg-background/70 border border-border px-2 py-0.5 rounded-full text-muted-foreground"
+              >
+                {`${key.replace(/_/g, " ")}: ${(value * 100).toFixed(0)}%`}
+              </span>
+            ))}
+          </div>
+        )}
+        {toolMetadata && (
+          <div className="mt-3 text-[11px] text-muted-foreground flex flex-wrap gap-3">
+            {toolMetadata.name && <span>Tool: {toolMetadata.name}</span>}
+            {toolMetadata.resolved && toolMetadata.resolved !== toolMetadata.name && (
+              <span>Target: {toolMetadata.resolved}</span>
+            )}
+            {typeof toolMetadata.latency === "number" && (
+              <span>Latency: {(toolMetadata.latency * 1000).toFixed(0)} ms</span>
+            )}
+            {typeof toolMetadata.cached === "boolean" && (
+              <span>{toolMetadata.cached ? "Cached result" : "Live result"}</span>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );

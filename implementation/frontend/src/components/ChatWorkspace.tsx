@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 
 import { useTaskContext } from "@/contexts/TaskContext";
+import { emitWorkspaceState } from "@/lib/analytics";
 import { ScrollArea } from "./ui/scroll-area";
 import MessageCard from "./MessageCard";
 
@@ -10,6 +11,23 @@ const ChatWorkspace = () => {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: isStreaming ? "smooth" : "auto" });
+  }, [messages, isStreaming]);
+
+  useEffect(() => {
+    const lastMessage = messages[messages.length - 1];
+    emitWorkspaceState({
+      messageCount: messages.length,
+      isStreaming,
+      timestamp: new Date().toISOString(),
+      lastMessage: lastMessage
+        ? {
+            id: lastMessage.id,
+            role: lastMessage.role,
+            agentName: lastMessage.agentName,
+            confidence: lastMessage.confidence,
+          }
+        : undefined,
+    });
   }, [messages, isStreaming]);
 
   const hasMessages = messages.length > 0;

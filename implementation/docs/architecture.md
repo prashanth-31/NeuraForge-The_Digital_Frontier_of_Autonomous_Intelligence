@@ -39,7 +39,7 @@ graph TD
 6. **Hybrid Memory** (`backend/app/services/memory.py`): Unified interface to Redis (working memory), PostgreSQL (episodic logs), Qdrant (semantic vectors).
 7. **LLM Layer** (`backend/app/utils/embeddings.py`, LangChain integrations): Ollama-hosted LLaMA 3 for completions; Sentence Transformers for embedding generation.
 8. **Conflict Resolution** (`backend/app/orchestration/` roadmap): Confidence scoring, cross-validation, meta-agent synthesis using LangChain summarizers and NumPy weighting.
-9. **Observability & Benchmarking** (`backend/app/core/logging.py`, `backend/app/monitoring/`): Structlog-based JSON logging, Prometheus metrics export (future), Grafana dashboards, agent benchmarking harness.
+9. **Observability & Benchmarking** (`backend/app/core/logging.py`, `backend/app/monitoring/`): Structlog-based JSON logging, Prometheus metrics export (tool/agent/memory), Grafana dashboards, agent benchmarking harness.
 
 ## 3. Component Interactions
 
@@ -86,9 +86,10 @@ graph TD
 
 ## 5. Observability & Monitoring
 - **Logging**: Structured JSON logs via `structlog`, enriched with correlation IDs and task metadata.
-- **Metrics**: FastAPI routes expose Prometheus endpoints (to be implemented) for request latency, queue depth, agent success rates.
+- **Metrics**: Tool and MCP layers emit `neuraforge_tool_*` and `neuraforge_mcp_*` counters/histograms; API routes expose Prometheus endpoints for request latency, queue depth, and agent success rates.
 - **Dashboards**: Grafana visualizes metrics and benchmarks; local deployment avoids SaaS dependencies.
 - **Benchmarking Harness**: `monitoring/benchmark.py` aggregates agent evaluation runs for continuous assessment.
+- **Real-time Telemetry**: `/submit_task/stream` streams `tool_invocation` events alongside agent lifecycle updates, giving dashboards and notebooks live visibility into orchestration.
 
 ## 6. Security & Configuration
 - **Config Management**: Centralized in `core/config.py` using Pydantic settings with env-file support and nested namespaces.
@@ -117,6 +118,7 @@ graph TD
 
 ### Phase 4 – Agent Implementation (LangGraph Nodes)
 - Define agent capability contracts and register Research, Finance, Creative, Enterprise nodes.
+- Standardize request/response schemas via `app/schemas/agents.py` and maintain registry in `app/agents/contracts.py`.
 - Integrate domain-specific tools (e.g., DuckDuckGo, yfinance, transformer-based stylizer) with proper rate limiting.
 - Implement agent confidence scoring and output schemas.
 - Cover happy-path agent executions with fixtures/mocks.

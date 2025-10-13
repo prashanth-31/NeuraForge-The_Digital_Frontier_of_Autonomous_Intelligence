@@ -5,6 +5,9 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from ..services.llm import LLMService
 from ..services.memory import HybridMemoryService
+from ..services.scoring import ConfidenceScorer
+from ..services.tools import ToolService
+from ..schemas.agents import AgentCapability, AgentInput, AgentOutput
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from ..services.retrieval import ContextAssembler
@@ -22,10 +25,13 @@ class AgentContext:
     memory: HybridMemoryService
     llm: LLMService
     context: "ContextAssembler | None" = None
+    tools: ToolService | None = None
+    scorer: ConfidenceScorer | None = None
 
 
 class BaseAgent(Protocol):
     name: str
+    capability: AgentCapability
 
-    async def handle(self, task: dict[str, Any], *, context: AgentContext) -> dict[str, Any]:
+    async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         ...
