@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from prometheus_client import Counter, Histogram
+from datetime import datetime
+from typing import Iterable
+
+from prometheus_client import Counter, Gauge, Histogram
 
 AGENT_LATENCY_SECONDS = Histogram(
     "neuraforge_agent_execution_latency_seconds",
@@ -14,6 +17,98 @@ AGENT_EVENT_TOTAL = Counter(
     "neuraforge_agent_events_total",
     "Count of agent lifecycle events",
     labelnames=("agent", "event"),
+)
+
+ORCHESTRATOR_RUNS_TOTAL = Counter(
+    "neuraforge_orchestrator_runs_total",
+    "Total orchestrator runs by status",
+    labelnames=("entry_point", "status"),
+)
+
+ORCHESTRATOR_RUN_LATENCY_SECONDS = Histogram(
+    "neuraforge_orchestrator_run_latency_seconds",
+    "End-to-end orchestrator runtime",
+    labelnames=("entry_point",),
+    buckets=(0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, 900, float("inf")),
+)
+
+ORCHESTRATOR_ACTIVE_GAUGE = Gauge(
+    "neuraforge_orchestrator_runs_active",
+    "Active orchestrator runs in flight",
+    labelnames=("entry_point",),
+)
+
+NEGOTIATION_ROUNDS = Histogram(
+    "neuraforge_negotiation_rounds",
+    "Number of negotiation payloads considered per run",
+    labelnames=("strategy",),
+    buckets=(0, 1, 2, 3, 4, 5, 8, 13),
+)
+
+NEGOTIATION_CONSENSUS = Histogram(
+    "neuraforge_negotiation_consensus",
+    "Consensus score distribution",
+    labelnames=("strategy",),
+    buckets=(0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
+)
+
+GUARDRAIL_DECISIONS_TOTAL = Counter(
+    "neuraforge_guardrail_decisions_total",
+    "Guardrail decisions by outcome",
+    labelnames=("decision", "policy_id"),
+)
+
+ORCHESTRATOR_ESCALATIONS_TOTAL = Counter(
+    "neuraforge_orchestrator_escalations_total",
+    "Escalations raised by orchestrator guardrails",
+    labelnames=("policy_id",),
+)
+
+ORCHESTRATOR_SLA_EVENTS_TOTAL = Counter(
+    "neuraforge_orchestrator_sla_events_total",
+    "SLA compliance events",
+    labelnames=("category",),
+)
+
+ORCHESTRATOR_OUTCOME_GAUGE = Gauge(
+    "neuraforge_orchestrator_outcomes",
+    "Rolling orchestrator outcomes (1 for success, 0 for failure)",
+    labelnames=("task_id",),
+)
+
+ORCHESTRATOR_SUCCESS_RATE = Gauge(
+    "neuraforge_orchestrator_success_rate",
+    "Smoothed orchestrator success rate",
+)
+
+META_AGENT_RESOLUTION_LATENCY_SECONDS = Histogram(
+    "neuraforge_meta_agent_resolution_latency_seconds",
+    "Latency of meta-agent synthesis operations",
+    labelnames=("mode",),
+    buckets=(0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, float("inf")),
+)
+
+META_AGENT_DISPUTES_TOTAL = Counter(
+    "neuraforge_meta_agent_disputes_total",
+    "Count of disputes detected by the meta-agent",
+    labelnames=("severity",),
+)
+
+META_AGENT_OVERRIDES_TOTAL = Counter(
+    "neuraforge_meta_agent_overrides_total",
+    "Meta-agent actions that triggered human overrides",
+    labelnames=("action",),
+)
+
+REVIEW_TICKETS_GAUGE = Gauge(
+    "neuraforge_review_tickets",
+    "Current review ticket counts by status",
+    labelnames=("status",),
+)
+
+REVIEW_TICKETS_OPEN_GAUGE = Gauge(
+    "neuraforge_review_tickets_open",
+    "Open review tickets awaiting action.",
 )
 
 MEMORY_CACHE_HITS_TOTAL = Counter(
@@ -116,6 +211,43 @@ def increment_agent_event(*, agent: str, event: str) -> None:
     AGENT_EVENT_TOTAL.labels(agent=agent, event=event).inc()
 
 
+def mark_orchestrator_run_started(*, entry_point: str, task_id: str | None = None) -> None:
+    ORCHESTRATOR_ACTIVE_GAUGE.labels(entry_point=entry_point).inc()
+    ORCHESTRATOR_RUNS_TOTAL.labels(entry_point, "started").inc()
+    if task_id:
+        ORCHESTRATOR_OUTCOME_GAUGE.labels(task_id=task_id).set(0)
+
+
+def mark_orchestrator_run_completed(
+    *,
+    entry_point: str,
+    task_id: str | None,
+    status: str,
+    latency: float,
+) -> None:
+    ORCHESTRATOR_ACTIVE_GAUGE.labels(entry_point=entry_point).dec()
+    ORCHESTRATOR_RUNS_TOTAL.labels(entry_point, status).inc()
+    ORCHESTRATOR_RUN_LATENCY_SECONDS.labels(entry_point=entry_point).observe(latency)
+    if task_id:
+        ORCHESTRATOR_OUTCOME_GAUGE.labels(task_id=task_id).set(1 if status == "completed" else 0)
+
+
+def observe_negotiation_metrics(*, strategy: str, rounds: int, consensus: float | None) -> None:
+    NEGOTIATION_ROUNDS.labels(strategy=strategy).observe(rounds)
+    if consensus is not None:
+        NEGOTIATION_CONSENSUS.labels(strategy=strategy).observe(max(0.0, min(1.0, consensus)))
+
+
+def increment_guardrail_decision(*, decision: str, policy_id: str | None) -> None:
+    GUARDRAIL_DECISIONS_TOTAL.labels(decision=decision, policy_id=policy_id or "none").inc()
+    if decision in {"escalate", "review"}:
+        ORCHESTRATOR_ESCALATIONS_TOTAL.labels(policy_id=policy_id or "none").inc()
+
+
+def record_sla_event(*, category: str) -> None:
+    ORCHESTRATOR_SLA_EVENTS_TOTAL.labels(category=category).inc()
+
+
 def increment_cache_hit(*, layer: str) -> None:
     MEMORY_CACHE_HITS_TOTAL.labels(layer=layer).inc()
 
@@ -145,6 +277,32 @@ def increment_retrieval_results(*, source: str, count: int) -> None:
 
 def observe_context_chars(*, agent: str, length: int) -> None:
     CONTEXT_ASSEMBLY_CHARS.labels(agent=agent).observe(length)
+
+
+def observe_meta_resolution_latency(*, mode: str, latency: float) -> None:
+    META_AGENT_RESOLUTION_LATENCY_SECONDS.labels(mode=mode).observe(latency)
+
+
+def increment_meta_dispute(*, severity: str) -> None:
+    META_AGENT_DISPUTES_TOTAL.labels(severity=severity).inc()
+
+
+def increment_meta_override(*, action: str) -> None:
+    META_AGENT_OVERRIDES_TOTAL.labels(action=action).inc()
+
+
+def record_review_ticket_counts(
+    *,
+    open_count: int,
+    in_review: int,
+    resolved: int,
+    dismissed: int,
+) -> None:
+    REVIEW_TICKETS_GAUGE.labels(status="open").set(open_count)
+    REVIEW_TICKETS_GAUGE.labels(status="in_review").set(in_review)
+    REVIEW_TICKETS_GAUGE.labels(status="resolved").set(resolved)
+    REVIEW_TICKETS_GAUGE.labels(status="dismissed").set(dismissed)
+    REVIEW_TICKETS_OPEN_GAUGE.set(open_count)
 
 
 def bind_event_payload(agent: str, task_id: str, event: str, **extra: Any) -> dict[str, Any]:
@@ -179,3 +337,12 @@ def increment_mcp_circuit_open(*, endpoint: str) -> None:
 
 def increment_mcp_circuit_trip(*, endpoint: str) -> None:
     MCP_CIRCUIT_TRIP_TOTAL.labels(endpoint=endpoint).inc()
+
+
+def update_success_rate_from_history(results: Iterable[tuple[datetime, bool]], *, window: int = 50) -> None:
+    history = list(results)
+    if not history:
+        return
+    recent = history[-window:]
+    success_ratio = sum(1 for _, ok in recent if ok) / len(recent)
+    ORCHESTRATOR_SUCCESS_RATE.set(success_ratio)

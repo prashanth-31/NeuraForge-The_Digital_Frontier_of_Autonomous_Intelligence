@@ -5,6 +5,7 @@ pydantic-settings
 structlog
 redis
 asyncpg
+PyJWT
 qdrant-client[grpc]
 langchain
 langchain-community

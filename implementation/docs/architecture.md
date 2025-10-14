@@ -40,6 +40,7 @@ graph TD
 7. **LLM Layer** (`backend/app/utils/embeddings.py`, LangChain integrations): Ollama-hosted LLaMA 3 for completions; Sentence Transformers for embedding generation.
 8. **Conflict Resolution** (`backend/app/orchestration/` roadmap): Confidence scoring, cross-validation, meta-agent synthesis using LangChain summarizers and NumPy weighting.
 9. **Observability & Benchmarking** (`backend/app/core/logging.py`, `backend/app/monitoring/`): Structlog-based JSON logging, Prometheus metrics export (tool/agent/memory), Grafana dashboards, agent benchmarking harness.
+10. **Reviewer Operations** (`backend/app/orchestration/review.py`, `frontend/src/pages/Reviews.tsx`): Postgres-backed review store, JWT-secured reviewer console, async notifications, and observability assets dedicated to human-in-the-loop workflows.
 
 ## 3. Component Interactions
 
@@ -61,6 +62,7 @@ graph TD
 | Task Lifecycle | `docs/diagrams/task-lifecycle.png` | `docs/diagrams/task-lifecycle.svg` |
 | Agent Negotiation State | `docs/diagrams/agent-negotiation-state.png` | `docs/diagrams/agent-negotiation-state.svg` |
 | Memory Consolidation Sequence | `docs/diagrams/memory-consolidation-sequence.png` | `docs/diagrams/memory-consolidation-sequence.svg` |
+| Orchestrator Observability Map | _generate from_ `docs/diagrams/orchestrator-observability.mmd` | - |
 
 ### Request Lifecycle
 1. **User submits a task** via the frontend Socket.io client or REST endpoint.
@@ -86,10 +88,13 @@ graph TD
 
 ## 5. Observability & Monitoring
 - **Logging**: Structured JSON logs via `structlog`, enriched with correlation IDs and task metadata.
-- **Metrics**: Tool and MCP layers emit `neuraforge_tool_*` and `neuraforge_mcp_*` counters/histograms; API routes expose Prometheus endpoints for request latency, queue depth, and agent success rates.
-- **Dashboards**: Grafana visualizes metrics and benchmarks; local deployment avoids SaaS dependencies.
-- **Benchmarking Harness**: `monitoring/benchmark.py` aggregates agent evaluation runs for continuous assessment.
+- **Metrics**: Prometheus now captures orchestrator throughput, run latency, negotiation consensus, guardrail decisions, SLA adherence, and meta-agent synthesis telemetry (latency, dispute counts) via the `neuraforge_*` metric family in `app/core/metrics.py`. Phase 6 adds the `neuraforge_review_tickets` gauges that back reviewer workload dashboards and alerting.
+- **Alerts & Recording Rules**: `observability/rules/orchestrator_rules.yml` defines throughput rollups and alert thresholds for failure rate, guardrail escalations, and negotiation consensus degradation. `observability/rules/review_rules.yml` layers in open-queue and stalled-review alerts. Alerts are forwarded to Alertmanager (`observability/alertmanager/config.yml`), which ships them to the Pager proxy or downstream paging system.
+- **Grafana Provisioning**: Dashboards and datasources auto-provision from `observability/grafana/provisioning/`, and custom dashboard JSONs live under `observability/grafana/dashboards/`. The Phase 5 orchestrator dashboard and the new reviewer operations dashboard load automatically when Grafana starts inside Docker Compose.
+- **Benchmarking Harness**: `monitoring/benchmark.py` aggregates agent evaluation runs, while `orchestration/simulation.py` replays synthetic scenarios against the orchestrator for load testing. The GitHub Action workflows now cover the simulation harness and the meta-agent benchmark CLI (`.github/workflows/benchmark-ci.yml`) to guard against regressions.
+- **Developer Notebook**: `docs/notebooks/phase5_orchestration_demo.ipynb` provides an end-to-end walkthrough of a simulated negotiation run with captured metrics and summaries.
 - **Real-time Telemetry**: `/submit_task/stream` streams `tool_invocation` events alongside agent lifecycle updates, giving dashboards and notebooks live visibility into orchestration.
+- **Runbooks**: Meta-agent alerts are documented in `docs/observability/meta_agent_runbook.md`, covering dispute spikes, latency SLO breaches, and recommended remediation steps.
 
 ## 6. Security & Configuration
 - **Config Management**: Centralized in `core/config.py` using Pydantic settings with env-file support and nested namespaces.
@@ -132,7 +137,8 @@ graph TD
 ### Phase 6 – Conflict Resolution & Meta-Agent
 - Build meta-agent leveraging LangChain summarizers for synthesis.
 - Implement confidence weighting (NumPy/Scipy), cross-validation hooks, and dispute logging.
-- Expose explainability artifacts via `/history` endpoint.
+- Wire the meta-agent into the orchestrator lifecycle so every run records a synthesized resolution, escalation recommendation, and dispute metadata.
+- Expose explainability artifacts via `/history` and `/reports/{task_id}/dossier.{json|md}` endpoints, including standard decision dossiers.
 - Add regression tests covering conflicting agent outputs and synthesis results.
 
 ### Phase 7 – FastAPI Integration & Observability
@@ -149,7 +155,7 @@ backend/
  │   ├─ agents/              # Domain-specific agent implementations
  │   ├─ core/                # Config, logging, security primitives
  │   ├─ monitoring/          # Benchmarking and observability utilities
- │   ├─ orchestration/       # LangGraph workflows, conflict resolution
+ │   ├─ orchestration/       # LangGraph workflows, meta-agent synthesis, decision dossiers
  │   ├─ queue/               # Task queue manager (Redis + in-memory)
  │   ├─ schemas/             # Pydantic request/response models
  │   ├─ services/            # Hybrid memory, LLM adapters, external services
@@ -161,9 +167,15 @@ backend/
 ## 9. Non-Cloud Deployment Checklist
 - [ ] Install dependencies via Poetry/uv.
 - [ ] Start Ollama with LLaMA 3 model locally.
-- [ ] Launch Docker Compose stack for Redis, PostgreSQL, Qdrant, Prometheus, Grafana.
+- [ ] Launch Docker Compose stack for Redis, PostgreSQL, Qdrant, Prometheus, Grafana, and Alertmanager.
 - [ ] Run FastAPI app with `uvicorn app.main:app --reload`.
 - [ ] Start Next.js frontend dev server (`bun dev`).
 - [ ] Execute test suite (`pytest`).
+
+## 10. CI/CD & Staging Integration
+- **GitHub Actions Workflow**: `.github/workflows/phase5-observability.yml` runs on every push/PR, installing backend dependencies, executing the Phase 5 orchestration test suite, and performing a smoke run of the simulation harness.
+- **Compose Validation**: The workflow validates `docker-compose.yml` to ensure Prometheus, Grafana (with provisioning), and Alertmanager definitions stay healthy and publishes the Grafana dashboard JSON as a build artifact for staging environments.
+- **Staging Deployment**: Operations can `docker compose up prometheus grafana alertmanager` from `implementation/` to bring up the observability toolchain. Grafana auto-loads the Phase 5 dashboard, and Prometheus streams alerts to Alertmanager, which forwards notifications to the configured Pager/Webhook endpoint in `observability/alertmanager/config.yml` (set `PAGER_WEBHOOK_URL` in the environment or `.env` file to point at the real pager service).
+- **Simulation Harness in Pipelines**: The smoke test leverages `SimulationHarness` with a synthetic orchestrator to catch regressions in negotiation, guardrail, and reporting flows before deployment.
 
 This document will evolve as the implementation matures; treat it as the living source of truth for system architecture decisions.

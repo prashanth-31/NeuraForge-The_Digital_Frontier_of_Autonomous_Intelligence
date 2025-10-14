@@ -1,0 +1,21 @@
+groups:
+  - name: review-tickets
+    rules:
+      - alert: HighPendingReviews
+        expr: neuraforge_review_tickets{status="open"} > 5
+        for: 10m
+        labels:
+          severity: warning
+          team: reviewers
+        annotations:
+          summary: "High number of open review tickets"
+          description: "There are more than five open review tickets for longer than ten minutes. Consider assigning additional reviewers."
+      - alert: ReviewStuckInProgress
+        expr: increase(neuraforge_review_tickets{status="in_review"}[30m]) == 0 and neuraforge_review_tickets{status="in_review"} > 0
+        for: 30m
+        labels:
+          severity: critical
+          team: reviewers
+        annotations:
+          summary: "Review tickets stalled in progress"
+          description: "No review tickets have been completed in the last 30 minutes despite active in-review items. Investigate workflow bottlenecks."

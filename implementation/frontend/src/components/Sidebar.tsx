@@ -1,4 +1,4 @@
-import { LayoutDashboard, MessageSquare, BookOpen, Settings, ChevronLeft } from "lucide-react";
+import { LayoutDashboard, MessageSquare, BookOpen, Settings, ChevronLeft, ClipboardCheck } from "lucide-react";
 import { NavLink } from "react-router-dom";
 
 import { cn } from "@/lib/utils";
@@ -8,6 +8,7 @@ const menuItems = [
   { icon: LayoutDashboard, label: "Dashboard", to: "/dashboard" },
   { icon: MessageSquare, label: "Workspace", to: "/" },
   { icon: BookOpen, label: "Knowledge Base", to: "/knowledge" },
+  { icon: ClipboardCheck, label: "Reviews", to: "/reviews" },
   { icon: Settings, label: "Settings", to: "/settings" },
 ];
 

@@ -59,6 +59,7 @@ services:
       - "9090:9090"
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/rules:/etc/prometheus/rules:ro
     networks:
       - neuraforge-net
 
@@ -70,10 +71,28 @@ services:
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
     volumes:
       - grafana_data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/etc/grafana/dashboards:ro
     depends_on:
       - prometheus
+    networks:
+      - neuraforge-net
+
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: neuraforge-alertmanager
+    command:
+      - "--config.file=/etc/alertmanager/config.yml"
+      - "--config.expand-env"
+    volumes:
+      - ./observability/alertmanager/config.yml:/etc/alertmanager/config.yml:ro
+    ports:
+      - "9093:9093"
+    environment:
+      PAGER_WEBHOOK_URL: ${PAGER_WEBHOOK_URL:-http://pager-proxy:8080/alerts}
     networks:
       - neuraforge-net
 

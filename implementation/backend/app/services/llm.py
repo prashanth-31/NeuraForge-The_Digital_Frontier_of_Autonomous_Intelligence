@@ -91,6 +91,18 @@ class LLMService:
             return "LLM generation temporarily unavailable."
         return _extract_content(result)
 
+    async def moderate(self, text: str) -> dict[str, Any]:
+        """Lightweight moderation heuristic returning severity score."""
+        lowered = text.lower()
+        keywords = ["attack", "exploit", "classified", "leak", "self-harm", "violence"]
+        hits = [word for word in keywords if word in lowered]
+        severity = min(1.0, 0.2 * len(hits))
+        return {
+            "severity": severity,
+            "hits": hits,
+            "length": len(text),
+        }
+
 
 def _extract_content(result: Any) -> str:
     if isinstance(result, AIMessage):

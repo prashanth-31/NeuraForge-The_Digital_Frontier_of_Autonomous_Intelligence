@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Literal
+from typing import Any, Literal, Mapping
 
 from pydantic import BaseModel, Field, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -40,6 +40,8 @@ class AuthSettings(BaseModel):
     jwt_secret_key: str = Field("0" * 32, min_length=32)
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
     access_token_expire_minutes: int = Field(60, ge=1)
+    superuser_email: str | None = Field(default=None, description="Optional default superuser account.")
+    service_token: str | None = Field(default=None, description="Service token for internal automation workflows.")
 
 
 class ObservabilitySettings(BaseModel):
@@ -54,6 +56,70 @@ class MemorySettings(BaseModel):
     ephemeral_ttl: int = Field(600, ge=1)
     batch_size: int = Field(50, ge=1)
     redis_namespace: str = Field("neuraforge", min_length=1)
+
+
+class PlanningSettings(BaseModel):
+    enabled: bool = Field(True)
+    max_subtasks: int = Field(12, ge=1)
+    max_dependency_depth: int = Field(4, ge=1)
+    default_step_duration_minutes: int = Field(10, ge=1)
+    assignment_strategy: Literal["capability", "round_robin"] = "capability"
+
+
+class SchedulingSettings(BaseModel):
+    backend: Literal["asyncio", "celery"] = Field("asyncio")
+    max_concurrency: int = Field(3, ge=1)
+    default_retry_attempts: int = Field(3, ge=0)
+    base_backoff_seconds: float = Field(2.0, ge=0.0)
+    backoff_multiplier: float = Field(2.0, ge=1.0)
+    max_backoff_seconds: float = Field(60.0, ge=0.0)
+    default_deadline_minutes: int = Field(60, ge=1)
+
+
+class SnapshotSettings(BaseModel):
+    enabled: bool = Field(True)
+    store_raw_context: bool = Field(True)
+    store_outputs: bool = Field(True)
+    redact_sensitive_fields: bool = Field(True)
+
+
+class GuardrailSettings(BaseModel):
+    enabled: bool = Field(True)
+    enforce_policies: bool = Field(True)
+    enforce_safety_filters: bool = Field(True)
+    red_team_sampling_rate: float = Field(0.2, ge=0.0, le=1.0)
+    risk_threshold: float = Field(0.5, ge=0.0, le=1.0)
+    audit_log_enabled: bool = Field(True)
+
+
+class MetaAgentSettings(BaseModel):
+    enabled: bool = Field(True)
+    consensus_delta_threshold: float = Field(0.2, ge=0.0, le=1.0)
+    stddev_threshold: float = Field(0.15, ge=0.0, le=1.0)
+    escalate_on_dispute: bool = Field(True)
+    summary_prompt: str = Field(
+        "Synthesize the following agent perspectives into a single recommendation."
+        " Highlight consensus, disagreements, and cite the strongest supporting evidence.",
+        min_length=16,
+    )
+    max_evidence_items: int = Field(5, ge=1)
+    validation_enabled: bool = Field(True)
+
+
+class EscalationSettings(BaseModel):
+    enabled: bool = Field(True)
+    require_auth: bool = Field(True)
+    auto_assign_reviewer: str | None = Field(None, description="Optional default reviewer id for new escalations.")
+    audit_log_enabled: bool = Field(True)
+    notification_webhook_url: str | None = Field(
+        None,
+        description="Optional webhook that receives review notification payloads.",
+    )
+    notification_recipients: list[str] = Field(
+        default_factory=list,
+        description="Default recipient identifiers included in webhook payloads.",
+    )
+    notification_timeout_seconds: float = Field(5.0, ge=0.1)
 
 
 class EmbeddingSettings(BaseModel):
@@ -143,6 +209,12 @@ class Settings(BaseSettings):
     auth: AuthSettings = Field(default_factory=AuthSettings)  # type: ignore[arg-type]
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)  # type: ignore[arg-type]
     memory: MemorySettings = Field(default_factory=MemorySettings)  # type: ignore[arg-type]
+    planning: PlanningSettings = Field(default_factory=PlanningSettings)  # type: ignore[arg-type]
+    scheduling: SchedulingSettings = Field(default_factory=SchedulingSettings)  # type: ignore[arg-type]
+    guardrails: GuardrailSettings = Field(default_factory=GuardrailSettings)  # type: ignore[arg-type]
+    meta_agent: MetaAgentSettings = Field(default_factory=MetaAgentSettings)  # type: ignore[arg-type]
+    escalation: EscalationSettings = Field(default_factory=EscalationSettings)  # type: ignore[arg-type]
+    snapshots: SnapshotSettings = Field(default_factory=SnapshotSettings)  # type: ignore[arg-type]
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)  # type: ignore[arg-type]
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)  # type: ignore[arg-type]
     consolidation: ConsolidationSettings = Field(default_factory=ConsolidationSettings)  # type: ignore[arg-type]
@@ -159,8 +231,16 @@ class Settings(BaseSettings):
 
 
 @lru_cache(maxsize=1)
-def get_settings(overrides: dict[str, Any] | None = None) -> Settings:
-    """Return cached settings, useful for dependency injection."""
-    if overrides:
-        return Settings(**overrides)
+def _get_cached_settings() -> Settings:
     return Settings()  # type: ignore[call-arg]
+
+
+def get_settings(overrides: Mapping[str, Any] | None = None) -> Settings:
+    """Return settings, using cached defaults unless overrides are provided."""
+    if overrides:
+        materialized = dict(overrides)
+        allowed_keys = {"environment"}
+        filtered = {key: value for key, value in materialized.items() if key in allowed_keys}
+        if filtered:
+            return Settings(**filtered)
+    return _get_cached_settings()

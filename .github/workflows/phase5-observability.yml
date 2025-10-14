@@ -1,0 +1,103 @@
+name: Phase 5 Observability
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  simulation-and-tests:
+    name: Simulation harness smoke tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: implementation/backend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-dev.txt
+
+      - name: Run orchestration targeted tests
+        run: python -m pytest tests/test_phase5_orchestration.py tests/test_orchestrator_simulation.py
+
+      - name: Run simulation harness validation
+        run: |
+          python - <<'PY'
+          import asyncio
+          from app.agents.base import AgentContext
+          from app.orchestration.simulation import SimulationHarness, SimulationScenario
+
+
+          class DemoOrchestrator:
+              async def route_task(self, task: dict, *, context: AgentContext, progress_cb=None) -> dict:
+                  outputs = [
+                      {
+                          "agent": "demo",
+                          "summary": f"Processed {task['prompt']}",
+                          "confidence": 0.85,
+                      }
+                  ]
+                  return {
+                      **task,
+                      "status": "completed",
+                      "outputs": outputs,
+                      "negotiation": {"status": "completed", "consensus": 0.8},
+                      "guardrails": {"decisions": []},
+                      "plan": {"status": "planned"},
+                  }
+
+
+          def context_factory(_: dict) -> AgentContext:
+              return AgentContext(memory=None, llm=None)
+
+
+          async def main() -> None:
+              orchestrator = DemoOrchestrator()
+              harness = SimulationHarness(orchestrator, context_factory=context_factory)
+              scenario = SimulationScenario(
+                  name="ci-smoke",
+                  base_task={"prompt": "Validate simulation harness"},
+                  repetitions=3,
+                  concurrency=2,
+              )
+              report = await harness.run(scenario)
+              assert report.success_rate >= 0.99, report.success_rate
+
+
+          asyncio.run(main())
+          PY
+
+  compose-validate:
+    name: Validate observability compose bundle
+    runs-on: ubuntu-latest
+    needs: simulation-and-tests
+    defaults:
+      run:
+        working-directory: implementation
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Validate docker compose configuration
+        run: docker compose -f docker-compose.yml config -q
+
+      - name: Upload Grafana dashboard artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase5-orchestrator-dashboard
+          path: implementation/observability/grafana/dashboards/phase5_orchestrator.json
+
+      - name: Upload review operations dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-operations-dashboard
+          path: implementation/observability/grafana/dashboards/review_operations.json

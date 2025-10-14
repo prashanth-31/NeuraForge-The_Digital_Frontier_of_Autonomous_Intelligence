@@ -14,6 +14,7 @@ import Index from "./pages/Index";
 import Knowledge from "./pages/Knowledge";
 import NotFound from "./pages/NotFound";
 import Settings from "./pages/Settings";
+import Reviews from "./pages/Reviews";
 
 const queryClient = new QueryClient();
 
@@ -49,6 +50,14 @@ const App = () => (
                   element={(
                     <ProtectedRoute>
                       <Knowledge />
+                    </ProtectedRoute>
+                  )}
+                />
+                <Route
+                  path="/reviews"
+                  element={(
+                    <ProtectedRoute>
+                      <Reviews />
                     </ProtectedRoute>
                   )}
                 />

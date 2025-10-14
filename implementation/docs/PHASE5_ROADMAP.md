@@ -59,8 +59,16 @@ Build a resilient multi-agent orchestration layer that coordinates persona agent
 - **Operational Load**: Ensure infrastructure (Redis, Postgres, Qdrant) scales to support concurrent orchestrations; plan for horizontal scaling.
 
 ## Exit Checklist
-- [ ] Orchestrator APIs and LangGraph flows deployed with persistence and replay support.
-- [ ] Negotiation engine delivering auditable decisions with configurable strategies.
-- [ ] Task planning, scheduling, and lifecycle logging operational with alerting.
-- [ ] Guardrails, policy checks, and safety workflows enforced in orchestration paths.
-- [ ] Metrics dashboards, simulation harness, and documentation published for pilot rollout.
+- [x] Orchestrator APIs and LangGraph flows deployed with persistence and replay support.
+- [x] Negotiation engine delivering auditable decisions with configurable strategies.
+- [x] Task planning, scheduling, and lifecycle logging operational with alerting.
+- [x] Guardrails, policy checks, and safety workflows enforced in orchestration paths.
+- [x] Metrics dashboards, simulation harness, and documentation published for pilot rollout.
+
+## Completion Evidence (Phase 5)
+- **Orchestrator persistence & replay:** `app/orchestration/graph.py` wires `OrchestratorStateStore`, `ContextSnapshotStore`, and `TaskLifecycleStore`, enabling durable run tracking, replay, and state recovery (with Postgres-backed stores defined in `app/orchestration/store.py`, `context.py`, and `lifecycle.py`).
+- **Negotiation engine:** `app/orchestration/negotiation.py` provides the `SimpleNegotiationEngine`, offering configurable consensus thresholds and producing auditable, metadata-rich `NegotiationDecision` payloads stored on each run.
+- **Planning, scheduling, and alerting:** Dependency-based plans are generated via `DependencyTaskPlanner` in `app/orchestration/planner.py`, scheduled with `AsyncioTaskScheduler` (`app/orchestration/scheduler.py`), and lifecycle/SLA signals are captured through `TaskLifecycleStore.record_plan` plus `record_sla_event` instrumentation.
+- **Guardrails enforcement:** `GuardrailManager` (`app/orchestration/guardrails.py`) evaluates every scheduled step, logs decisions, persists audit records, and integrates LLM safety filters as well as red-team sampling hooks.
+- **Observability & developer tooling:** Prometheus rules (`observability/rules/orchestrator_rules.yml`), Grafana dashboards (`observability/grafana/dashboards/phase5_orchestrator.json`), alerting (`observability/alertmanager/config.yml`), simulation harness (`app/orchestration/simulation.py`), and Phase 5 demo notebook (`docs/notebooks/phase5_orchestration_demo.ipynb`) are all published with current runbooks/diagrams (`docs/diagrams/orchestrator-observability.*`).
+- **Regression coverage:** Targeted suites `tests/test_phase5_orchestration.py` and `tests/test_orchestrator_simulation.py` validate negotiation, planning, guardrails, scheduling, and the simulation harness; latest run (`pytest tests/test_phase5_orchestration.py tests/test_orchestrator_simulation.py`) passes.
