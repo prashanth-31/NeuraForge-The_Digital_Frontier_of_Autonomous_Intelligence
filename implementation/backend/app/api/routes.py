@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from typing import Any
 
@@ -18,6 +19,10 @@ from ..core.config import Settings, get_settings
 from ..core.logging import get_logger
 from ..dependencies import get_hybrid_memory, get_task_queue
 from ..orchestration.graph import Orchestrator
+from ..orchestration.negotiation import SimpleNegotiationEngine
+from ..orchestration.planner import SimpleTaskPlanner
+from ..orchestration.scheduler import SequentialTaskScheduler
+from ..orchestration.store import OrchestratorStateStore
 from ..schemas.tasks import TaskRequest, TaskResponse, TaskResult
 from ..services.embedding import EmbeddingService
 from ..services.llm import LLMService
@@ -70,14 +75,11 @@ async def submit_task(
 
     async def _job() -> None:
         memory_service = HybridMemoryService.from_settings(settings)
-        orchestrator = Orchestrator(
-            agents=[
-                ResearchAgent(),
-                FinanceAgent(),
-                CreativeAgent(),
-                EnterpriseAgent(),
-            ]
-        )
+        state_store_factory: OrchestratorStateStore | None = None
+        try:
+            state_store_factory = OrchestratorStateStore.from_settings(settings)
+        except RuntimeError as exc:  # pragma: no cover - optional persistence layer
+            logger.warning("orchestrator_state_store_unavailable", error=str(exc))
         state = {
             "id": task_id,
             "prompt": task_payload["prompt"],
@@ -85,48 +87,72 @@ async def submit_task(
             "outputs": [],
         }
         async with memory_service.lifecycle() as memory:
-            try:
-                llm_service = LLMService.from_settings(settings)
-            except RuntimeError as exc:
-                logger.exception("llm_initialization_failed", error=str(exc))
-                failure = {
-                    **state,
-                    "status": "failed",
-                    "error": "LLM service unavailable",
-                }
-                await memory.store_ephemeral_memory(task_id, {"result": failure})
-                return
-            embedding_service: EmbeddingService | None = None
-            context_assembler: ContextAssembler | None = None
-            try:
-                embedding_service = EmbeddingService.from_settings(settings, memory_service=memory)
-                retrieval_service = RetrievalService.from_settings(settings, memory=memory, embedder=embedding_service)
-                context_assembler = ContextAssembler(retrieval=retrieval_service)
-            except Exception as exc:  # pragma: no cover - embedding optional
-                logger.warning("embedding_initialization_failed", error=str(exc))
-                embedding_service = None
-                context_assembler = None
-
-            try:
-                tool_service = None
-                if settings.tools.mcp.enabled:
+            async with AsyncExitStack() as exit_stack:
+                state_store_context: OrchestratorStateStore | None = None
+                if state_store_factory is not None:
                     try:
-                        tool_service = await get_tool_service()
-                    except Exception as exc:  # pragma: no cover - optional tool layer
-                        logger.warning("tool_service_unavailable", error=str(exc))
+                        state_store_context = await exit_stack.enter_async_context(state_store_factory.lifecycle())
+                    except Exception as exc:  # pragma: no cover - store failure should not break task
+                        logger.warning("orchestrator_state_store_connect_failed", error=str(exc))
+                        await state_store_factory.close()
+                        state_store_context = None
 
-                agent_context = AgentContext(
-                    memory=memory,
-                    llm=llm_service,
-                    context=context_assembler,
-                    tools=tool_service,
-                    scorer=ConfidenceScorer(settings.scoring),
+                orchestrator = Orchestrator(
+                    agents=[
+                        ResearchAgent(),
+                        FinanceAgent(),
+                        CreativeAgent(),
+                        EnterpriseAgent(),
+                    ],
+                    state_store=state_store_context,
+                    negotiation_engine=SimpleNegotiationEngine(),
+                    planner=SimpleTaskPlanner(),
+                    scheduler=SequentialTaskScheduler(),
                 )
-                result = await orchestrator.route_task(state, context=agent_context)
-                await memory.store_ephemeral_memory(task_id, {"result": result})
-            finally:
-                if embedding_service is not None:
-                    await embedding_service.aclose()
+
+                try:
+                    llm_service = LLMService.from_settings(settings)
+                except RuntimeError as exc:
+                    logger.exception("llm_initialization_failed", error=str(exc))
+                    failure = {
+                        **state,
+                        "status": "failed",
+                        "error": "LLM service unavailable",
+                    }
+                    await memory.store_ephemeral_memory(task_id, {"result": failure})
+                    return
+
+                embedding_service: EmbeddingService | None = None
+                context_assembler: ContextAssembler | None = None
+                try:
+                    embedding_service = EmbeddingService.from_settings(settings, memory_service=memory)
+                    retrieval_service = RetrievalService.from_settings(settings, memory=memory, embedder=embedding_service)
+                    context_assembler = ContextAssembler(retrieval=retrieval_service)
+                except Exception as exc:  # pragma: no cover - embedding optional
+                    logger.warning("embedding_initialization_failed", error=str(exc))
+                    embedding_service = None
+                    context_assembler = None
+
+                try:
+                    tool_service = None
+                    if settings.tools.mcp.enabled:
+                        try:
+                            tool_service = await get_tool_service()
+                        except Exception as exc:  # pragma: no cover - optional tool layer
+                            logger.warning("tool_service_unavailable", error=str(exc))
+
+                    agent_context = AgentContext(
+                        memory=memory,
+                        llm=llm_service,
+                        context=context_assembler,
+                        tools=tool_service,
+                        scorer=ConfidenceScorer(settings.scoring),
+                    )
+                    result = await orchestrator.route_task(state, context=agent_context)
+                    await memory.store_ephemeral_memory(task_id, {"result": result})
+                finally:
+                    if embedding_service is not None:
+                        await embedding_service.aclose()
 
     await queue.enqueue(_job)
     return TaskResponse(task_id=task_id, status="queued")
@@ -139,15 +165,6 @@ async def submit_task_stream(
 ) -> StreamingResponse:
     task_id = str(uuid.uuid4())
     task_payload = payload.model_dump()
-
-    orchestrator = Orchestrator(
-        agents=[
-            ResearchAgent(),
-            FinanceAgent(),
-            CreativeAgent(),
-            EnterpriseAgent(),
-        ]
-    )
 
     state = {
         "id": task_id,
@@ -170,103 +187,138 @@ async def submit_task_stream(
 
         async def runner() -> None:
             memory_service = HybridMemoryService.from_settings(settings)
+            state_store_factory: OrchestratorStateStore | None = None
             try:
+                try:
+                    state_store_factory = OrchestratorStateStore.from_settings(settings)
+                except RuntimeError as exc:  # pragma: no cover - optional persistence layer
+                    logger.warning("orchestrator_state_store_unavailable", error=str(exc))
+
                 async with memory_service.lifecycle() as memory:
-                    await emit(
-                        "task_started",
-                        {"task_id": task_id, "timestamp": _now_iso(), "prompt": state["prompt"]},
-                    )
-                    try:
-                        llm_service = LLMService.from_settings(settings)
-                    except RuntimeError as exc:
-                        logger.exception("llm_initialization_failed", error=str(exc))
-                        failure = {
-                            **state,
-                            "status": "failed",
-                            "error": "LLM service unavailable",
-                            "timestamp": _now_iso(),
-                        }
-                        await memory.store_ephemeral_memory(task_id, {"result": failure})
-                        await emit(
-                            "task_failed",
-                            {"task_id": task_id, "error": failure["error"], "timestamp": failure["timestamp"]},
-                        )
-                        return
-
-                    embedding_service: EmbeddingService | None = None
-                    context_assembler: ContextAssembler | None = None
-                    try:
-                        embedding_service = EmbeddingService.from_settings(settings, memory_service=memory)
-                        retrieval_service = RetrievalService.from_settings(settings, memory=memory, embedder=embedding_service)
-                        context_assembler = ContextAssembler(retrieval=retrieval_service)
-                    except Exception as exc:  # pragma: no cover - optional fallback
-                        logger.warning("embedding_initialization_failed", error=str(exc))
-                        embedding_service = None
-                        context_assembler = None
-
-                    try:
-                        tool_service = None
-                        if settings.tools.mcp.enabled:
+                    async with AsyncExitStack() as exit_stack:
+                        state_store_context: OrchestratorStateStore | None = None
+                        if state_store_factory is not None:
                             try:
-                                tool_service = await get_tool_service()
-                            except Exception as exc:  # pragma: no cover - optional tool layer
-                                logger.warning("tool_service_unavailable", error=str(exc))
-                        async def tool_event(payload: dict[str, Any]) -> None:
-                            event_payload = dict(payload)
-                            event_payload.setdefault("timestamp", _now_iso())
-                            event_payload["task_id"] = task_id
-                            await emit("tool_invocation", event_payload)
+                                state_store_context = await exit_stack.enter_async_context(state_store_factory.lifecycle())
+                            except Exception as exc:  # pragma: no cover - store failure should not break task
+                                logger.warning("orchestrator_state_store_connect_failed", error=str(exc))
+                                await state_store_factory.close()
+                                state_store_context = None
 
-                        async def run_agents(active_tools: Any | None) -> dict[str, Any]:
-                            agent_context = AgentContext(
-                                memory=memory,
-                                llm=llm_service,
-                                context=context_assembler,
-                                tools=active_tools,
-                                scorer=ConfidenceScorer(settings.scoring),
-                            )
-                            return await orchestrator.route_task(state, context=agent_context, progress_cb=progress)
+                        orchestrator = Orchestrator(
+                            agents=[
+                                ResearchAgent(),
+                                FinanceAgent(),
+                                CreativeAgent(),
+                                EnterpriseAgent(),
+                            ],
+                            state_store=state_store_context,
+                            negotiation_engine=SimpleNegotiationEngine(),
+                            planner=SimpleTaskPlanner(),
+                            scheduler=SequentialTaskScheduler(),
+                        )
 
-                        if tool_service is not None:
+                        await emit(
+                            "task_started",
+                            {"task_id": task_id, "timestamp": _now_iso(), "prompt": state["prompt"]},
+                        )
+                        try:
+                            llm_service = LLMService.from_settings(settings)
+                        except RuntimeError as exc:
+                            logger.exception("llm_initialization_failed", error=str(exc))
+                            failure = {
+                                **state,
+                                "status": "failed",
+                                "error": "LLM service unavailable",
+                                "timestamp": _now_iso(),
+                            }
+                            await memory.store_ephemeral_memory(task_id, {"result": failure})
                             await emit(
-                                "mcp_status",
+                                "task_failed",
+                                {"task_id": task_id, "error": failure["error"], "timestamp": failure["timestamp"]},
+                            )
+                            return
+
+                        embedding_service: EmbeddingService | None = None
+                        context_assembler: ContextAssembler | None = None
+                        try:
+                            embedding_service = EmbeddingService.from_settings(settings, memory_service=memory)
+                            retrieval_service = RetrievalService.from_settings(settings, memory=memory, embedder=embedding_service)
+                            context_assembler = ContextAssembler(retrieval=retrieval_service)
+                        except Exception as exc:  # pragma: no cover - optional fallback
+                            logger.warning("embedding_initialization_failed", error=str(exc))
+                            embedding_service = None
+                            context_assembler = None
+
+                        result: dict[str, Any] | None = None
+
+                        try:
+                            tool_service = None
+                            if settings.tools.mcp.enabled:
+                                try:
+                                    tool_service = await get_tool_service()
+                                except Exception as exc:  # pragma: no cover - optional tool layer
+                                    logger.warning("tool_service_unavailable", error=str(exc))
+
+                            async def tool_event(payload: dict[str, Any]) -> None:
+                                event_payload = dict(payload)
+                                event_payload.setdefault("timestamp", _now_iso())
+                                event_payload["task_id"] = task_id
+                                await emit("tool_invocation", event_payload)
+
+                            async def run_agents(active_tools: Any | None) -> dict[str, Any]:
+                                agent_context = AgentContext(
+                                    memory=memory,
+                                    llm=llm_service,
+                                    context=context_assembler,
+                                    tools=active_tools,
+                                    scorer=ConfidenceScorer(settings.scoring),
+                                )
+                                return await orchestrator.route_task(state, context=agent_context, progress_cb=progress)
+
+                            if tool_service is not None:
+                                await emit(
+                                    "mcp_status",
+                                    {
+                                        "task_id": task_id,
+                                        "timestamp": _now_iso(),
+                                        "status": tool_service.get_diagnostics(),
+                                    },
+                                )
+                                async with tool_service.instrument(tool_event):
+                                    result = await run_agents(tool_service)
+                            else:
+                                result = await run_agents(None)
+                        except Exception as exc:  # pragma: no cover - surfaced via SSE
+                            failure = {
+                                **state,
+                                "status": "failed",
+                                "error": str(exc),
+                                "timestamp": _now_iso(),
+                            }
+                            await memory.store_ephemeral_memory(task_id, {"result": failure})
+                            await emit(
+                                "task_failed",
+                                {"task_id": task_id, "error": failure["error"], "timestamp": failure["timestamp"]},
+                            )
+                            return
+                        finally:
+                            if embedding_service is not None:
+                                await embedding_service.aclose()
+
+                        if result is not None:
+                            await memory.store_ephemeral_memory(task_id, {"result": result})
+                            await emit(
+                                "task_completed",
                                 {
                                     "task_id": task_id,
+                                    "status": result.get("status", "completed"),
                                     "timestamp": _now_iso(),
-                                    "status": tool_service.get_diagnostics(),
                                 },
                             )
-                            async with tool_service.instrument(tool_event):
-                                result = await run_agents(tool_service)
-                        else:
-                            result = await run_agents(None)
-                    except Exception as exc:  # pragma: no cover - surfaced via SSE
-                        failure = {
-                            **state,
-                            "status": "failed",
-                            "error": str(exc),
-                            "timestamp": _now_iso(),
-                        }
-                        await memory.store_ephemeral_memory(task_id, {"result": failure})
-                        await emit(
-                            "task_failed",
-                            {"task_id": task_id, "error": failure["error"], "timestamp": failure["timestamp"]},
-                        )
-                        return
-                    finally:
-                        if embedding_service is not None:
-                            await embedding_service.aclose()
-
-                    await memory.store_ephemeral_memory(task_id, {"result": result})
-                    await emit(
-                        "task_completed",
-                        {
-                            "task_id": task_id,
-                            "status": result.get("status", "completed"),
-                            "timestamp": _now_iso(),
-                        },
-                    )
             finally:
+                if state_store_factory is not None:
+                    await state_store_factory.close()
                 await emit("__END__", {})
 
         runner_task = asyncio.create_task(runner())
