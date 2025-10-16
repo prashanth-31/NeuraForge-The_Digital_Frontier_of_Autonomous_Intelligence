@@ -52,6 +52,8 @@ const ChatWorkspace = () => {
                 timestamp={message.timestamp}
                 agentName={message.agentName}
                 confidence={message.confidence}
+                confidenceBreakdown={message.confidenceBreakdown}
+                toolMetadata={message.toolMetadata}
               />
             ))
           ) : (

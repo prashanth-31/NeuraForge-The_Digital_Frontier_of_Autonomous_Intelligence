@@ -44,6 +44,26 @@ class AuthSettings(BaseModel):
     service_token: str | None = Field(default=None, description="Service token for internal automation workflows.")
 
 
+class RateLimitRule(BaseModel):
+    capacity: int = Field(30, ge=1, description="Maximum number of requests permitted during the window.")
+    window_seconds: int = Field(60, ge=1, description="Number of seconds the rate limit window covers.")
+
+
+class RateLimitSettings(BaseModel):
+    enabled: bool = Field(True, description="Toggle API rate limiting on or off.")
+    namespace: str = Field(
+        "neuraforge:ratelimit",
+        min_length=1,
+        description="Redis key namespace used when storing rate limit counters.",
+    )
+    task_submission: RateLimitRule = Field(
+        default_factory=lambda: RateLimitRule(capacity=6, window_seconds=60)
+    )  # type: ignore[arg-type]
+    review_action: RateLimitRule = Field(
+        default_factory=lambda: RateLimitRule(capacity=90, window_seconds=60)
+    )  # type: ignore[arg-type]
+
+
 class ObservabilitySettings(BaseModel):
     prometheus_enabled: bool = Field(True)
     grafana_enabled: bool = Field(True)
@@ -207,6 +227,7 @@ class Settings(BaseSettings):
     qdrant: QdrantSettings = Field(default_factory=QdrantSettings)  # type: ignore[arg-type]
     ollama: OllamaSettings = Field(default_factory=OllamaSettings)  # type: ignore[arg-type]
     auth: AuthSettings = Field(default_factory=AuthSettings)  # type: ignore[arg-type]
+    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)  # type: ignore[arg-type]
     observability: ObservabilitySettings = Field(default_factory=ObservabilitySettings)  # type: ignore[arg-type]
     memory: MemorySettings = Field(default_factory=MemorySettings)  # type: ignore[arg-type]
     planning: PlanningSettings = Field(default_factory=PlanningSettings)  # type: ignore[arg-type]

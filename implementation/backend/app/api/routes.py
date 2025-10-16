@@ -18,31 +18,36 @@ from ..agents.finance import FinanceAgent
 from ..agents.research import ResearchAgent
 from ..core.config import Settings, get_settings
 from ..core.logging import get_logger
-from ..core.security import require_roles
+from ..core.rate_limit import rate_limit_dependency
+from ..core.security import require_scopes
 from ..dependencies import (
     get_hybrid_memory,
+    get_orchestrator_state_store,
     get_review_manager,
     get_review_manager_singleton,
     get_task_queue,
 )
-from ..orchestration.graph import Orchestrator
 from ..orchestration.context import ContextAssemblyContract, ContextSnapshotStore, ContextStage
 from ..orchestration.guardrails import GuardrailManager, GuardrailStore
 from ..orchestration.lifecycle import TaskLifecycleStore
+from ..orchestration.graph import Orchestrator
 from ..orchestration.negotiation import SimpleNegotiationEngine
 from ..orchestration.planner import DependencyTaskPlanner, SimpleTaskPlanner
 from ..orchestration.scheduler import AsyncioTaskScheduler, SequentialTaskScheduler
-from ..orchestration.store import OrchestratorStateStore
 from ..orchestration.meta import MetaAgent
 from ..orchestration.review import ReviewManager, ReviewStatus
+from ..orchestration.state import OrchestratorEvent
+from ..orchestration.store import OrchestratorStateStore
 from ..schemas.reviews import (
     ReviewAssignmentRequest,
     ReviewNoteCreate,
     ReviewResolutionRequest,
     ReviewStatusLiteral,
     ReviewTicketModel,
+    ReviewMetricsResponse,
 )
-from ..schemas.tasks import TaskRequest, TaskResponse, TaskResult
+from ..schemas.tasks import TaskRequest, TaskResponse, TaskResult, TaskStatusMetrics, TaskStatusResponse
+from ..schemas.orchestrator import OrchestratorEventModel, OrchestratorRunDetail
 from ..services.embedding import EmbeddingService
 from ..services.llm import LLMService
 from ..services.memory import HybridMemoryService
@@ -54,6 +59,13 @@ from ..services.tools import get_tool_service
 logger = get_logger(name=__name__)
 
 router = APIRouter()
+
+REVIEW_READ_SCOPE = "reviews:read"
+REVIEW_WRITE_SCOPE = "reviews:write"
+REPORTS_READ_SCOPE = "reports:read"
+
+rate_limit_task_submission = rate_limit_dependency("task_submission")
+rate_limit_review_action = rate_limit_dependency("review_action")
 
 
 async def _extract_json_body(request: Request) -> dict[str, Any]:
@@ -71,6 +83,17 @@ def _now_iso() -> str:
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    return None
 
 
 async def _build_orchestration_pipeline(
@@ -214,6 +237,7 @@ async def mcp_diagnostics(settings: Settings = Depends(get_settings)) -> dict[st
 @router.post("/submit_task", response_model=TaskResponse, tags=["tasks"])
 async def submit_task(
     request: Request,
+    _: None = Depends(rate_limit_task_submission),
     queue=Depends(get_task_queue),
     settings: Settings = Depends(get_settings),
 ) -> TaskResponse:
@@ -316,6 +340,7 @@ async def submit_task(
 @router.post("/submit_task/stream", tags=["tasks"])
 async def submit_task_stream(
     request: Request,
+    _: None = Depends(rate_limit_task_submission),
     settings: Settings = Depends(get_settings),
 ) -> StreamingResponse:
     raw_payload = await _extract_json_body(request)
@@ -341,8 +366,9 @@ async def submit_task_stream(
 
         async def progress(event_payload: dict[str, Any]) -> None:
             payload_copy = {key: value for key, value in event_payload.items() if key != "event"}
-            payload_copy["timestamp"] = _now_iso()
-            event_type = f"agent_{event_payload.get('event', 'update')}"
+            payload_copy.setdefault("task_id", task_id)
+            payload_copy.setdefault("timestamp", _now_iso())
+            event_type = str(event_payload.get("event") or "telemetry_update")
             await emit(event_type, payload_copy)
 
         async def runner() -> None:
@@ -422,7 +448,7 @@ async def submit_task_stream(
                                 event_payload = dict(payload)
                                 event_payload.setdefault("timestamp", _now_iso())
                                 event_payload["task_id"] = task_id
-                                await emit("tool_invocation", event_payload)
+                                await emit("tool_invoked", event_payload)
 
                             async def run_agents(active_tools: Any | None) -> dict[str, Any]:
                                 agent_context = AgentContext(
@@ -503,6 +529,122 @@ async def submit_task_stream(
     return StreamingResponse(event_stream(), media_type="text/event-stream", headers=headers)
 
 
+@router.get("/tasks/{task_id}", response_model=TaskStatusResponse, tags=["tasks"])
+async def get_task_status(
+    task_id: str,
+    memory: HybridMemoryService = Depends(get_hybrid_memory),
+    state_store: OrchestratorStateStore | None = Depends(get_orchestrator_state_store),
+) -> TaskStatusResponse:
+    payload = await memory.fetch_ephemeral_memory(task_id)
+    if payload is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    result_state = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(result_state, dict):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+
+    effective_task_id = str(result_state.get("id") or result_state.get("task_id") or task_id)
+    status_value = str(result_state.get("status") or "unknown")
+    prompt_value = result_state.get("prompt") if isinstance(result_state.get("prompt"), str) else None
+    metadata_obj = result_state.get("metadata") if isinstance(result_state.get("metadata"), dict) else {}
+    metadata = dict(metadata_obj) if metadata_obj else {}
+    outputs = [dict(item) if isinstance(item, dict) else item for item in result_state.get("outputs", []) if isinstance(item, dict)]
+    plan_obj = result_state.get("plan") if isinstance(result_state.get("plan"), dict) else None
+    plan = dict(plan_obj) if plan_obj is not None else None
+    negotiation_obj = result_state.get("negotiation") if isinstance(result_state.get("negotiation"), dict) else None
+    negotiation = dict(negotiation_obj) if negotiation_obj is not None else None
+    guardrail_decisions: list[dict[str, Any]] = []
+    guardrail_block = result_state.get("guardrails")
+    if isinstance(guardrail_block, dict):
+        decisions = guardrail_block.get("decisions")
+        if isinstance(decisions, list):
+            guardrail_decisions = [decision for decision in decisions if isinstance(decision, dict)]
+    guardrails_payload = dict(guardrail_block) if isinstance(guardrail_block, dict) else None
+    error_value = result_state.get("error")
+    last_error = str(error_value) if isinstance(error_value, str) and error_value else None
+
+    run_id_value = result_state.get("run_id")
+    run_id_str: str | None = None
+    if isinstance(run_id_value, uuid.UUID):
+        run_id_str = str(run_id_value)
+    elif isinstance(run_id_value, str) and run_id_value:
+        run_id_str = run_id_value
+
+    run_record = None
+    events: list[OrchestratorEvent] = []
+    if state_store is not None and run_id_str:
+        try:
+            run_uuid = uuid.UUID(run_id_str)
+        except ValueError:
+            run_uuid = None
+        if run_uuid is not None:
+            run_record = await state_store.get_run(run_uuid)
+            if run_record is not None:
+                events = await state_store.list_events(run_uuid)
+
+    created_at = run_record.created_at if run_record is not None else _parse_datetime(result_state.get("created_at"))
+    updated_at = run_record.updated_at if run_record is not None else _parse_datetime(
+        result_state.get("updated_at") or result_state.get("timestamp")
+    )
+
+    completed_agents = sum(1 for event in events if event.event_type == "agent_completed")
+    if completed_agents == 0:
+        completed_agents = len(outputs)
+    failed_agents = sum(1 for event in events if event.event_type == "agent_failed")
+    guardrail_events = len(guardrail_decisions)
+
+    negotiation_rounds = None
+    if isinstance(negotiation, dict):
+        rounds_value = negotiation.get("rounds")
+        if isinstance(rounds_value, int):
+            negotiation_rounds = rounds_value
+        elif isinstance(rounds_value, float):
+            negotiation_rounds = int(rounds_value)
+
+    metrics = TaskStatusMetrics(
+        agents_completed=completed_agents,
+        agents_failed=failed_agents,
+        guardrail_events=guardrail_events,
+        negotiation_rounds=negotiation_rounds,
+    )
+
+    event_models = [OrchestratorEventModel.from_domain(event) for event in events[:100]]
+
+    return TaskStatusResponse(
+        task_id=effective_task_id,
+        status=status_value,
+        run_id=run_id_str,
+        prompt=prompt_value,
+        metadata=metadata,
+        outputs=outputs,
+        plan=plan,
+        negotiation=negotiation,
+    guardrails=guardrails_payload,
+        metrics=metrics,
+        last_error=last_error,
+        created_at=created_at,
+        updated_at=updated_at,
+        events=event_models,
+    )
+
+
+@router.get("/orchestrator/runs/{run_id}", response_model=OrchestratorRunDetail, tags=["orchestration"])
+async def get_orchestrator_run(
+    run_id: uuid.UUID,
+    state_store: OrchestratorStateStore | None = Depends(get_orchestrator_state_store),
+) -> OrchestratorRunDetail:
+    if state_store is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Orchestrator run persistence unavailable",
+        )
+    run_record = await state_store.get_run(run_id)
+    if run_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    events = await state_store.list_events(run_id)
+    return OrchestratorRunDetail.from_domain(run_record, events)
+
+
 @router.get("/history/{task_id}", response_model=list[TaskResult], tags=["tasks"])
 async def get_task_history(
     task_id: str,
@@ -535,6 +677,7 @@ async def get_task_history(
 async def get_task_dossier_json(
     task_id: str,
     memory: HybridMemoryService = Depends(get_hybrid_memory),
+    _: dict[str, Any] = Depends(require_scopes(REPORTS_READ_SCOPE)),
 ) -> Response:
     result_state = await _fetch_result_state(task_id, memory=memory)
     dossier = result_state.get("dossier") if isinstance(result_state, dict) else None
@@ -554,6 +697,7 @@ async def get_task_dossier_json(
 async def get_task_dossier_markdown(
     task_id: str,
     memory: HybridMemoryService = Depends(get_hybrid_memory),
+    _: dict[str, Any] = Depends(require_scopes(REPORTS_READ_SCOPE)),
 ) -> Response:
     result_state = await _fetch_result_state(task_id, memory=memory)
     dossier = result_state.get("dossier") if isinstance(result_state, dict) else None
@@ -569,14 +713,22 @@ async def get_task_dossier_markdown(
     )
 
 
-REVIEW_ROLES = ("reviewer", "review_admin")
+@router.get("/reviews/metrics", response_model=ReviewMetricsResponse, tags=["reviews"])
+async def get_review_metrics(
+    manager: ReviewManager = Depends(get_review_manager),
+    _: dict[str, Any] = Depends(require_scopes(REVIEW_READ_SCOPE)),
+    __: None = Depends(rate_limit_review_action),
+) -> ReviewMetricsResponse:
+    metrics = await manager.get_metrics()
+    return ReviewMetricsResponse(**metrics)
 
 
 @router.get("/reviews", response_model=list[ReviewTicketModel], tags=["reviews"])
 async def list_reviews(
     status_filter: ReviewStatusLiteral | None = None,
     manager: ReviewManager = Depends(get_review_manager),
-    _: dict[str, Any] = Depends(require_roles(*REVIEW_ROLES)),
+    _: dict[str, Any] = Depends(require_scopes(REVIEW_READ_SCOPE)),
+    __: None = Depends(rate_limit_review_action),
 ) -> list[ReviewTicketModel]:
     try:
         status_enum = ReviewStatus(status_filter) if status_filter else None
@@ -590,7 +742,8 @@ async def list_reviews(
 async def get_review_ticket(
     ticket_id: uuid.UUID,
     manager: ReviewManager = Depends(get_review_manager),
-    _: dict[str, Any] = Depends(require_roles(*REVIEW_ROLES)),
+    _: dict[str, Any] = Depends(require_scopes(REVIEW_READ_SCOPE)),
+    __: None = Depends(rate_limit_review_action),
 ) -> ReviewTicketModel:
     ticket = await manager.get_ticket(ticket_id)
     if ticket is None:
@@ -603,7 +756,8 @@ async def assign_review_ticket(
     ticket_id: uuid.UUID,
     request: Request,
     manager: ReviewManager = Depends(get_review_manager),
-    identity: dict[str, Any] = Depends(require_roles(*REVIEW_ROLES)),
+    identity: dict[str, Any] = Depends(require_scopes(REVIEW_WRITE_SCOPE)),
+    _: None = Depends(rate_limit_review_action),
 ) -> ReviewTicketModel:
     raw_payload = await _extract_json_body(request)
     try:
@@ -625,7 +779,8 @@ async def add_review_note(
     ticket_id: uuid.UUID,
     request: Request,
     manager: ReviewManager = Depends(get_review_manager),
-    identity: dict[str, Any] = Depends(require_roles(*REVIEW_ROLES)),
+    identity: dict[str, Any] = Depends(require_scopes(REVIEW_WRITE_SCOPE)),
+    _: None = Depends(rate_limit_review_action),
 ) -> ReviewTicketModel:
     raw_payload = await _extract_json_body(request)
     try:
@@ -654,7 +809,8 @@ async def add_review_note(
 async def unassign_review_ticket(
     ticket_id: uuid.UUID,
     manager: ReviewManager = Depends(get_review_manager),
-    _: dict[str, Any] = Depends(require_roles(*REVIEW_ROLES)),
+    _: dict[str, Any] = Depends(require_scopes(REVIEW_WRITE_SCOPE)),
+    __: None = Depends(rate_limit_review_action),
 ) -> ReviewTicketModel:
     try:
         ticket = await manager.unassign(ticket_id)
@@ -668,7 +824,8 @@ async def resolve_review_ticket(
     ticket_id: uuid.UUID,
     request: Request,
     manager: ReviewManager = Depends(get_review_manager),
-    identity: dict[str, Any] = Depends(require_roles(*REVIEW_ROLES)),
+    identity: dict[str, Any] = Depends(require_scopes(REVIEW_WRITE_SCOPE)),
+    _: None = Depends(rate_limit_review_action),
 ) -> ReviewTicketModel:
     raw_payload = await _extract_json_body(request)
     try:

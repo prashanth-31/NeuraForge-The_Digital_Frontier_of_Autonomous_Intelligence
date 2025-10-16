@@ -10,6 +10,7 @@ from .services.llm import LLMService
 from .services.memory import HybridMemoryService
 from .services.notifications import ReviewNotificationService, log_notification
 from .orchestration.review import ReviewManager, build_review_store
+from .orchestration.store import OrchestratorStateStore
 
 
 _review_manager_singleton: ReviewManager | None = None
@@ -62,3 +63,15 @@ async def get_review_manager(
     settings: Settings = Depends(get_settings),
 ) -> AsyncIterator[ReviewManager]:
     yield get_review_manager_singleton(settings)
+
+
+async def get_orchestrator_state_store(
+    settings: Settings = Depends(get_settings),
+) -> AsyncIterator[OrchestratorStateStore | None]:
+    try:
+        store = OrchestratorStateStore.from_settings(settings)
+    except RuntimeError:
+        yield None
+        return
+    async with store.lifecycle() as state_store:
+        yield state_store

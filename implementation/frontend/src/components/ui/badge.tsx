@@ -1,5 +1,5 @@
 import * as React from "react";
-import { cva } from "class-variance-authority";
+import { cva, type VariantProps } from "class-variance-authority";
 
 import { cn } from "@/lib/utils";
 
@@ -20,15 +20,12 @@ const badgeVariants = cva(
   },
 );
 
-type BadgeVariant = "default" | "secondary" | "destructive" | "outline";
+export interface BadgeProps extends React.HTMLAttributes<HTMLSpanElement>, VariantProps<typeof badgeVariants> {}
 
-export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement> {
-  variant?: BadgeVariant;
-  children?: React.ReactNode;
-}
+const Badge = React.forwardRef<HTMLSpanElement, BadgeProps>(({ className, variant, ...props }, ref) => {
+  return <span ref={ref} className={cn(badgeVariants({ variant }), className)} {...props} />;
+});
 
-function Badge({ className, variant = "default", ...props }: BadgeProps) {
-  return <div className={cn(badgeVariants({ variant }), className)} {...props} />;
-}
+Badge.displayName = "Badge";
 
 export { Badge, badgeVariants };

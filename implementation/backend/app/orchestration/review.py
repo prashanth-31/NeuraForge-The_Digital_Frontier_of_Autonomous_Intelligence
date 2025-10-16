@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from collections import defaultdict
+from statistics import median
 from typing import Any, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
@@ -298,6 +299,64 @@ class ReviewManager:
 
     async def get_ticket(self, ticket_id: UUID) -> ReviewTicket | None:
         return await self._store.get(ticket_id)
+
+    async def get_metrics(self) -> dict[str, Any]:
+        tickets = await self._store.list()
+        now = datetime.now(timezone.utc)
+        totals: dict[str, int] = defaultdict(int)
+        assignment_counts: defaultdict[str, int] = defaultdict(int)
+        open_unassigned = 0
+        open_ages: list[float] = []
+        in_review_ages: list[float] = []
+        resolution_durations: list[float] = []
+        completed_last_24h = 0
+
+        for ticket in tickets:
+            totals[ticket.status.value] += 1
+            age_minutes = (now - ticket.created_at).total_seconds() / 60.0
+            if ticket.status is ReviewStatus.OPEN:
+                open_ages.append(age_minutes)
+                if ticket.assigned_to:
+                    assignment_counts[ticket.assigned_to] += 1
+                else:
+                    open_unassigned += 1
+            elif ticket.status is ReviewStatus.IN_REVIEW:
+                in_review_ages.append(age_minutes)
+                if ticket.assigned_to:
+                    assignment_counts[ticket.assigned_to] += 1
+            elif ticket.status in {ReviewStatus.RESOLVED, ReviewStatus.DISMISSED}:
+                duration_minutes = (ticket.updated_at - ticket.created_at).total_seconds() / 60.0
+                resolution_durations.append(duration_minutes)
+                if now - ticket.updated_at <= timedelta(hours=24):
+                    completed_last_24h += 1
+
+        def _average(values: list[float]) -> float:
+            return round(sum(values) / len(values), 2) if values else 0.0
+
+        resolution_average = _average(resolution_durations) if resolution_durations else None
+        resolution_median = round(median(resolution_durations), 2) if resolution_durations else None
+
+        for status in ReviewStatus:
+            totals.setdefault(status.value, 0)
+
+        return {
+            "generated_at": now,
+            "totals": dict(totals),
+            "assignment": {
+                "by_reviewer": dict(assignment_counts),
+                "unassigned_open": open_unassigned,
+            },
+            "aging": {
+                "open_average_minutes": _average(open_ages),
+                "open_oldest_minutes": round(max(open_ages), 2) if open_ages else 0.0,
+                "in_review_average_minutes": _average(in_review_ages),
+            },
+            "resolution": {
+                "average_minutes": resolution_average,
+                "median_minutes": resolution_median,
+                "completed_last_24h": completed_last_24h,
+            },
+        }
 
     async def add_note(self, ticket_id: UUID, *, author: str, content: str) -> ReviewNote:
         if not content.strip():

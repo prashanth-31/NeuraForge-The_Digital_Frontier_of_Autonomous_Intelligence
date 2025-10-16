@@ -71,3 +71,28 @@ class ReviewResolutionRequest(BaseModel):
 
     def to_status(self) -> ReviewStatus:
         return ReviewStatus(self.status)
+
+
+class ReviewAssignmentBreakdown(BaseModel):
+    by_reviewer: dict[str, int] = Field(default_factory=dict)
+    unassigned_open: int = 0
+
+
+class ReviewAgingStats(BaseModel):
+    open_average_minutes: float = 0.0
+    open_oldest_minutes: float = 0.0
+    in_review_average_minutes: float = 0.0
+
+
+class ReviewResolutionStats(BaseModel):
+    average_minutes: float | None = None
+    median_minutes: float | None = None
+    completed_last_24h: int = 0
+
+
+class ReviewMetricsResponse(BaseModel):
+    generated_at: datetime
+    totals: dict[str, int] = Field(default_factory=dict)
+    assignment: ReviewAssignmentBreakdown = Field(default_factory=ReviewAssignmentBreakdown)
+    aging: ReviewAgingStats = Field(default_factory=ReviewAgingStats)
+    resolution: ReviewResolutionStats = Field(default_factory=ReviewResolutionStats)

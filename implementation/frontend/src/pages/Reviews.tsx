@@ -9,6 +9,10 @@ import {
   RotateCcw,
   Loader2,
   AlertTriangle,
+  BarChart3,
+  Clock3,
+  Gauge,
+  Users,
 } from "lucide-react";
 
 import AppLayout from "@/components/AppLayout";
@@ -56,6 +60,25 @@ type ActionParams = {
   body?: Record<string, unknown>;
 };
 
+type ReviewMetrics = {
+  generated_at: string;
+  totals: Record<string, number>;
+  assignment: {
+    by_reviewer: Record<string, number>;
+    unassigned_open: number;
+  };
+  aging: {
+    open_average_minutes: number;
+    open_oldest_minutes: number;
+    in_review_average_minutes: number;
+  };
+  resolution: {
+    average_minutes: number | null;
+    median_minutes: number | null;
+    completed_last_24h: number;
+  };
+};
+
 const fetchTickets = async (token: string | undefined): Promise<ReviewTicket[]> => {
   if (!token) {
     throw new Error("Reviewer token not configured");
@@ -67,6 +90,22 @@ const fetchTickets = async (token: string | undefined): Promise<ReviewTicket[]> 
   if (!response.ok) {
     const detail = await response.text();
     throw new Error(detail || "Failed to load review tickets");
+  }
+
+  return response.json();
+};
+
+const fetchReviewMetrics = async (token: string | undefined): Promise<ReviewMetrics> => {
+  if (!token) {
+    throw new Error("Reviewer token not configured");
+  }
+  const response = await fetch(`${API_BASE_URL}/api/v1/reviews/metrics`, {
+    headers: buildReviewHeaders(token),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || "Failed to load review metrics");
   }
 
   return response.json();
@@ -98,6 +137,17 @@ const Reviews = () => {
     refetchInterval: reviewerToken ? 15000 : false,
   });
 
+  const {
+    data: metrics,
+    isLoading: metricsLoading,
+    error: metricsError,
+  } = useQuery({
+    queryKey: ["review-metrics", reviewerToken],
+    queryFn: () => fetchReviewMetrics(reviewerToken),
+    enabled: Boolean(reviewerToken),
+    refetchInterval: reviewerToken ? 30000 : false,
+  });
+
   const enrichedTickets = useMemo<EnrichedTicket[]>(
     () =>
       tickets.map((ticket) => ({
@@ -115,8 +165,10 @@ const Reviews = () => {
     };
   }, [enrichedTickets]);
 
-  const invalidateTickets = () =>
+  const invalidateReviewData = () => {
     queryClient.invalidateQueries({ queryKey: ["review-tickets", reviewerToken] });
+    queryClient.invalidateQueries({ queryKey: ["review-metrics", reviewerToken] });
+  };
 
   const performAction = async (endpoint: string, { ticketId, body }: ActionParams, method: "POST" | "PATCH" = "POST") => {
     if (!reviewerToken) {
@@ -140,13 +192,13 @@ const Reviews = () => {
         ...params,
         body: { reviewer_id: reviewerLabel, ...(params.body ?? {}) },
       }),
-    onSuccess: invalidateTickets,
+    onSuccess: invalidateReviewData,
     onError: (err: Error) => toast({ title: "Assignment failed", description: err.message, variant: "destructive" }),
   });
 
   const unassignMutation = useMutation({
     mutationFn: (params: ActionParams) => performAction("unassign", params, "PATCH"),
-    onSuccess: invalidateTickets,
+    onSuccess: invalidateReviewData,
     onError: (err: Error) => toast({ title: "Unassign failed", description: err.message, variant: "destructive" }),
   });
 
@@ -156,7 +208,7 @@ const Reviews = () => {
         ...params,
         body: { author: reviewerLabel, ...(params.body ?? {}) },
       }),
-    onSuccess: invalidateTickets,
+    onSuccess: invalidateReviewData,
     onError: (err: Error) => toast({ title: "Note failed", description: err.message, variant: "destructive" }),
   });
 
@@ -173,7 +225,7 @@ const Reviews = () => {
           },
         },
       ),
-    onSuccess: invalidateTickets,
+    onSuccess: invalidateReviewData,
     onError: (err: Error) => toast({ title: "Resolution failed", description: err.message, variant: "destructive" }),
   });
 
@@ -235,6 +287,23 @@ const Reviews = () => {
     }
     const trimmed = content.trim();
     return trimmed.length ? trimmed : undefined;
+  };
+
+  const formatMinutes = (minutes: number | null | undefined) => {
+    if (minutes === null || minutes === undefined || Number.isNaN(minutes)) {
+      return "—";
+    }
+    if (minutes < 1) {
+      return "<1m";
+    }
+    if (minutes < 60) {
+      return `${Math.round(minutes)}m`;
+    }
+    const hours = minutes / 60;
+    if (hours < 24) {
+      return `${hours.toFixed(1)}h`;
+    }
+    return `${(hours / 24).toFixed(1)}d`;
   };
 
   const renderTicketHeader = (ticket: EnrichedTicket, showSummary = true) => {
@@ -425,6 +494,96 @@ const Reviews = () => {
                 </div>
               </div>
             </Card>
+          )}
+
+          {reviewerToken && metrics && !metricsLoading && !metricsError && (
+            <section className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-foreground">Queue metrics</h2>
+                <Badge variant="outline">
+                  Updated {formatDistanceToNow(new Date(metrics.generated_at), { addSuffix: true })}
+                </Badge>
+              </div>
+              <div className="grid gap-4 md:grid-cols-4">
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <BarChart3 className="h-5 w-5 text-primary" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Open</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.totals.open ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <Gauge className="h-5 w-5 text-emerald-500" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">In review</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.totals.in_review ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <Users className="h-5 w-5 text-secondary" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Unassigned</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.assignment.unassigned_open ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <Clock3 className="h-5 w-5 text-amber-500" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Resolved (24h)</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.resolution.completed_last_24h}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
+                <Card className="p-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Avg time open</p>
+                  <p className="text-lg font-semibold text-foreground">
+                    {formatMinutes(metrics.aging.open_average_minutes)}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Oldest {formatMinutes(metrics.aging.open_oldest_minutes)}
+                  </p>
+                </Card>
+                <Card className="p-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Avg time in review</p>
+                  <p className="text-lg font-semibold text-foreground">
+                    {formatMinutes(metrics.aging.in_review_average_minutes)}
+                  </p>
+                </Card>
+                <Card className="p-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Avg resolution</p>
+                  <p className="text-lg font-semibold text-foreground">
+                    {formatMinutes(metrics.resolution.average_minutes)}
+                  </p>
+                  {metrics.resolution.median_minutes !== null && (
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Median {formatMinutes(metrics.resolution.median_minutes)}
+                    </p>
+                  )}
+                </Card>
+              </div>
+            </section>
+          )}
+
+          {metricsError && (
+            <div className="text-sm text-destructive">{(metricsError as Error).message}</div>
           )}
 
           {loadingState}

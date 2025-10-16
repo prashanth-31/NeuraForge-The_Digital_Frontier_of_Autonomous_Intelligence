@@ -1,6 +1,16 @@
 import { type ReactNode, useMemo, useState } from "react";
 
-import { AlertTriangle, CheckCircle2, Clock, History, Loader, Workflow } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Clock,
+  History,
+  Loader,
+  PlayCircle,
+  ShieldAlert,
+  TimerReset,
+  Workflow,
+} from "lucide-react";
 
 import { useTaskContext } from "@/contexts/TaskContext";
 import { cn } from "@/lib/utils";
@@ -13,11 +23,23 @@ interface HistoryPanelProps {
 }
 
 const HistoryPanel = ({ className }: HistoryPanelProps) => {
-  const { history, currentTaskId, isStreaming, toolEvents, mcpDiagnostics } = useTaskContext();
+  const {
+    history,
+    currentTaskId,
+    isStreaming,
+    toolEvents,
+    mcpDiagnostics,
+    lifecycleEvents,
+    taskStatus,
+  } = useTaskContext();
   const hasHistory = history.length > 0;
   const hasToolEvents = toolEvents.length > 0;
+  const hasTimelineEvents = lifecycleEvents.length > 0;
   const componentOrder = ["base", "evidence", "tool_reliability", "self_assessment"];
   const [tabValue, setTabValue] = useState("history");
+
+  const guardrailDecisions = useMemo(() => taskStatus?.guardrailDecisions ?? [], [taskStatus]);
+  const hasGuardrailDecisions = guardrailDecisions.length > 0;
 
   const formattedDiagnostics = useMemo(() => {
     if (!mcpDiagnostics) {
@@ -86,6 +108,42 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
     </div>
   );
 
+  const formatLatency = (value?: number) => {
+    if (!value || Number.isNaN(value)) {
+      return null;
+    }
+    if (value >= 1000) {
+      return `${(value / 1000).toFixed(1)} s`;
+    }
+    return `${value.toFixed(0)} ms`;
+  };
+
+  const formatTimestamp = (iso: string | null | undefined) => {
+    if (!iso) {
+      return "—";
+    }
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) {
+      return "—";
+    }
+    return `${date.toLocaleDateString()} ${date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+  };
+
+  const renderTimelineIcon = (type: string) => {
+    switch (type) {
+      case "agent_started":
+        return <PlayCircle className="h-4 w-4 text-primary" />;
+      case "agent_completed":
+        return <CheckCircle2 className="h-4 w-4 text-emerald-500" />;
+      case "agent_failed":
+        return <AlertTriangle className="h-4 w-4 text-destructive" />;
+      case "guardrail_triggered":
+        return <ShieldAlert className="h-4 w-4 text-amber-500" />;
+      default:
+        return <TimerReset className="h-4 w-4 text-muted-foreground" />;
+    }
+  };
+
   return (
     <aside
       className={cn(
@@ -102,8 +160,9 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
 
       <Tabs value={tabValue} onValueChange={setTabValue} className="flex-1 flex flex-col overflow-hidden">
         <div className="px-3 pt-3">
-          <TabsList className="grid grid-cols-3 w-full">
+          <TabsList className="grid grid-cols-4 w-full">
             <TabsTrigger value="history">History</TabsTrigger>
+            <TabsTrigger value="timeline">Timeline</TabsTrigger>
             <TabsTrigger value="tools">Tools</TabsTrigger>
             <TabsTrigger value="diagnostics">Diagnostics</TabsTrigger>
           </TabsList>
@@ -181,6 +240,72 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
         </TabsContent>
 
         <TabsContent
+          value="timeline"
+          className="flex-1 overflow-hidden data-[state=inactive]:hidden px-3 pb-3"
+        >
+          <ScrollArea className="h-full pr-2">
+            {hasTimelineEvents ? (
+              <div className="space-y-3">
+                {lifecycleEvents.map((event) => {
+                  const latency = formatLatency(event.latencyMs);
+                  const decisionLabel = event.guardrail?.decision
+                    ? event.guardrail.decision.replace(/_/g, " ")
+                    : undefined;
+                  return (
+                    <div key={event.id} className="p-3 rounded-lg border border-border/40 bg-muted/20">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex items-start gap-2">
+                          <div className="mt-0.5">{renderTimelineIcon(event.type)}</div>
+                          <div>
+                            <p className="text-sm font-medium text-foreground capitalize">
+                              {event.type.replace(/_/g, " ")}
+                            </p>
+                            <p className="text-[11px] text-muted-foreground">
+                              {event.agent ? `Agent ${event.agent}` : "System"}
+                              {event.stepId ? ` • ${event.stepId}` : ""}
+                            </p>
+                          </div>
+                        </div>
+                        <span className="text-[11px] text-muted-foreground">{event.timestamp}</span>
+                      </div>
+                      <div className="mt-2 text-[11px] text-muted-foreground space-y-1">
+                        {latency && <div>Latency: {latency}</div>}
+                        {event.error && (
+                          <div className="text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
+                            {event.error}
+                          </div>
+                        )}
+                        {event.guardrail && (
+                          <div className="space-y-1">
+                            {decisionLabel && (
+                              <Badge variant="destructive" className="text-[10px] uppercase tracking-wide">
+                                {decisionLabel}
+                              </Badge>
+                            )}
+                            {event.guardrail.reason && <div>Reason: {event.guardrail.reason}</div>}
+                            {typeof event.guardrail.riskScore === "number" && (
+                              <div>Risk score: {event.guardrail.riskScore.toFixed(2)}</div>
+                            )}
+                            {event.guardrail.policyId && <div>Policy: {event.guardrail.policyId}</div>}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              renderNoDataState(
+                isStreaming ? <Loader className="h-5 w-5 animate-spin" /> : <Clock className="h-5 w-5" />,
+                isStreaming
+                  ? "Tracking agent lifecycle..."
+                  : "Run a task to view agent timelines and guardrail activity.",
+              )
+            )}
+          </ScrollArea>
+        </TabsContent>
+
+        <TabsContent
           value="tools"
           className="flex-1 overflow-hidden data-[state=inactive]:hidden px-3 pb-3"
         >
@@ -237,118 +362,198 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
           className="flex-1 overflow-hidden data-[state=inactive]:hidden px-3 pb-3"
         >
           <ScrollArea className="h-full pr-2">
-            {formattedDiagnostics ? (
+            {taskStatus || formattedDiagnostics ? (
               <div className="space-y-3 text-xs text-muted-foreground">
-                <div className="grid grid-cols-1 gap-2">
-                  <div className="flex items-center justify-between">
-                    <span>Enabled</span>
-                    <span className="font-medium text-foreground">{formattedDiagnostics.enabled}</span>
-                  </div>
-                  <div className="flex items-center justify-between gap-4">
-                    <span>Endpoint</span>
-                    <span className="font-medium text-foreground break-all text-right">
-                      {formattedDiagnostics.endpoint}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span>Catalog Size</span>
-                    <span className="font-medium text-foreground">{formattedDiagnostics.catalogSize}</span>
-                  </div>
-                  {typeof formattedDiagnostics.aliasesCount === "number" && (
-                    <div className="flex items-center justify-between">
-                      <span>Aliases Registered</span>
-                      <span className="font-medium text-foreground">{formattedDiagnostics.aliasesCount}</span>
+                {taskStatus && (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 gap-2">
+                      <div className="flex items-center justify-between">
+                        <span>Status</span>
+                        <span className="font-medium text-foreground capitalize">{taskStatus.status.replace(/_/g, " ")}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Run Id</span>
+                        <span className="font-medium text-foreground break-all">
+                          {taskStatus.runId ?? "—"}
+                        </span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Updated</span>
+                        <span className="font-medium text-foreground">
+                          {formatTimestamp(taskStatus.updatedAt)}
+                        </span>
+                      </div>
                     </div>
-                  )}
-                </div>
 
-                <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
-                  <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Last Health Check</p>
-                  <div className="space-y-1">
-                    <div className="flex items-center justify-between">
-                      <span>Status</span>
-                      <span className="font-medium text-foreground">{formattedDiagnostics.lastHealthStatus}</span>
+                    <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Metrics</p>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div className="flex items-center justify-between">
+                          <span>Agents completed</span>
+                          <span className="font-medium text-foreground">{taskStatus.metrics.agentsCompleted}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Agents failed</span>
+                          <span className="font-medium text-foreground">{taskStatus.metrics.agentsFailed}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Guardrail events</span>
+                          <span className="font-medium text-foreground">{taskStatus.metrics.guardrailEvents}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span>Negotiation rounds</span>
+                          <span className="font-medium text-foreground">
+                            {typeof taskStatus.metrics.negotiationRounds === "number"
+                              ? taskStatus.metrics.negotiationRounds
+                              : "—"}
+                          </span>
+                        </div>
+                      </div>
+                      {taskStatus.lastError && (
+                        <div className="mt-2 text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
+                          {taskStatus.lastError}
+                        </div>
+                      )}
                     </div>
-                    <div className="flex items-center justify-between gap-4">
-                      <span>Timestamp</span>
-                      <span className="font-medium text-foreground break-all text-right">
-                        {formattedDiagnostics.lastHealthTimestamp}
-                      </span>
-                    </div>
-                    {formattedDiagnostics.lastHealthError && (
-                      <div className="text-destructive text-[11px] bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
-                        {formattedDiagnostics.lastHealthError}
+
+                    {hasGuardrailDecisions && (
+                      <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Guardrail decisions</p>
+                        <div className="space-y-2">
+                          {guardrailDecisions.map((decision, index) => (
+                            <div key={`${decision.policyId ?? "decision"}-${index}`} className="space-y-1 border border-border/40 rounded-md px-2 py-2 bg-background/60">
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="text-[11px] text-muted-foreground uppercase tracking-wide">
+                                  {decision.decision ? decision.decision.replace(/_/g, " ") : "Decision"}
+                                </span>
+                                {decision.policyId && <Badge variant="secondary">{decision.policyId}</Badge>}
+                              </div>
+                              {decision.reason && <div className="text-xs text-muted-foreground">{decision.reason}</div>}
+                              {typeof decision.riskScore === "number" && (
+                                <div className="text-[11px] text-muted-foreground">Risk score {decision.riskScore.toFixed(2)}</div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     )}
                   </div>
-                </div>
+                )}
 
-                {formattedDiagnostics.lastInvocation && (
-                  <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Last Invocation</p>
-                    <div className="grid grid-cols-1 gap-1">
+                {formattedDiagnostics && (
+                  <>
+                    <div className="grid grid-cols-1 gap-2">
+                      <div className="flex items-center justify-between">
+                        <span>Enabled</span>
+                        <span className="font-medium text-foreground">{formattedDiagnostics.enabled}</span>
+                      </div>
                       <div className="flex items-center justify-between gap-4">
-                        <span>Tool</span>
+                        <span>Endpoint</span>
                         <span className="font-medium text-foreground break-all text-right">
-                          {formattedDiagnostics.lastInvocation.tool}
+                          {formattedDiagnostics.endpoint}
                         </span>
                       </div>
-                      {formattedDiagnostics.lastInvocation.resolved && (
-                        <div className="flex items-center justify-between gap-4">
-                          <span>Resolved</span>
-                          <span className="font-medium text-foreground break-all text-right">
-                            {formattedDiagnostics.lastInvocation.resolved}
-                          </span>
+                      <div className="flex items-center justify-between">
+                        <span>Catalog Size</span>
+                        <span className="font-medium text-foreground">{formattedDiagnostics.catalogSize}</span>
+                      </div>
+                      {typeof formattedDiagnostics.aliasesCount === "number" && (
+                        <div className="flex items-center justify-between">
+                          <span>Aliases Registered</span>
+                          <span className="font-medium text-foreground">{formattedDiagnostics.aliasesCount}</span>
                         </div>
                       )}
-                      <div className="flex items-center justify-between">
-                        <span>Cached</span>
-                        <span className="font-medium text-foreground">
-                          {formattedDiagnostics.lastInvocation.cached}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between">
-                        <span>Latency</span>
-                        <span className="font-medium text-foreground">
-                          {formattedDiagnostics.lastInvocation.latency}
-                        </span>
-                      </div>
-                      <div className="flex items-center justify-between gap-4">
-                        <span>Timestamp</span>
-                        <span className="font-medium text-foreground break-all text-right">
-                          {formattedDiagnostics.lastInvocation.timestamp}
-                        </span>
+                    </div>
+
+                    <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
+                      <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Last Health Check</p>
+                      <div className="space-y-1">
+                        <div className="flex items-center justify-between">
+                          <span>Status</span>
+                          <span className="font-medium text-foreground">{formattedDiagnostics.lastHealthStatus}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-4">
+                          <span>Timestamp</span>
+                          <span className="font-medium text-foreground break-all text-right">
+                            {formattedDiagnostics.lastHealthTimestamp}
+                          </span>
+                        </div>
+                        {formattedDiagnostics.lastHealthError && (
+                          <div className="text-destructive text-[11px] bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
+                            {formattedDiagnostics.lastHealthError}
+                          </div>
+                        )}
                       </div>
                     </div>
-                  </div>
-                )}
 
-                {formattedDiagnostics.circuit && (
-                  <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
-                    <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Circuit Breaker</p>
-                    <div className="grid grid-cols-1 gap-1">
-                      <div className="flex items-center justify-between">
-                        <span>State</span>
-                        <span className="font-medium text-foreground">{formattedDiagnostics.circuit.state}</span>
+                    {formattedDiagnostics.lastInvocation && (
+                      <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Last Invocation</p>
+                        <div className="grid grid-cols-1 gap-1">
+                          <div className="flex items-center justify-between gap-4">
+                            <span>Tool</span>
+                            <span className="font-medium text-foreground break-all text-right">
+                              {formattedDiagnostics.lastInvocation.tool}
+                            </span>
+                          </div>
+                          {formattedDiagnostics.lastInvocation.resolved && (
+                            <div className="flex items-center justify-between gap-4">
+                              <span>Resolved</span>
+                              <span className="font-medium text-foreground break-all text-right">
+                                {formattedDiagnostics.lastInvocation.resolved}
+                              </span>
+                            </div>
+                          )}
+                          <div className="flex items-center justify-between">
+                            <span>Cached</span>
+                            <span className="font-medium text-foreground">
+                              {formattedDiagnostics.lastInvocation.cached}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Latency</span>
+                            <span className="font-medium text-foreground">
+                              {formattedDiagnostics.lastInvocation.latency}
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between gap-4">
+                            <span>Timestamp</span>
+                            <span className="font-medium text-foreground break-all text-right">
+                              {formattedDiagnostics.lastInvocation.timestamp}
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="flex items-center justify-between">
-                        <span>Failures</span>
-                        <span className="font-medium text-foreground">{formattedDiagnostics.circuit.failureCount}</span>
-                      </div>
-                      <div className="flex items-center justify-between gap-4">
-                        <span>Opened</span>
-                        <span className="font-medium text-foreground break-all text-right">
-                          {formattedDiagnostics.circuit.openedAt}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                )}
+                    )}
 
-                {formattedDiagnostics.lastError && (
-                  <div className="text-destructive text-[11px] bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
-                    {formattedDiagnostics.lastError}
-                  </div>
+                    {formattedDiagnostics.circuit && (
+                      <div className="border border-border/50 rounded-lg p-3 bg-muted/20">
+                        <p className="text-[11px] uppercase tracking-wide text-muted-foreground mb-2">Circuit Breaker</p>
+                        <div className="grid grid-cols-1 gap-1">
+                          <div className="flex items-center justify-between">
+                            <span>State</span>
+                            <span className="font-medium text-foreground">{formattedDiagnostics.circuit.state}</span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span>Failures</span>
+                            <span className="font-medium text-foreground">{formattedDiagnostics.circuit.failureCount}</span>
+                          </div>
+                          <div className="flex items-center justify-between gap-4">
+                            <span>Opened</span>
+                            <span className="font-medium text-foreground break-all text-right">
+                              {formattedDiagnostics.circuit.openedAt}
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {formattedDiagnostics.lastError && (
+                      <div className="text-destructive text-[11px] bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
+                        {formattedDiagnostics.lastError}
+                      </div>
+                    )}
+                  </>
                 )}
               </div>
             ) : (

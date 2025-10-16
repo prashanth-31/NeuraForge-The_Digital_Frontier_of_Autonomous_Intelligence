@@ -18,16 +18,29 @@ TimestampFactory = Callable[[], datetime]
 
 
 class OrchestratorStateStore:
+    _FETCH_RUN = """
+        SELECT run_id, task_id, status, state, created_at, updated_at
+        FROM orchestration_runs
+        WHERE run_id = $1
+    """
+
+    _FETCH_EVENTS = """
+        SELECT run_id, sequence, event_type, agent, payload, created_at
+        FROM orchestration_events
+        WHERE run_id = $1
+        ORDER BY sequence ASC
+    """
+
     def __init__(
         self,
-        pool: "asyncpg.Pool | asyncpg.pool.Pool | Any",
+        pool: Any,
         *,
         now: TimestampFactory | None = None,
     ) -> None:
         if asyncpg is None:
             raise RuntimeError("asyncpg is required for OrchestratorStateStore")
         self._pool_or_coroutine = pool
-        self._pool: "asyncpg.Pool | None" = None
+        self._pool: Any | None = None
         self._now: TimestampFactory = now or (lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -107,6 +120,59 @@ class OrchestratorStateStore:
             payload["error"] = error
         await self.update_state(run_id, state=payload, status=status)
 
+    async def get_run(self, run_id: UUID) -> OrchestratorRun | None:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as connection:
+            row = await connection.fetchrow(self._FETCH_RUN, run_id)
+        if row is None:
+            return None
+        state_payload = row["state"]
+        if isinstance(state_payload, str):
+            try:
+                state_payload = json.loads(state_payload)
+            except json.JSONDecodeError:  # pragma: no cover - defensive guard
+                state_payload = {}
+        elif state_payload is None:
+            state_payload = {}
+        else:
+            state_payload = dict(state_payload)
+        return OrchestratorRun(
+            run_id=row["run_id"],
+            task_id=row["task_id"],
+            status=OrchestratorStatus(row["status"]),
+            state=state_payload,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    async def list_events(self, run_id: UUID) -> list[OrchestratorEvent]:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as connection:
+            rows = await connection.fetch(self._FETCH_EVENTS, run_id)
+        events: list[OrchestratorEvent] = []
+        for row in rows:
+            payload = row["payload"]
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except json.JSONDecodeError:  # pragma: no cover - defensive guard
+                    payload = {}
+            elif payload is None:
+                payload = {}
+            else:
+                payload = dict(payload)
+            events.append(
+                OrchestratorEvent(
+                    run_id=row["run_id"],
+                    sequence=row["sequence"],
+                    event_type=row["event_type"],
+                    agent=row["agent"],
+                    payload=payload,
+                    created_at=row["created_at"],
+                )
+            )
+        return events
+
     async def close(self) -> None:
         if self._pool is not None:
             await self._pool.close()
@@ -120,7 +186,7 @@ class OrchestratorStateStore:
         finally:
             await self.close()
 
-    async def _ensure_pool(self) -> "asyncpg.Pool":
+    async def _ensure_pool(self) -> Any:
         if self._pool is not None:
             return self._pool
         candidate = self._pool_or_coroutine

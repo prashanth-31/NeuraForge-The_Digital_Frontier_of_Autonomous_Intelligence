@@ -55,6 +55,59 @@ export interface ToolEvent {
 
 export type MCPDiagnostics = Record<string, unknown>;
 
+type LifecycleEventType = "agent_started" | "agent_completed" | "agent_failed" | "guardrail_triggered";
+
+export interface GuardrailDecisionEvent {
+  decision?: string;
+  reason?: string;
+  riskScore?: number;
+  policyId?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LifecycleEvent {
+  id: string;
+  type: LifecycleEventType;
+  agent?: string;
+  stepId?: string;
+  timestamp: string;
+  latencyMs?: number;
+  error?: string;
+  guardrail?: GuardrailDecisionEvent;
+}
+
+export interface TaskStatusMetricsState {
+  agentsCompleted: number;
+  agentsFailed: number;
+  guardrailEvents: number;
+  negotiationRounds: number | null;
+}
+
+export interface TaskStatusEventState {
+  sequence: number;
+  eventType: string;
+  agent?: string | null;
+  payload: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface TaskStatusState {
+  taskId: string;
+  status: string;
+  runId: string | null;
+  prompt: string | null;
+  metadata: Record<string, unknown>;
+  outputs: Array<Record<string, unknown>>;
+  plan: Record<string, unknown> | null;
+  negotiation: Record<string, unknown> | null;
+  guardrailDecisions: GuardrailDecisionEvent[];
+  metrics: TaskStatusMetricsState;
+  lastError: string | null;
+  createdAt: string | null;
+  updatedAt: string | null;
+  events: TaskStatusEventState[];
+}
+
 interface TaskContextValue {
   messages: ChatMessage[];
   history: HistoryEntry[];
@@ -65,6 +118,9 @@ interface TaskContextValue {
   resetSession: () => void;
   toolEvents: ToolEvent[];
   mcpDiagnostics: MCPDiagnostics | null;
+  lifecycleEvents: LifecycleEvent[];
+  taskStatus: TaskStatusState | null;
+  refreshTaskStatus: (taskId: string) => Promise<void>;
 }
 
 const TaskContext = createContext<TaskContextValue | undefined>(undefined);
@@ -166,6 +222,8 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
   const [isStreaming, setIsStreaming] = useState(false);
   const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
   const [mcpDiagnostics, setMcpDiagnostics] = useState<MCPDiagnostics | null>(null);
+  const [lifecycleEvents, setLifecycleEvents] = useState<LifecycleEvent[]>([]);
+  const [taskStatus, setTaskStatus] = useState<TaskStatusState | null>(null);
 
   const resetSession = useCallback(() => {
     setMessages([]);
@@ -174,6 +232,8 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
     setIsStreaming(false);
     setToolEvents([]);
     setMcpDiagnostics(null);
+    setLifecycleEvents([]);
+    setTaskStatus(null);
   }, []);
 
   const refreshHistory = useCallback(async (taskId: string) => {
@@ -223,6 +283,85 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
     }
   }, []);
 
+  const refreshTaskStatus = useCallback(async (taskId: string) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/tasks/${taskId}`);
+      if (!response.ok) {
+        if (response.status === 404) {
+          setTaskStatus(null);
+          return;
+        }
+        throw new Error(`Unable to fetch task status (${response.status})`);
+      }
+      const raw = (await response.json()) as Record<string, unknown>;
+      if (!isRecord(raw)) {
+        setTaskStatus(null);
+        return;
+      }
+
+      const metricsRaw = isRecord(raw.metrics) ? (raw.metrics as Record<string, unknown>) : {};
+      const guardrailsRaw = isRecord(raw.guardrails) ? (raw.guardrails as Record<string, unknown>) : undefined;
+      const guardrailDecisionsRaw = Array.isArray(guardrailsRaw?.decisions)
+        ? guardrailsRaw?.decisions
+        : [];
+
+      const guardrailDecisions: GuardrailDecisionEvent[] = guardrailDecisionsRaw
+        .filter((item): item is Record<string, unknown> => isRecord(item))
+        .map((item) => ({
+          decision: typeof item.decision === "string" ? item.decision : undefined,
+          reason: typeof item.reason === "string" ? item.reason : undefined,
+          riskScore: typeof item.risk_score === "number" ? item.risk_score : undefined,
+          policyId: typeof item.policy_id === "string" ? item.policy_id : undefined,
+          metadata: isRecord(item.metadata) ? (item.metadata as Record<string, unknown>) : undefined,
+        }));
+
+      const eventsRaw = Array.isArray(raw.events) ? raw.events : [];
+      const events: TaskStatusEventState[] = eventsRaw
+        .filter((item): item is Record<string, unknown> => isRecord(item))
+        .map((item) => ({
+          sequence: typeof item.sequence === "number" ? item.sequence : 0,
+          eventType: typeof item.event_type === "string" ? item.event_type : "unknown",
+          agent: typeof item.agent === "string" ? item.agent : null,
+          payload: isRecord(item.payload) ? (item.payload as Record<string, unknown>) : {},
+          createdAt: typeof item.created_at === "string" ? item.created_at : new Date().toISOString(),
+        }))
+        .sort((a, b) => a.sequence - b.sequence);
+
+      const mapped: TaskStatusState = {
+        taskId: typeof raw.task_id === "string" ? raw.task_id : taskId,
+        status: typeof raw.status === "string" ? raw.status : "unknown",
+        runId: typeof raw.run_id === "string" ? raw.run_id : null,
+        prompt: typeof raw.prompt === "string" ? raw.prompt : null,
+        metadata: isRecord(raw.metadata) ? (raw.metadata as Record<string, unknown>) : {},
+        outputs: Array.isArray(raw.outputs)
+          ? raw.outputs.filter((item): item is Record<string, unknown> => isRecord(item)).map((item) => ({ ...item }))
+          : [],
+        plan: isRecord(raw.plan) ? (raw.plan as Record<string, unknown>) : null,
+        negotiation: isRecord(raw.negotiation) ? (raw.negotiation as Record<string, unknown>) : null,
+        guardrailDecisions,
+        metrics: {
+          agentsCompleted: typeof metricsRaw.agents_completed === "number" ? metricsRaw.agents_completed : 0,
+          agentsFailed: typeof metricsRaw.agents_failed === "number" ? metricsRaw.agents_failed : 0,
+          guardrailEvents: typeof metricsRaw.guardrail_events === "number" ? metricsRaw.guardrail_events : 0,
+          negotiationRounds:
+            typeof metricsRaw.negotiation_rounds === "number"
+              ? metricsRaw.negotiation_rounds
+              : metricsRaw.negotiation_rounds === null
+                ? null
+                : null,
+        },
+        lastError: typeof raw.last_error === "string" ? raw.last_error : null,
+        createdAt: typeof raw.created_at === "string" ? raw.created_at : null,
+        updatedAt: typeof raw.updated_at === "string" ? raw.updated_at : null,
+        events,
+      };
+
+      setTaskStatus(mapped);
+    } catch (error) {
+      console.error("task_status_fetch_failed", error);
+    }
+  }, []);
+
   const submitTask = useCallback(
     async (prompt: string, metadata: Record<string, unknown> = {}) => {
       const trimmed = prompt.trim();
@@ -243,6 +382,8 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       setHistory([]);
       setToolEvents([]);
       setMcpDiagnostics(null);
+      setLifecycleEvents([]);
+      setTaskStatus(null);
 
       try {
         const response = await fetch(`${API_BASE_URL}/api/v1/submit_task/stream`, {
@@ -262,6 +403,10 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
         let buffer = "";
         let activeTaskId: string | null = null;
 
+        const appendLifecycleEvent = (event: LifecycleEvent) => {
+          setLifecycleEvents((previous) => [event, ...previous].slice(0, 100));
+        };
+
         const processEvent = (eventName: string, payload: Record<string, unknown>) => {
           if (eventName === "task_started") {
             if (typeof payload.task_id === "string") {
@@ -271,12 +416,16 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             return;
           }
 
-          if (eventName === "tool_invocation") {
+          if (eventName === "tool_invocation" || eventName === "tool_invoked") {
             const toolName = typeof payload.tool === "string" ? payload.tool : "unknown.tool";
             const resolvedTool = typeof payload.resolved_tool === "string" ? payload.resolved_tool : undefined;
             const status = payload.status === "error" ? "error" : "success";
             const cached = typeof payload.cached === "boolean" ? payload.cached : undefined;
-            const latencyValue = typeof payload.latency === "number" ? payload.latency : undefined;
+            const latencySeconds = typeof payload.latency === "number" ? payload.latency : undefined;
+            const latencyMsExplicit = typeof payload.latency_ms === "number" ? payload.latency_ms : undefined;
+            const latencyValue = typeof latencyMsExplicit === "number"
+              ? latencyMsExplicit / 1000
+              : latencySeconds;
             const composite = typeof payload.composite === "boolean" ? payload.composite : undefined;
             const errorMessage = typeof payload.error === "string" ? payload.error : undefined;
             const payloadKeys = Array.isArray(payload.payload_keys)
@@ -290,7 +439,11 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               resolvedTool,
               status,
               cached,
-              latencyMs: typeof latencyValue === "number" ? latencyValue * 1000 : undefined,
+              latencyMs: typeof latencyMsExplicit === "number"
+                ? latencyMsExplicit
+                : typeof latencyValue === "number"
+                  ? latencyValue * 1000
+                  : undefined,
               composite,
               error: errorMessage,
               payloadKeys,
@@ -306,6 +459,75 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             if (isRecord(statusPayload)) {
               setMcpDiagnostics(statusPayload as MCPDiagnostics);
             }
+            return;
+          }
+
+          if (eventName === "agent_started") {
+            const agentName = typeof payload.agent === "string" ? payload.agent : undefined;
+            const stepId = typeof payload.step_id === "string" ? payload.step_id : undefined;
+            const timestampIso = typeof payload.timestamp === "string" ? payload.timestamp : undefined;
+            appendLifecycleEvent({
+              id: randomId(),
+              type: "agent_started",
+              agent: agentName,
+              stepId,
+              timestamp: formatTimestamp(timestampIso),
+            });
+            return;
+          }
+
+          if (eventName === "agent_failed") {
+            const agentName = typeof payload.agent === "string" ? payload.agent : "unknown_agent";
+            const timestampIso = typeof payload.timestamp === "string" ? payload.timestamp : undefined;
+            const latencySeconds = typeof payload.latency === "number" ? payload.latency : undefined;
+            const latencyMsExplicit = typeof payload.latency_ms === "number" ? payload.latency_ms : undefined;
+            const latencyMs = typeof latencyMsExplicit === "number"
+              ? latencyMsExplicit
+              : typeof latencySeconds === "number"
+                ? latencySeconds * 1000
+                : undefined;
+            const errorMessage = typeof payload.error === "string" ? payload.error : undefined;
+
+            appendLifecycleEvent({
+              id: randomId(),
+              type: "agent_failed",
+              agent: agentName,
+              timestamp: formatTimestamp(timestampIso),
+              latencyMs,
+              error: errorMessage,
+              stepId: typeof payload.step_id === "string" ? payload.step_id : undefined,
+            });
+
+            if (errorMessage) {
+              setMessages((prev) => [
+                ...prev,
+                {
+                  id: randomId(),
+                  role: "system",
+                  content: `Agent ${agentName} reported an error: ${errorMessage}`,
+                  timestamp: formatTimestamp(timestampIso),
+                },
+              ]);
+            }
+            return;
+          }
+
+          if (eventName === "guardrail_triggered") {
+            const timestampIso = typeof payload.timestamp === "string" ? payload.timestamp : undefined;
+            appendLifecycleEvent({
+              id: randomId(),
+              type: "guardrail_triggered",
+              agent: typeof payload.agent === "string" ? payload.agent : undefined,
+              stepId: typeof payload.step_id === "string" ? payload.step_id : undefined,
+              timestamp: formatTimestamp(timestampIso),
+              guardrail: {
+                decision: typeof payload.decision === "string" ? payload.decision : undefined,
+                reason: typeof payload.reason === "string" ? payload.reason : undefined,
+                riskScore: typeof payload.risk_score === "number" ? payload.risk_score : undefined,
+                policyId: typeof payload.policy_id === "string" ? payload.policy_id : undefined,
+                metadata: isRecord(payload.metadata) ? (payload.metadata as Record<string, unknown>) : undefined,
+              },
+            });
             return;
           }
 
@@ -356,6 +578,19 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             }
 
             setMessages((prev) => [...prev, message]);
+            appendLifecycleEvent({
+              id: randomId(),
+              type: "agent_completed",
+              agent: agentName,
+              timestamp: formatTimestamp(typeof payload.timestamp === "string" ? payload.timestamp : undefined),
+              latencyMs:
+                typeof payload.latency_ms === "number"
+                  ? payload.latency_ms
+                  : typeof payload.latency === "number"
+                    ? payload.latency * 1000
+                    : undefined,
+              stepId: typeof payload.step_id === "string" ? payload.step_id : undefined,
+            });
             return;
           }
 
@@ -417,6 +652,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
 
         if (activeTaskId) {
           await refreshHistory(activeTaskId);
+          await refreshTaskStatus(activeTaskId);
         }
       } catch (error) {
         console.error("task_stream_failed", error);
@@ -433,7 +669,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
         setIsStreaming(false);
       }
     },
-    [isStreaming, refreshHistory],
+    [isStreaming, refreshHistory, refreshTaskStatus],
   );
 
   const value = useMemo(
@@ -447,6 +683,9 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       resetSession,
       toolEvents,
       mcpDiagnostics,
+      lifecycleEvents,
+      taskStatus,
+      refreshTaskStatus,
     }),
     [
       messages,
@@ -458,6 +697,9 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       resetSession,
       toolEvents,
       mcpDiagnostics,
+      lifecycleEvents,
+      taskStatus,
+      refreshTaskStatus,
     ],
   );
 

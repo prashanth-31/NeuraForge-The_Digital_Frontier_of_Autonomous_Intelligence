@@ -148,9 +148,9 @@ class Orchestrator:
             result.setdefault("outputs", [])
             if result.get("status") != "failed":
                 if self._negotiation is not None and not result.get("negotiation"):
-                    await self._apply_negotiation(result, run_tracker)
+                        await self._apply_negotiation(result, run_tracker, progress_cb=progress_cb)
                 elif "plan" not in result:
-                    await self._generate_plan(result, run_tracker)
+                        await self._generate_plan(result, run_tracker, progress_cb=progress_cb)
                 meta_resolution = await self._synthesize_meta_resolution(result, run_tracker)
                 await self._assemble_dossier(result, run_tracker, meta_resolution=meta_resolution)
         except Exception:
@@ -191,7 +191,15 @@ class Orchestrator:
                 agent=agent.name,
                 payload={"task_id": task.get("id")},
             )
-            await self._notify(progress_cb, {"agent": agent.name, "task_id": task.get("id"), "event": "started"})
+            await self._notify(
+                progress_cb,
+                {
+                    "event": "agent_started",
+                    "agent": agent.name,
+                    "task_id": task.get("id"),
+                    "step_id": f"agent::{agent.name}",
+                },
+            )
             increment_agent_event(agent=agent.name, event="started")
             logger.info("agent_started", agent=agent.name, task=task.get("id"))
             start_time = time.perf_counter()
@@ -231,11 +239,12 @@ class Orchestrator:
                 await self._notify(
                     progress_cb,
                     {
+                        "event": "agent_failed",
                         "agent": agent.name,
                         "task_id": task.get("id"),
-                        "event": "failed",
                         "error": str(exc),
                         "latency": duration,
+                        "step_id": f"agent::{agent.name}",
                     },
                 )
                 logger.exception(
@@ -275,11 +284,12 @@ class Orchestrator:
             await self._notify(
                 progress_cb,
                 {
+                    "event": "agent_completed",
                     "agent": agent.name,
                     "task_id": task.get("id"),
-                    "event": "completed",
                     "latency": duration,
                     "output": latest_output,
+                    "step_id": f"agent::{agent.name}",
                 },
             )
             await self._record_event(
@@ -308,9 +318,9 @@ class Orchestrator:
 
         if state.get("status") != "failed":
             if self._negotiation is not None:
-                await self._apply_negotiation(state, run_tracker)
+                await self._apply_negotiation(state, run_tracker, progress_cb=progress_cb)
             else:
-                await self._generate_plan(state, run_tracker)
+                await self._generate_plan(state, run_tracker, progress_cb=progress_cb)
             meta_resolution = await self._synthesize_meta_resolution(state, run_tracker)
             await self._assemble_dossier(state, run_tracker, meta_resolution=meta_resolution)
         state["status"] = "completed"
@@ -514,7 +524,13 @@ class Orchestrator:
         await self._record_event(tracker, event_type, payload={"error": error} if error else None)
         await self._state_store.finalize_run(tracker.run.run_id, state=state, status=status, error=error)
 
-    async def _apply_negotiation(self, state: dict[str, Any], tracker: _RunTracker | None) -> None:
+    async def _apply_negotiation(
+        self,
+        state: dict[str, Any],
+        tracker: _RunTracker | None,
+        *,
+        progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> None:
         if self._negotiation is None:
             return
         try:
@@ -544,9 +560,15 @@ class Orchestrator:
             )
         await self._update_state(tracker, state)
         await self._capture_snapshot(tracker, ContextStage.NEGOTIATION, state, extra={"negotiation": serialized})
-        await self._generate_plan(state, tracker)
+        await self._generate_plan(state, tracker, progress_cb=progress_cb)
 
-    async def _generate_plan(self, state: dict[str, Any], tracker: _RunTracker | None) -> None:
+    async def _generate_plan(
+        self,
+        state: dict[str, Any],
+        tracker: _RunTracker | None,
+        *,
+        progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> None:
         if self._planner is None:
             return
         try:
@@ -589,6 +611,21 @@ class Orchestrator:
                     agent=step.agent,
                 )
                 guardrail_decisions.append({"step_id": step.step_id, **decision.model_dump()})
+                if progress_cb is not None and decision.decision is not GuardrailDecisionType.ALLOW:
+                    await self._notify(
+                        progress_cb,
+                        {
+                            "event": "guardrail_triggered",
+                            "task_id": plan.task_id,
+                            "step_id": step.step_id,
+                            "agent": step.agent,
+                            "decision": decision.decision.value,
+                            "reason": decision.reason,
+                            "risk_score": decision.risk_score,
+                            "policy_id": decision.policy_id,
+                            "metadata": decision.metadata or {},
+                        },
+                    )
                 if tracker is not None and decision.decision in {GuardrailDecisionType.ESCALATE, GuardrailDecisionType.REVIEW}:
                     tracker.escalations += 1
                 if tracker is not None:
