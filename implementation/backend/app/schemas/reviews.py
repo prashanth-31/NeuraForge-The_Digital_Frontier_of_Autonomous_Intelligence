@@ -90,9 +90,23 @@ class ReviewResolutionStats(BaseModel):
     completed_last_24h: int = 0
 
 
+class ReviewQueueHealthStats(BaseModel):
+    backlog_pressure: float = 0.0
+    sla_breaches: int = 0
+    escalations_pending: int = 0
+
+
+class ReviewTrendStats(BaseModel):
+    resolved_last_7d: int = 0
+    dismissed_last_7d: int = 0
+    median_resolution_minutes_7d: float | None = None
+
+
 class ReviewMetricsResponse(BaseModel):
     generated_at: datetime
     totals: dict[str, int] = Field(default_factory=dict)
     assignment: ReviewAssignmentBreakdown = Field(default_factory=ReviewAssignmentBreakdown)
     aging: ReviewAgingStats = Field(default_factory=ReviewAgingStats)
     resolution: ReviewResolutionStats = Field(default_factory=ReviewResolutionStats)
+    queue_health: ReviewQueueHealthStats = Field(default_factory=ReviewQueueHealthStats)
+    trends: ReviewTrendStats = Field(default_factory=ReviewTrendStats)

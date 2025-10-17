@@ -7,7 +7,7 @@ on:
 
 jobs:
   simulation-and-tests:
-    name: Simulation harness smoke tests
+    name: Simulation and contract tests
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,8 +26,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      - name: Run orchestration targeted tests
-        run: python -m pytest tests/test_phase5_orchestration.py tests/test_orchestrator_simulation.py
+      - name: Run orchestration and contract tests
+        run: |
+          python -m pytest \
+            tests/test_phase5_orchestration.py \
+            tests/test_orchestrator_simulation.py \
+            tests/test_contract_routes.py \
+            tests/test_review_metrics_endpoint.py
 
       - name: Run simulation harness validation
         run: |
@@ -76,10 +81,39 @@ jobs:
           asyncio.run(main())
           PY
 
+  frontend-quality:
+    name: Frontend lint and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: implementation/frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint
+        run: npm run lint
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build frontend
+        run: npm run build
+
   compose-validate:
     name: Validate observability compose bundle
     runs-on: ubuntu-latest
-    needs: simulation-and-tests
+    needs:
+      - simulation-and-tests
+      - frontend-quality
     defaults:
       run:
         working-directory: implementation
@@ -89,6 +123,13 @@ jobs:
 
       - name: Validate docker compose configuration
         run: docker compose -f docker-compose.yml config -q
+
+      - name: Sanity check observability stack with Docker Compose
+        run: |
+          docker compose -f docker-compose.yml run --rm prometheus promtool check config /etc/prometheus/prometheus.yml
+          docker compose -f docker-compose.yml run --rm prometheus promtool check rules /etc/prometheus/rules
+          docker compose -f docker-compose.yml run --rm alertmanager amtool check-config /etc/alertmanager/config.yml
+          docker compose -f docker-compose.yml run --rm grafana sh -c "ls -1 /etc/grafana/provisioning/datasources && ls -1 /etc/grafana/dashboards"
 
       - name: Upload Grafana dashboard artifact
         uses: actions/upload-artifact@v4
@@ -101,3 +142,51 @@ jobs:
         with:
           name: review-operations-dashboard
           path: implementation/observability/grafana/dashboards/review_operations.json
+
+      - name: Upload task latency dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: task-guardrail-dashboard
+          path: implementation/observability/dashboards/task-latency.json
+
+      - name: Upload reviewer workload dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: review-queue-dashboard
+          path: implementation/observability/dashboards/review-queue.json
+
+      - name: Upload k6 load test script
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-submit-task
+          path: implementation/scripts/loadtesting/k6-submit-task.js
+
+  e2e-smoke:
+    name: End-to-end smoke test
+    runs-on: ubuntu-latest
+    needs:
+      - simulation-and-tests
+      - frontend-quality
+    defaults:
+      run:
+        working-directory: implementation/frontend
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build frontend for e2e
+        run: npm run build:e2e
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Run Playwright smoke suite
+        run: npm run test:e2e

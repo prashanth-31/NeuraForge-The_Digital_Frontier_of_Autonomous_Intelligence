@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { formatDistanceToNow } from "date-fns";
+import { differenceInMinutes, formatDistanceToNow } from "date-fns";
 import {
   ClipboardList,
   MessageSquareText,
@@ -16,10 +16,18 @@ import {
 } from "lucide-react";
 
 import AppLayout from "@/components/AppLayout";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useToast } from "@/components/ui/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { API_BASE_URL, REVIEW_API_TOKEN, buildReviewHeaders } from "@/lib/api";
@@ -126,6 +134,11 @@ const Reviews = () => {
 
   const reviewerLabel = user?.email ?? user?.id ?? "unknown";
 
+  const [statusFilter, setStatusFilter] = useState<ReviewStatus | "all">("all");
+  const [reviewerFilter, setReviewerFilter] = useState<string>("all");
+  const [ageFilter, setAgeFilter] = useState<string>("any");
+  const filtersActive = statusFilter !== "all" || reviewerFilter !== "all" || ageFilter !== "any";
+
   const {
     data: tickets = [],
     isLoading,
@@ -157,13 +170,125 @@ const Reviews = () => {
     [tickets],
   );
 
+  const reviewerOptions = useMemo(() => {
+    const reviewers = new Set<string>();
+    enrichedTickets.forEach((ticket) => {
+      if (ticket.assigned_to) {
+        reviewers.add(ticket.assigned_to);
+      }
+    });
+    return Array.from(reviewers).sort((a, b) => a.localeCompare(b));
+  }, [enrichedTickets]);
+
+  const filteredTickets = useMemo(() => {
+    const matchAgeFilter = (createdAt: string) => {
+      if (ageFilter === "any") {
+        return true;
+      }
+      const minutesOpen = Math.max(0, differenceInMinutes(new Date(), new Date(createdAt)));
+      if (ageFilter === "lt_30") {
+        return minutesOpen < 30;
+      }
+      if (ageFilter === "30_60") {
+        return minutesOpen >= 30 && minutesOpen < 60;
+      }
+      if (ageFilter === "1_6h") {
+        return minutesOpen >= 60 && minutesOpen < 360;
+      }
+      if (ageFilter === "gt_6h") {
+        return minutesOpen >= 360;
+      }
+      return true;
+    };
+
+    return enrichedTickets.filter((ticket) => {
+      if (statusFilter !== "all" && ticket.status !== statusFilter) {
+        return false;
+      }
+
+      if (reviewerFilter === "unassigned") {
+        if (ticket.assigned_to !== null && ticket.assigned_to !== undefined) {
+          return false;
+        }
+      } else if (reviewerFilter !== "all" && ticket.assigned_to !== reviewerFilter) {
+        return false;
+      }
+
+      if (!matchAgeFilter(ticket.created_at)) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [enrichedTickets, statusFilter, reviewerFilter, ageFilter]);
+
   const groupedTickets = useMemo(() => {
     return {
-      open: enrichedTickets.filter((ticket) => ticket.status === "open"),
-      in_review: enrichedTickets.filter((ticket) => ticket.status === "in_review"),
-      closed: enrichedTickets.filter((ticket) => ticket.status === "resolved" || ticket.status === "dismissed"),
+      open: filteredTickets.filter((ticket) => ticket.status === "open"),
+      in_review: filteredTickets.filter((ticket) => ticket.status === "in_review"),
+      closed: filteredTickets.filter((ticket) => ticket.status === "resolved" || ticket.status === "dismissed"),
+    };
+  }, [filteredTickets]);
+
+  const totalTicketsByStatus = useMemo(() => {
+    return {
+      open: enrichedTickets.filter((ticket) => ticket.status === "open").length,
+      in_review: enrichedTickets.filter((ticket) => ticket.status === "in_review").length,
+      closed: enrichedTickets.filter((ticket) => ticket.status === "resolved" || ticket.status === "dismissed").length,
     };
   }, [enrichedTickets]);
+
+  const formatMinutes = (minutes: number | null | undefined) => {
+    if (minutes === null || minutes === undefined || Number.isNaN(minutes)) {
+      return "—";
+    }
+    if (minutes < 1) {
+      return "<1m";
+    }
+    if (minutes < 60) {
+      return `${Math.round(minutes)}m`;
+    }
+    const hours = minutes / 60;
+    if (hours < 24) {
+      return `${hours.toFixed(1)}h`;
+    }
+    return `${(hours / 24).toFixed(1)}d`;
+  };
+
+  const queueAlerts = useMemo(() => {
+    if (!metrics) {
+      return [] as Array<{ title: string; description: string }>;
+    }
+
+    const alerts: Array<{ title: string; description: string }> = [];
+    const openCount = metrics.totals?.open ?? 0;
+    const unassigned = metrics.assignment?.unassigned_open ?? 0;
+    const oldestOpen = metrics.aging?.open_oldest_minutes ?? 0;
+    const avgOpen = metrics.aging?.open_average_minutes ?? 0;
+
+    if (openCount >= 12) {
+      alerts.push({
+        title: "High open queue",
+        description: `There are ${openCount} tickets waiting. Consider rebalancing reviewers or adjusting agent thresholds.`,
+      });
+    }
+
+    if (unassigned >= 3) {
+      alerts.push({
+        title: "Unassigned backlog",
+        description: `${unassigned} tickets are unassigned. Assign owners to keep SLA intact.`,
+      });
+    }
+
+    if (oldestOpen >= 120 || avgOpen >= 90) {
+      alerts.push({
+        title: "Aging tickets detected",
+        description: `Oldest ticket has been open ${formatMinutes(oldestOpen)}; average open time is ${formatMinutes(avgOpen)}.`,
+      });
+    }
+
+    return alerts;
+  }, [metrics]);
 
   const invalidateReviewData = () => {
     queryClient.invalidateQueries({ queryKey: ["review-tickets", reviewerToken] });
@@ -287,23 +412,6 @@ const Reviews = () => {
     }
     const trimmed = content.trim();
     return trimmed.length ? trimmed : undefined;
-  };
-
-  const formatMinutes = (minutes: number | null | undefined) => {
-    if (minutes === null || minutes === undefined || Number.isNaN(minutes)) {
-      return "—";
-    }
-    if (minutes < 1) {
-      return "<1m";
-    }
-    if (minutes < 60) {
-      return `${Math.round(minutes)}m`;
-    }
-    const hours = minutes / 60;
-    if (hours < 24) {
-      return `${hours.toFixed(1)}h`;
-    }
-    return `${(hours / 24).toFixed(1)}d`;
   };
 
   const renderTicketHeader = (ticket: EnrichedTicket, showSummary = true) => {
@@ -579,11 +687,92 @@ const Reviews = () => {
                   )}
                 </Card>
               </div>
+
+              {queueAlerts.length > 0 && (
+                <div className="space-y-2">
+                  {queueAlerts.map((alert) => (
+                    <Alert key={alert.title} variant="destructive">
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertTitle>{alert.title}</AlertTitle>
+                      <AlertDescription>{alert.description}</AlertDescription>
+                    </Alert>
+                  ))}
+                </div>
+              )}
             </section>
           )}
 
           {metricsError && (
             <div className="text-sm text-destructive">{(metricsError as Error).message}</div>
+          )}
+
+          {reviewerToken && (
+            <section className="border border-border/50 bg-muted/30 rounded-lg p-4 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Filters</p>
+                  <p className="text-xs text-muted-foreground">Scope the panels by status, assignment, and ticket age.</p>
+                </div>
+                <Badge variant="outline">
+                  Showing {filteredTickets.length} of {enrichedTickets.length}
+                </Badge>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as ReviewStatus | "all")}>
+                  <SelectTrigger aria-label="Status filter">
+                    <SelectValue placeholder="Status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All statuses</SelectItem>
+                    <SelectItem value="open">Open</SelectItem>
+                    <SelectItem value="in_review">In review</SelectItem>
+                    <SelectItem value="resolved">Resolved</SelectItem>
+                    <SelectItem value="dismissed">Dismissed</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select value={reviewerFilter} onValueChange={setReviewerFilter}>
+                  <SelectTrigger aria-label="Reviewer filter">
+                    <SelectValue placeholder="Reviewer" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All reviewers</SelectItem>
+                    <SelectItem value="unassigned">Unassigned</SelectItem>
+                    {reviewerOptions.map((reviewer) => (
+                      <SelectItem key={reviewer} value={reviewer}>
+                        {reviewer}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={ageFilter} onValueChange={setAgeFilter}>
+                  <SelectTrigger aria-label="Age filter">
+                    <SelectValue placeholder="Age" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="any">All ages</SelectItem>
+                    <SelectItem value="lt_30">Under 30 minutes</SelectItem>
+                    <SelectItem value="30_60">30 – 60 minutes</SelectItem>
+                    <SelectItem value="1_6h">1 – 6 hours</SelectItem>
+                    <SelectItem value="gt_6h">Over 6 hours</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {filtersActive && (
+                <div className="flex justify-end">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setStatusFilter("all");
+                      setReviewerFilter("all");
+                      setAgeFilter("any");
+                    }}
+                  >
+                    Reset filters
+                  </Button>
+                </div>
+              )}
+            </section>
           )}
 
           {loadingState}
@@ -593,7 +782,9 @@ const Reviews = () => {
               <section>
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-semibold text-foreground">New tickets</h2>
-                  <Badge variant="secondary">{groupedTickets.open.length} waiting</Badge>
+                  <Badge variant="secondary">
+                    {groupedTickets.open.length} of {totalTicketsByStatus.open} waiting
+                  </Badge>
                 </div>
                 {openTicketsContent}
               </section>
@@ -603,7 +794,9 @@ const Reviews = () => {
               <section>
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-semibold text-foreground">Active reviews</h2>
-                  <Badge variant="secondary">{groupedTickets.in_review.length} in progress</Badge>
+                  <Badge variant="secondary">
+                    {groupedTickets.in_review.length} of {totalTicketsByStatus.in_review} in progress
+                  </Badge>
                 </div>
                 {activeTicketsContent}
               </section>
@@ -613,7 +806,9 @@ const Reviews = () => {
               <section>
                 <div className="flex items-center justify-between mb-4">
                   <h2 className="text-xl font-semibold text-foreground">Recently closed</h2>
-                  <Badge variant="outline">{groupedTickets.closed.length}</Badge>
+                  <Badge variant="outline">
+                    {groupedTickets.closed.length} of {totalTicketsByStatus.closed}
+                  </Badge>
                 </div>
                 {closedTicketsContent}
               </section>

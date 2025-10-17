@@ -31,6 +31,22 @@ class OrchestratorStateStore:
         ORDER BY sequence ASC
     """
 
+    _FETCH_RUN_FOR_TASK = """
+        SELECT run_id, task_id, status, state, created_at, updated_at
+        FROM orchestration_runs
+        WHERE task_id = $1
+        ORDER BY created_at DESC
+        LIMIT 1
+    """
+
+    _FETCH_EVENTS_LIMITED = """
+        SELECT run_id, sequence, event_type, agent, payload, created_at
+        FROM orchestration_events
+        WHERE run_id = $1
+        ORDER BY sequence ASC
+        LIMIT $2
+    """
+
     def __init__(
         self,
         pool: Any,
@@ -126,29 +142,25 @@ class OrchestratorStateStore:
             row = await connection.fetchrow(self._FETCH_RUN, run_id)
         if row is None:
             return None
-        state_payload = row["state"]
-        if isinstance(state_payload, str):
-            try:
-                state_payload = json.loads(state_payload)
-            except json.JSONDecodeError:  # pragma: no cover - defensive guard
-                state_payload = {}
-        elif state_payload is None:
-            state_payload = {}
-        else:
-            state_payload = dict(state_payload)
-        return OrchestratorRun(
-            run_id=row["run_id"],
-            task_id=row["task_id"],
-            status=OrchestratorStatus(row["status"]),
-            state=state_payload,
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
+        return self._row_to_run(row)
 
-    async def list_events(self, run_id: UUID) -> list[OrchestratorEvent]:
+    async def get_latest_run_for_task(self, task_id: str) -> OrchestratorRun | None:
+        if not task_id:
+            return None
         pool = await self._ensure_pool()
         async with pool.acquire() as connection:
-            rows = await connection.fetch(self._FETCH_EVENTS, run_id)
+            row = await connection.fetchrow(self._FETCH_RUN_FOR_TASK, task_id)
+        if row is None:
+            return None
+        return self._row_to_run(row)
+
+    async def list_events(self, run_id: UUID, *, limit: int | None = None) -> list[OrchestratorEvent]:
+        pool = await self._ensure_pool()
+        async with pool.acquire() as connection:
+            if limit is None:
+                rows = await connection.fetch(self._FETCH_EVENTS, run_id)
+            else:
+                rows = await connection.fetch(self._FETCH_EVENTS_LIMITED, run_id, limit)
         events: list[OrchestratorEvent] = []
         for row in rows:
             payload = row["payload"]
@@ -196,3 +208,23 @@ class OrchestratorStateStore:
             raise RuntimeError("Invalid asyncpg pool supplied to OrchestratorStateStore")
         self._pool = candidate
         return self._pool
+
+    def _row_to_run(self, row: Any) -> OrchestratorRun:
+        state_payload = row["state"]
+        if isinstance(state_payload, str):
+            try:
+                state_payload = json.loads(state_payload)
+            except json.JSONDecodeError:  # pragma: no cover - defensive guard
+                state_payload = {}
+        elif state_payload is None:
+            state_payload = {}
+        else:
+            state_payload = dict(state_payload)
+        return OrchestratorRun(
+            run_id=row["run_id"],
+            task_id=row["task_id"],
+            status=OrchestratorStatus(row["status"]),
+            state=state_payload,
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )

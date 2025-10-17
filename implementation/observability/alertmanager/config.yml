@@ -2,9 +2,30 @@ global:
   resolve_timeout: 5m
 
 route:
-  receiver: default
+  group_by: ["alertname", "team"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 2h
+  receiver: reviewers-warning
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: reviewers-critical
+    - matchers:
+        - team!="reviewers"
+      receiver: default
 
 receivers:
+  - name: reviewers-critical
+    webhook_configs:
+      - url: ${PAGER_WEBHOOK_URL}
+        send_resolved: true
+
+  - name: reviewers-warning
+    webhook_configs:
+      - url: ${SLACK_REVIEWERS_WEBHOOK_URL}
+        send_resolved: true
+
   - name: default
     webhook_configs:
       - url: ${PAGER_WEBHOOK_URL}

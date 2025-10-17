@@ -193,12 +193,15 @@ class Orchestrator:
             )
             await self._notify(
                 progress_cb,
-                {
-                    "event": "agent_started",
-                    "agent": agent.name,
-                    "task_id": task.get("id"),
-                    "step_id": f"agent::{agent.name}",
-                },
+                self._ensure_run_id(
+                    run_tracker,
+                    {
+                        "event": "agent_started",
+                        "agent": agent.name,
+                        "task_id": task.get("id"),
+                        "step_id": f"agent::{agent.name}",
+                    },
+                ),
             )
             increment_agent_event(agent=agent.name, event="started")
             logger.info("agent_started", agent=agent.name, task=task.get("id"))
@@ -238,14 +241,17 @@ class Orchestrator:
                 )
                 await self._notify(
                     progress_cb,
-                    {
-                        "event": "agent_failed",
-                        "agent": agent.name,
-                        "task_id": task.get("id"),
-                        "error": str(exc),
-                        "latency": duration,
-                        "step_id": f"agent::{agent.name}",
-                    },
+                    self._ensure_run_id(
+                        run_tracker,
+                        {
+                            "event": "agent_failed",
+                            "agent": agent.name,
+                            "task_id": task.get("id"),
+                            "error": str(exc),
+                            "latency": duration,
+                            "step_id": f"agent::{agent.name}",
+                        },
+                    ),
                 )
                 logger.exception(
                     "agent_failed",
@@ -283,14 +289,17 @@ class Orchestrator:
             latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
             await self._notify(
                 progress_cb,
-                {
-                    "event": "agent_completed",
-                    "agent": agent.name,
-                    "task_id": task.get("id"),
-                    "latency": duration,
-                    "output": latest_output,
-                    "step_id": f"agent::{agent.name}",
-                },
+                self._ensure_run_id(
+                    run_tracker,
+                    {
+                        "event": "agent_completed",
+                        "agent": agent.name,
+                        "task_id": task.get("id"),
+                        "latency": duration,
+                        "output": latest_output,
+                        "step_id": f"agent::{agent.name}",
+                    },
+                ),
             )
             await self._record_event(
                 run_tracker,
@@ -396,6 +405,14 @@ class Orchestrator:
         if callback is None:
             return
         await callback(payload)
+
+    @staticmethod
+    def _ensure_run_id(tracker: _RunTracker | None, payload: dict[str, Any]) -> dict[str, Any]:
+        if tracker is None or tracker.run is None:
+            return payload
+        enriched = dict(payload)
+        enriched.setdefault("run_id", str(tracker.run.run_id))
+        return enriched
 
     async def _record_event(
         self,
@@ -614,17 +631,20 @@ class Orchestrator:
                 if progress_cb is not None and decision.decision is not GuardrailDecisionType.ALLOW:
                     await self._notify(
                         progress_cb,
-                        {
-                            "event": "guardrail_triggered",
-                            "task_id": plan.task_id,
-                            "step_id": step.step_id,
-                            "agent": step.agent,
-                            "decision": decision.decision.value,
-                            "reason": decision.reason,
-                            "risk_score": decision.risk_score,
-                            "policy_id": decision.policy_id,
-                            "metadata": decision.metadata or {},
-                        },
+                        self._ensure_run_id(
+                            tracker,
+                            {
+                                "event": "guardrail_triggered",
+                                "task_id": plan.task_id,
+                                "step_id": step.step_id,
+                                "agent": step.agent,
+                                "decision": decision.decision.value,
+                                "reason": decision.reason,
+                                "risk_score": decision.risk_score,
+                                "policy_id": decision.policy_id,
+                                "metadata": decision.metadata or {},
+                            },
+                        ),
                     )
                 if tracker is not None and decision.decision in {GuardrailDecisionType.ESCALATE, GuardrailDecisionType.REVIEW}:
                     tracker.escalations += 1

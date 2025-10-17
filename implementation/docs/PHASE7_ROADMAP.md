@@ -36,27 +36,32 @@ Phase 7 focuses on production-hardening the NeuraForge service surface. We will 
 - [x] Document environment variables and setup steps in `docs/security.md`.
 
 ### 3. Observability Enhancements
-- [ ] Add Prometheus histogram buckets for task latency broken down by agent involvement.
-- [ ] Track guardrail decision counts per policy and emit `neuraforge_guardrail_decision_total` metrics.
-- [ ] Extend reviewer dashboard with panel filters (status, reviewer, age) and alert annotations.
-- [ ] Introduce log-based alerting examples (e.g., structlog output piped to Loki or local Elastic stack).
-- [ ] Provide k6 or Locust scripts for load testing task submission, capturing metrics in Grafana.
+- [x] Add Prometheus histogram buckets for task latency broken down by agent involvement.
+- [x] Track guardrail decision counts per policy and emit `neuraforge_guardrail_decision_total` metrics.
+- [x] Extend reviewer dashboard with panel filters (status, reviewer, age) and alert annotations.
+- [x] Introduce log-based alerting examples (e.g., structlog output piped to Loki or local Elastic stack).
+- [x] Provide k6 or Locust scripts for load testing task submission, capturing metrics in Grafana.
+- [x] Emit reviewer backlog metrics for unassigned counts and oldest ticket age.
+- [x] Add `/metrics` regression tests to guard task latency, guardrail, and reviewer series serialization.
+- [x] Wire Alertmanager routing so reviewer warnings go to Slack and critical incidents page on-call responders.
 
 ## Progress Notes
 
 - **2025-10-16**: Security & rate limiting work is complete, including rate-limit Redis fallback to keep tests green offline. Next focus area is Observability Enhancements—start with Prometheus latency histograms and guardrail decision metrics, then extend the reviewer dashboard filters.
 
 ### 4. CI/CD Pipeline Upgrades
-- [ ] Expand `.github/workflows/phase5-observability.yml` (or add Phase 7 workflow) to run `npm run lint`, `npx tsc --noEmit`, `npm run build`.
-- [ ] Include contract tests covering `/submit_task/stream`, `/reviews/metrics`, and auth rejection cases.
-- [ ] Use Docker Compose in CI to sanity check Prometheus/Grafana provisioning and alert rule syntax.
-- [ ] Publish Prometheus/Grafana configs as workflow artifacts for staging environments.
-- [ ] Add end-to-end smoke test that boots the frontend against the backend API, ensuring reviewer console loads tickets and displays SSE updates.
+- [x] Expand `.github/workflows/phase5-observability.yml` to run `npm run lint`, `npx tsc --noEmit`, `npm run build`.
+- [x] Publish Grafana dashboards and k6 load script as workflow artifacts.
+- [x] Include contract tests covering `/submit_task/stream`, `/reviews/metrics`, and auth rejection cases.
+- [x] Use Docker Compose in CI to sanity check Prometheus/Grafana provisioning and alert rule syntax.
+- [x] Publish Prometheus/Grafana configs as workflow artifacts for staging environments.
+- [x] Add end-to-end smoke test that boots the frontend against the backend API, ensuring reviewer console loads tickets and displays SSE updates.
 
 ### 5. Operational Runbooks & Docs
-- [ ] Draft `docs/runbooks/reviewer_operations.md` (alert meaning, dashboards, escalation paths).
-- [ ] Document task queue remediation, including retry policies and dead-letter handling.
-- [ ] Provide upgrade guidance for settings (environment variable matrix, secrets management).
+- [x] Draft `docs/runbooks/reviewer_operations.md` (alert meaning, dashboards, escalation paths).
+- [x] Document task queue remediation, including retry policies and dead-letter handling.
+- [x] Provide upgrade guidance for settings (environment variable matrix, secrets management).
+- [x] Document staging k6 smoke procedure so operators can rehearse artifact rollout.
 
 ## Milestones & Timeline (estimates)
 1. **Week 1**: API endpoint expansion + SSE instrumentation.

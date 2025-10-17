@@ -17,7 +17,7 @@ except ModuleNotFoundError:  # pragma: no cover - asyncpg optional
 
 from ..core.config import EscalationSettings, Settings
 from ..core.logging import get_logger
-from ..core.metrics import record_review_ticket_counts
+from ..core.metrics import record_review_oldest_ticket_age, record_review_ticket_counts
 from ..services.notifications import ReviewNotificationService, ReviewEvent
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -310,6 +310,12 @@ class ReviewManager:
         in_review_ages: list[float] = []
         resolution_durations: list[float] = []
         completed_last_24h = 0
+        resolved_last_7d = 0
+        dismissed_last_7d = 0
+        resolution_durations_7d: list[float] = []
+        escalations_pending = 0
+        sla_breaches = 0
+        seven_days_ago = now - timedelta(days=7)
 
         for ticket in tickets:
             totals[ticket.status.value] += 1
@@ -329,15 +335,40 @@ class ReviewManager:
                 resolution_durations.append(duration_minutes)
                 if now - ticket.updated_at <= timedelta(hours=24):
                     completed_last_24h += 1
+                if ticket.updated_at >= seven_days_ago:
+                    resolution_durations_7d.append(duration_minutes)
+                    if ticket.status is ReviewStatus.RESOLVED:
+                        resolved_last_7d += 1
+                    else:
+                        dismissed_last_7d += 1
+
+            payload = ticket.escalation_payload or {}
+            if isinstance(payload, dict) and payload:
+                sla_info = payload.get("sla")
+                if isinstance(sla_info, dict):
+                    breach_flag = sla_info.get("breach") or sla_info.get("breached")
+                    if isinstance(breach_flag, bool) and breach_flag:
+                        sla_breaches += 1
+                if ticket.status in {ReviewStatus.OPEN, ReviewStatus.IN_REVIEW}:
+                    escalations_pending += 1
 
         def _average(values: list[float]) -> float:
             return round(sum(values) / len(values), 2) if values else 0.0
 
         resolution_average = _average(resolution_durations) if resolution_durations else None
         resolution_median = round(median(resolution_durations), 2) if resolution_durations else None
+        resolution_median_7d = round(median(resolution_durations_7d), 2) if resolution_durations_7d else None
 
         for status in ReviewStatus:
             totals.setdefault(status.value, 0)
+
+        active_reviewers = len(assignment_counts)
+        backlog_denominator = max(1, active_reviewers or 0)
+        backlog_pressure = (
+            (totals[ReviewStatus.OPEN.value] + totals[ReviewStatus.IN_REVIEW.value]) / backlog_denominator
+            if backlog_denominator
+            else float(totals[ReviewStatus.OPEN.value] + totals[ReviewStatus.IN_REVIEW.value])
+        )
 
         return {
             "generated_at": now,
@@ -355,6 +386,16 @@ class ReviewManager:
                 "average_minutes": resolution_average,
                 "median_minutes": resolution_median,
                 "completed_last_24h": completed_last_24h,
+            },
+            "queue_health": {
+                "backlog_pressure": round(backlog_pressure, 2),
+                "sla_breaches": sla_breaches,
+                "escalations_pending": escalations_pending,
+            },
+            "trends": {
+                "resolved_last_7d": resolved_last_7d,
+                "dismissed_last_7d": dismissed_last_7d,
+                "median_resolution_minutes_7d": resolution_median_7d,
             },
         }
 
@@ -400,16 +441,29 @@ class ReviewManager:
         return ticket
 
     async def _refresh_metrics(self) -> None:
-        open_count = len(await self._store.list(status=ReviewStatus.OPEN))
-        in_review_count = len(await self._store.list(status=ReviewStatus.IN_REVIEW))
-        resolved_count = len(await self._store.list(status=ReviewStatus.RESOLVED))
-        dismissed_count = len(await self._store.list(status=ReviewStatus.DISMISSED))
-        record_review_ticket_counts(
-            open_count=open_count,
-            in_review=in_review_count,
-            resolved=resolved_count,
-            dismissed=dismissed_count,
+        tickets = await self._store.list()
+        now = datetime.now(timezone.utc)
+
+        open_tickets = [ticket for ticket in tickets if ticket.status is ReviewStatus.OPEN]
+        in_review_tickets = [ticket for ticket in tickets if ticket.status is ReviewStatus.IN_REVIEW]
+        resolved_tickets = [ticket for ticket in tickets if ticket.status is ReviewStatus.RESOLVED]
+        dismissed_tickets = [ticket for ticket in tickets if ticket.status is ReviewStatus.DISMISSED]
+
+        open_unassigned = sum(1 for ticket in open_tickets if not ticket.assigned_to)
+        oldest_open_seconds = (
+            max((now - ticket.created_at).total_seconds() for ticket in open_tickets)
+            if open_tickets
+            else 0.0
         )
+
+        record_review_ticket_counts(
+            open_count=len(open_tickets),
+            in_review=len(in_review_tickets),
+            resolved=len(resolved_tickets),
+            dismissed=len(dismissed_tickets),
+            unassigned_open=open_unassigned,
+        )
+        record_review_oldest_ticket_age(seconds=oldest_open_seconds)
 
     async def _publish_event(
         self,

@@ -36,7 +36,7 @@ from ..orchestration.planner import DependencyTaskPlanner, SimpleTaskPlanner
 from ..orchestration.scheduler import AsyncioTaskScheduler, SequentialTaskScheduler
 from ..orchestration.meta import MetaAgent
 from ..orchestration.review import ReviewManager, ReviewStatus
-from ..orchestration.state import OrchestratorEvent
+from ..orchestration.state import OrchestratorEvent, OrchestratorRun
 from ..orchestration.store import OrchestratorStateStore
 from ..schemas.reviews import (
     ReviewAssignmentRequest,
@@ -67,6 +67,8 @@ REPORTS_READ_SCOPE = "reports:read"
 rate_limit_task_submission = rate_limit_dependency("task_submission")
 rate_limit_review_action = rate_limit_dependency("review_action")
 
+MAX_TASK_EVENTS = 250
+
 
 async def _extract_json_body(request: Request) -> dict[str, Any]:
     payload = await request.json()
@@ -94,6 +96,114 @@ def _parse_datetime(value: Any) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+def _scrub_outputs(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    outputs: list[dict[str, Any]] = []
+    for item in value:
+        if isinstance(item, dict):
+            outputs.append(dict(item))
+    return outputs
+
+
+def _scrub_metadata(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
+def _extract_guardrail_data(result_state: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    guardrail_block = result_state.get("guardrails") if isinstance(result_state, dict) else None
+    if not isinstance(guardrail_block, dict):
+        return None, []
+    decisions_raw = guardrail_block.get("decisions")
+    decisions: list[dict[str, Any]] = []
+    if isinstance(decisions_raw, list):
+        for item in decisions_raw:
+            if isinstance(item, dict):
+                decisions.append(dict(item))
+    return dict(guardrail_block), decisions
+
+
+def _compute_task_metrics(
+    result_state: dict[str, Any],
+    events: list[OrchestratorEvent],
+    guardrail_decisions: list[dict[str, Any]],
+) -> TaskStatusMetrics:
+    completed_agents = sum(1 for event in events if event.event_type == "agent_completed")
+    failed_agents = sum(1 for event in events if event.event_type == "agent_failed")
+    if completed_agents == 0:
+        completed_agents = len(_scrub_outputs(result_state.get("outputs")))
+    guardrail_events = len(guardrail_decisions)
+    negotiation_rounds: int | None = None
+    negotiation_block = result_state.get("negotiation")
+    if isinstance(negotiation_block, dict):
+        rounds_value = negotiation_block.get("rounds")
+        if isinstance(rounds_value, int):
+            negotiation_rounds = rounds_value
+        elif isinstance(rounds_value, float):
+            negotiation_rounds = int(round(rounds_value))
+    return TaskStatusMetrics(
+        agents_completed=completed_agents,
+        agents_failed=failed_agents,
+        guardrail_events=guardrail_events,
+        negotiation_rounds=negotiation_rounds,
+    )
+
+
+def _task_status_response(
+    *,
+    task_id: str,
+    result_state: dict[str, Any],
+    run_record: OrchestratorRun | None,
+    events: list[OrchestratorEvent],
+) -> TaskStatusResponse:
+    effective_task_id = str(result_state.get("id") or result_state.get("task_id") or task_id)
+    status_value = str(result_state.get("status") or (run_record.status.value if run_record else "unknown"))
+    prompt_value = result_state.get("prompt") if isinstance(result_state.get("prompt"), str) else None
+    metadata = _scrub_metadata(result_state.get("metadata"))
+    outputs = _scrub_outputs(result_state.get("outputs"))
+    plan = result_state.get("plan") if isinstance(result_state.get("plan"), dict) else None
+    negotiation = result_state.get("negotiation") if isinstance(result_state.get("negotiation"), dict) else None
+    guardrails_payload, guardrail_decisions = _extract_guardrail_data(result_state)
+
+    last_error_value = result_state.get("error")
+    last_error = str(last_error_value) if isinstance(last_error_value, str) and last_error_value else None
+
+    run_id_value = result_state.get("run_id")
+    run_id_str: str | None = None
+    if isinstance(run_id_value, uuid.UUID):
+        run_id_str = str(run_id_value)
+    elif isinstance(run_id_value, str) and run_id_value:
+        run_id_str = run_id_value
+    elif run_record is not None:
+        run_id_str = str(run_record.run_id)
+
+    metrics = _compute_task_metrics(result_state, events, guardrail_decisions)
+
+    created_at = run_record.created_at if run_record else _parse_datetime(result_state.get("created_at"))
+    updated_at = run_record.updated_at if run_record else _parse_datetime(result_state.get("updated_at") or result_state.get("timestamp"))
+
+    event_models = [OrchestratorEventModel.from_domain(event) for event in events]
+
+    return TaskStatusResponse(
+        task_id=effective_task_id,
+        status=status_value,
+        run_id=run_id_str,
+        prompt=prompt_value,
+        metadata=metadata,
+        outputs=outputs,
+        plan=plan,
+        negotiation=negotiation,
+        guardrails=guardrails_payload,
+        metrics=metrics,
+        last_error=last_error,
+        created_at=created_at,
+        updated_at=updated_at,
+        events=event_models,
+    )
 
 
 async def _build_orchestration_pipeline(
@@ -360,9 +470,41 @@ async def submit_task_stream(
 
     async def event_stream():
         queue: asyncio.Queue[tuple[str, dict[str, Any]]] = asyncio.Queue()
+        event_sequence = 0
+        active_run_id: str | None = None
+
+        def _normalize_event(event: str, payload: dict[str, Any]) -> dict[str, Any]:
+            nonlocal event_sequence, active_run_id
+            body = dict(payload)
+            run_value = body.get("run_id")
+            if isinstance(run_value, uuid.UUID):
+                body["run_id"] = str(run_value)
+                run_value = body["run_id"]
+            if isinstance(run_value, str) and run_value:
+                active_run_id = run_value
+            elif active_run_id:
+                body.setdefault("run_id", active_run_id)
+            if not isinstance(body.get("timestamp"), str):
+                body["timestamp"] = _now_iso()
+            body.setdefault("task_id", task_id)
+            event_sequence += 1
+            envelope: dict[str, Any] = {
+                "event": event,
+                "sequence": event_sequence,
+                "task_id": body["task_id"],
+                "timestamp": body["timestamp"],
+                "payload": dict(body),
+            }
+            if active_run_id:
+                envelope["run_id"] = active_run_id
+            envelope.update(body)
+            return envelope
 
         async def emit(event: str, data: dict[str, Any]) -> None:
-            await queue.put((event, data))
+            if event == "__END__":
+                await queue.put((event, {}))
+                return
+            await queue.put((event, _normalize_event(event, data)))
 
         async def progress(event_payload: dict[str, Any]) -> None:
             payload_copy = {key: value for key, value in event_payload.items() if key != "event"}
@@ -372,6 +514,7 @@ async def submit_task_stream(
             await emit(event_type, payload_copy)
 
         async def runner() -> None:
+            nonlocal active_run_id
             memory_service = HybridMemoryService.from_settings(settings)
             state_store_factory: OrchestratorStateStore | None = None
             review_manager = get_review_manager_singleton(settings)
@@ -448,6 +591,8 @@ async def submit_task_stream(
                                 event_payload = dict(payload)
                                 event_payload.setdefault("timestamp", _now_iso())
                                 event_payload["task_id"] = task_id
+                                if active_run_id:
+                                    event_payload.setdefault("run_id", active_run_id)
                                 await emit("tool_invoked", event_payload)
 
                             async def run_agents(active_tools: Any | None) -> dict[str, Any]:
@@ -491,6 +636,12 @@ async def submit_task_stream(
                                 await embedding_service.aclose()
 
                         if result is not None:
+                            run_candidate = result.get("run_id") if isinstance(result, dict) else None
+                            if isinstance(run_candidate, uuid.UUID):
+                                active_run_id = str(run_candidate)
+                                result["run_id"] = active_run_id
+                            elif isinstance(run_candidate, str) and run_candidate:
+                                active_run_id = run_candidate
                             await memory.store_ephemeral_memory(task_id, {"result": result})
                             await emit(
                                 "task_completed",
@@ -498,6 +649,7 @@ async def submit_task_stream(
                                     "task_id": task_id,
                                     "status": result.get("status", "completed"),
                                     "timestamp": _now_iso(),
+                                    "run_id": active_run_id,
                                 },
                             )
                     finally:
@@ -535,96 +687,47 @@ async def get_task_status(
     memory: HybridMemoryService = Depends(get_hybrid_memory),
     state_store: OrchestratorStateStore | None = Depends(get_orchestrator_state_store),
 ) -> TaskStatusResponse:
-    payload = await memory.fetch_ephemeral_memory(task_id)
-    if payload is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-
-    result_state = payload.get("result") if isinstance(payload, dict) else None
-    if not isinstance(result_state, dict):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
-
-    effective_task_id = str(result_state.get("id") or result_state.get("task_id") or task_id)
-    status_value = str(result_state.get("status") or "unknown")
-    prompt_value = result_state.get("prompt") if isinstance(result_state.get("prompt"), str) else None
-    metadata_obj = result_state.get("metadata") if isinstance(result_state.get("metadata"), dict) else {}
-    metadata = dict(metadata_obj) if metadata_obj else {}
-    outputs = [dict(item) if isinstance(item, dict) else item for item in result_state.get("outputs", []) if isinstance(item, dict)]
-    plan_obj = result_state.get("plan") if isinstance(result_state.get("plan"), dict) else None
-    plan = dict(plan_obj) if plan_obj is not None else None
-    negotiation_obj = result_state.get("negotiation") if isinstance(result_state.get("negotiation"), dict) else None
-    negotiation = dict(negotiation_obj) if negotiation_obj is not None else None
-    guardrail_decisions: list[dict[str, Any]] = []
-    guardrail_block = result_state.get("guardrails")
-    if isinstance(guardrail_block, dict):
-        decisions = guardrail_block.get("decisions")
-        if isinstance(decisions, list):
-            guardrail_decisions = [decision for decision in decisions if isinstance(decision, dict)]
-    guardrails_payload = dict(guardrail_block) if isinstance(guardrail_block, dict) else None
-    error_value = result_state.get("error")
-    last_error = str(error_value) if isinstance(error_value, str) and error_value else None
-
-    run_id_value = result_state.get("run_id")
-    run_id_str: str | None = None
-    if isinstance(run_id_value, uuid.UUID):
-        run_id_str = str(run_id_value)
-    elif isinstance(run_id_value, str) and run_id_value:
-        run_id_str = run_id_value
-
-    run_record = None
+    result_state: dict[str, Any] | None = None
+    run_record: OrchestratorRun | None = None
     events: list[OrchestratorEvent] = []
-    if state_store is not None and run_id_str:
-        try:
-            run_uuid = uuid.UUID(run_id_str)
-        except ValueError:
-            run_uuid = None
+
+    payload = await memory.fetch_ephemeral_memory(task_id)
+    if isinstance(payload, dict):
+        candidate = payload.get("result")
+        if isinstance(candidate, dict):
+            result_state = dict(candidate)
+
+    if state_store is not None:
+        run_uuid: uuid.UUID | None = None
+        if result_state is not None:
+            run_id_value = result_state.get("run_id")
+            if isinstance(run_id_value, uuid.UUID):
+                run_uuid = run_id_value
+            elif isinstance(run_id_value, str) and run_id_value:
+                try:
+                    run_uuid = uuid.UUID(run_id_value)
+                except ValueError:
+                    run_uuid = None
         if run_uuid is not None:
             run_record = await state_store.get_run(run_uuid)
-            if run_record is not None:
-                events = await state_store.list_events(run_uuid)
+        if run_record is None:
+            run_record = await state_store.get_latest_run_for_task(task_id)
+        if run_record is not None:
+            events = await state_store.list_events(run_record.run_id, limit=MAX_TASK_EVENTS)
+            if result_state is None:
+                result_state = dict(run_record.state)
+            else:
+                result_state.setdefault("status", run_record.status.value)
+                result_state.setdefault("run_id", str(run_record.run_id))
 
-    created_at = run_record.created_at if run_record is not None else _parse_datetime(result_state.get("created_at"))
-    updated_at = run_record.updated_at if run_record is not None else _parse_datetime(
-        result_state.get("updated_at") or result_state.get("timestamp")
-    )
+    if result_state is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
 
-    completed_agents = sum(1 for event in events if event.event_type == "agent_completed")
-    if completed_agents == 0:
-        completed_agents = len(outputs)
-    failed_agents = sum(1 for event in events if event.event_type == "agent_failed")
-    guardrail_events = len(guardrail_decisions)
-
-    negotiation_rounds = None
-    if isinstance(negotiation, dict):
-        rounds_value = negotiation.get("rounds")
-        if isinstance(rounds_value, int):
-            negotiation_rounds = rounds_value
-        elif isinstance(rounds_value, float):
-            negotiation_rounds = int(rounds_value)
-
-    metrics = TaskStatusMetrics(
-        agents_completed=completed_agents,
-        agents_failed=failed_agents,
-        guardrail_events=guardrail_events,
-        negotiation_rounds=negotiation_rounds,
-    )
-
-    event_models = [OrchestratorEventModel.from_domain(event) for event in events[:100]]
-
-    return TaskStatusResponse(
-        task_id=effective_task_id,
-        status=status_value,
-        run_id=run_id_str,
-        prompt=prompt_value,
-        metadata=metadata,
-        outputs=outputs,
-        plan=plan,
-        negotiation=negotiation,
-    guardrails=guardrails_payload,
-        metrics=metrics,
-        last_error=last_error,
-        created_at=created_at,
-        updated_at=updated_at,
-        events=event_models,
+    return _task_status_response(
+        task_id=task_id,
+        result_state=result_state,
+        run_record=run_record,
+        events=events,
     )
 
 

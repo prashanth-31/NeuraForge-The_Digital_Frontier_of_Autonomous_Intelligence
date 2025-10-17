@@ -13,6 +13,13 @@ AGENT_LATENCY_SECONDS = Histogram(
     labelnames=("agent",),
 )
 
+TASK_LATENCY_SECONDS = Histogram(
+    "neuraforge_task_latency_seconds",
+    "End-to-end task latency segmented by agent involvement",
+    labelnames=("entry_point", "agent_count"),
+    buckets=(0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600, float("inf")),
+)
+
 AGENT_EVENT_TOTAL = Counter(
     "neuraforge_agent_events_total",
     "Count of agent lifecycle events",
@@ -54,6 +61,12 @@ NEGOTIATION_CONSENSUS = Histogram(
 
 GUARDRAIL_DECISIONS_TOTAL = Counter(
     "neuraforge_guardrail_decisions_total",
+    "Guardrail decisions by outcome",
+    labelnames=("decision", "policy_id"),
+)
+
+GUARDRAIL_DECISION_TOTAL = Counter(
+    "neuraforge_guardrail_decision_total",
     "Guardrail decisions by outcome",
     labelnames=("decision", "policy_id"),
 )
@@ -109,6 +122,11 @@ REVIEW_TICKETS_GAUGE = Gauge(
 REVIEW_TICKETS_OPEN_GAUGE = Gauge(
     "neuraforge_review_tickets_open",
     "Open review tickets awaiting action.",
+)
+
+REVIEW_TICKET_OLDEST_AGE_SECONDS = Gauge(
+    "neuraforge_review_ticket_oldest_age_seconds",
+    "Oldest observed open review ticket age in seconds.",
 )
 
 MEMORY_CACHE_HITS_TOTAL = Counter(
@@ -207,6 +225,11 @@ def observe_agent_latency(*, agent: str, latency: float) -> None:
     AGENT_LATENCY_SECONDS.labels(agent=agent).observe(latency)
 
 
+def observe_task_latency(*, entry_point: str, agent_count: int, latency: float) -> None:
+    histogram_label = str(agent_count) if agent_count <= 5 else "5_plus"
+    TASK_LATENCY_SECONDS.labels(entry_point=entry_point, agent_count=histogram_label).observe(latency)
+
+
 def increment_agent_event(*, agent: str, event: str) -> None:
     AGENT_EVENT_TOTAL.labels(agent=agent, event=event).inc()
 
@@ -239,7 +262,9 @@ def observe_negotiation_metrics(*, strategy: str, rounds: int, consensus: float 
 
 
 def increment_guardrail_decision(*, decision: str, policy_id: str | None) -> None:
-    GUARDRAIL_DECISIONS_TOTAL.labels(decision=decision, policy_id=policy_id or "none").inc()
+    labels = {"decision": decision, "policy_id": policy_id or "none"}
+    GUARDRAIL_DECISIONS_TOTAL.labels(**labels).inc()
+    GUARDRAIL_DECISION_TOTAL.labels(**labels).inc()
     if decision in {"escalate", "review"}:
         ORCHESTRATOR_ESCALATIONS_TOTAL.labels(policy_id=policy_id or "none").inc()
 
@@ -297,12 +322,18 @@ def record_review_ticket_counts(
     in_review: int,
     resolved: int,
     dismissed: int,
+    unassigned_open: int = 0,
 ) -> None:
     REVIEW_TICKETS_GAUGE.labels(status="open").set(open_count)
     REVIEW_TICKETS_GAUGE.labels(status="in_review").set(in_review)
     REVIEW_TICKETS_GAUGE.labels(status="resolved").set(resolved)
     REVIEW_TICKETS_GAUGE.labels(status="dismissed").set(dismissed)
+    REVIEW_TICKETS_GAUGE.labels(status="unassigned").set(unassigned_open)
     REVIEW_TICKETS_OPEN_GAUGE.set(open_count)
+
+
+def record_review_oldest_ticket_age(*, seconds: float) -> None:
+    REVIEW_TICKET_OLDEST_AGE_SECONDS.set(max(0.0, seconds))
 
 
 def bind_event_payload(agent: str, task_id: str, event: str, **extra: Any) -> dict[str, Any]:
