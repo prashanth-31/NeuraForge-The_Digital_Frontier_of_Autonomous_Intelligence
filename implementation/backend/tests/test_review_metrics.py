@@ -79,3 +79,9 @@ async def test_review_metrics_snapshot() -> None:
     assert metrics["resolution"]["completed_last_24h"] == 2
     assert metrics["resolution"]["average_minutes"] == pytest.approx(45.0, rel=1e-3)
     assert metrics["resolution"]["median_minutes"] == pytest.approx(45.0, rel=1e-3)
+    assert metrics["velocity"]["per_reviewer_last_7d"]["bob"] == 1
+    assert metrics["velocity"]["per_reviewer_last_7d"]["charlie"] == 1
+    assert metrics["velocity"]["median_resolution_minutes_last_7d"]["bob"] == pytest.approx(60.0, rel=1e-3)
+    assert metrics["velocity"]["median_resolution_minutes_last_7d"]["charlie"] == pytest.approx(30.0, rel=1e-3)
+    assert metrics["velocity"]["average_daily_closed_last_7d"] == pytest.approx(0.14, rel=1e-3)
+    assert metrics["velocity"]["active_reviewers_last_7d"] == 2

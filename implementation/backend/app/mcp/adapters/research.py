@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 from typing import Any, ClassVar, Sequence
 
 import httpx
-from pydantic import BaseModel, Field, HttpUrl, ValidationError, model_validator, parse_obj_as
+from pydantic import BaseModel, Field, HttpUrl, TypeAdapter, ValidationError, model_validator
 
 from .base import MCPToolAdapter
 
@@ -20,6 +20,7 @@ except ModuleNotFoundError:  # pragma: no cover - gracefully degrade during test
 
 
 DIGEST_NAMESPACE = "neuraforge:doc-loader"
+_HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
 
 
 class DuckDuckGoSearchInput(BaseModel):
@@ -205,7 +206,7 @@ class ArxivFetchAdapter(MCPToolAdapter):
             pdf_url = None
             if pdf_link:
                 try:
-                    pdf_url = parse_obj_as(HttpUrl, pdf_link)
+                    pdf_url = _HTTP_URL_ADAPTER.validate_python(pdf_link)
                 except ValidationError:
                     pdf_url = None
 

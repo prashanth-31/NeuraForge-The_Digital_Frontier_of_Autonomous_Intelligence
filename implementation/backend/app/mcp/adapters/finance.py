@@ -109,10 +109,10 @@ class PandasAnalyticsRequest(BaseModel):
     sample_size: int = Field(5, ge=1, le=50)
 
     @model_validator(mode="after")
-    def validate_source(cls, values: "PandasAnalyticsRequest") -> "PandasAnalyticsRequest":
-        if not values.frame and not values.csv:
+    def validate_source(self) -> "PandasAnalyticsRequest":
+        if not self.frame and not self.csv:
             raise ValueError("Either frame or csv must be provided")
-        return values
+        return self
 
     model_config = {"extra": "forbid"}
 
@@ -327,10 +327,10 @@ class CSVAnalyzerRequest(BaseModel):
     sample_size: int = Field(5, ge=1, le=50)
 
     @model_validator(mode="after")
-    def validate_content(cls, values: "CSVAnalyzerRequest") -> "CSVAnalyzerRequest":
-        if not values.content and not values.base64_content:
+    def validate_content(self) -> "CSVAnalyzerRequest":
+        if not self.content and not self.base64_content:
             raise ValueError("Either content or base64_content must be provided")
-        return values
+        return self
 
     model_config = {"extra": "forbid"}
 

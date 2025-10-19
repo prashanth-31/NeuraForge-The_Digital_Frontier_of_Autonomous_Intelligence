@@ -313,6 +313,8 @@ class ReviewManager:
         resolved_last_7d = 0
         dismissed_last_7d = 0
         resolution_durations_7d: list[float] = []
+        velocity_counts: defaultdict[str, int] = defaultdict(int)
+        velocity_durations: defaultdict[str, list[float]] = defaultdict(list)
         escalations_pending = 0
         sla_breaches = 0
         seven_days_ago = now - timedelta(days=7)
@@ -341,6 +343,9 @@ class ReviewManager:
                         resolved_last_7d += 1
                     else:
                         dismissed_last_7d += 1
+                    if ticket.assigned_to:
+                        velocity_counts[ticket.assigned_to] += 1
+                        velocity_durations[ticket.assigned_to].append(duration_minutes)
 
             payload = ticket.escalation_payload or {}
             if isinstance(payload, dict) and payload:
@@ -370,6 +375,13 @@ class ReviewManager:
             else float(totals[ReviewStatus.OPEN.value] + totals[ReviewStatus.IN_REVIEW.value])
         )
 
+        velocity_medians = {
+            reviewer: round(median(durations), 2)
+            for reviewer, durations in velocity_durations.items()
+            if durations
+        }
+        average_daily_closed = round(resolved_last_7d / 7, 2) if resolved_last_7d else 0.0
+
         return {
             "generated_at": now,
             "totals": dict(totals),
@@ -396,6 +408,12 @@ class ReviewManager:
                 "resolved_last_7d": resolved_last_7d,
                 "dismissed_last_7d": dismissed_last_7d,
                 "median_resolution_minutes_7d": resolution_median_7d,
+            },
+            "velocity": {
+                "per_reviewer_last_7d": dict(velocity_counts),
+                "median_resolution_minutes_last_7d": velocity_medians,
+                "average_daily_closed_last_7d": average_daily_closed,
+                "active_reviewers_last_7d": len(velocity_counts),
             },
         }
 

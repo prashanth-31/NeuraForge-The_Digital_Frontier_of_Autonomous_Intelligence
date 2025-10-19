@@ -68,6 +68,7 @@ rate_limit_task_submission = rate_limit_dependency("task_submission")
 rate_limit_review_action = rate_limit_dependency("review_action")
 
 MAX_TASK_EVENTS = 250
+EVENT_ENVELOPE_VERSION = 1
 
 
 async def _extract_json_body(request: Request) -> dict[str, Any]:
@@ -476,28 +477,54 @@ async def submit_task_stream(
         def _normalize_event(event: str, payload: dict[str, Any]) -> dict[str, Any]:
             nonlocal event_sequence, active_run_id
             body = dict(payload)
+
+            timestamp_value = body.get("timestamp")
+            if isinstance(timestamp_value, datetime):
+                timestamp_value = timestamp_value.isoformat()
+            if not isinstance(timestamp_value, str) or not timestamp_value:
+                timestamp_value = _now_iso()
+
             run_value = body.get("run_id")
             if isinstance(run_value, uuid.UUID):
-                body["run_id"] = str(run_value)
-                run_value = body["run_id"]
+                run_value = str(run_value)
             if isinstance(run_value, str) and run_value:
                 active_run_id = run_value
             elif active_run_id:
-                body.setdefault("run_id", active_run_id)
-            if not isinstance(body.get("timestamp"), str):
-                body["timestamp"] = _now_iso()
-            body.setdefault("task_id", task_id)
+                run_value = active_run_id
+            else:
+                run_value = None
+
+            task_identifier = body.get("task_id")
+            if not isinstance(task_identifier, str) or not task_identifier:
+                task_identifier = task_id
+
+            normalized_payload: dict[str, Any] = {}
+            for key, value in body.items():
+                if key in {"task_id", "timestamp", "run_id"}:
+                    continue
+                if isinstance(value, datetime):
+                    normalized_payload[key] = value.isoformat()
+                elif isinstance(value, uuid.UUID):
+                    normalized_payload[key] = str(value)
+                else:
+                    normalized_payload[key] = value
+
             event_sequence += 1
+
             envelope: dict[str, Any] = {
+                "version": EVENT_ENVELOPE_VERSION,
+                "schema": "neuraforge.task-event.v1",
                 "event": event,
+                "type": event,
                 "sequence": event_sequence,
-                "task_id": body["task_id"],
-                "timestamp": body["timestamp"],
-                "payload": dict(body),
+                "task_id": task_identifier,
+                "timestamp": timestamp_value,
+                "payload": normalized_payload,
             }
-            if active_run_id:
-                envelope["run_id"] = active_run_id
-            envelope.update(body)
+            if run_value:
+                envelope["run_id"] = run_value
+                active_run_id = run_value
+
             return envelope
 
         async def emit(event: str, data: dict[str, Any]) -> None:

@@ -23,10 +23,10 @@ Phase 7 focuses on production-hardening the NeuraForge service surface. We will 
 ## Work Breakdown
 
 ### 1. API Surface Expansion
-- [ ] Add `/api/v1/tasks/{task_id}` for real-time status (queue, in-progress, completed, failed).
-- [ ] Implement `/api/v1/reviews/metrics` returning aggregated reviewer workload, aging tickets, assignment velocity.
-- [ ] Expose `/api/v1/orchestrator/runs/{run_id}` to fetch negotiation snapshots and guardrail decisions.
-- [ ] Upgrade SSE stream to broadcast structured telemetry (`agent_started`, `guardrail_triggered`, `tool_invoked`).
+- [x] Add `/api/v1/tasks/{task_id}` for real-time status (queue, in-progress, completed, failed).
+- [x] Implement `/api/v1/reviews/metrics` returning aggregated reviewer workload, aging tickets, assignment velocity.
+- [x] Expose `/api/v1/orchestrator/runs/{run_id}` to fetch negotiation snapshots and guardrail decisions.
+- [x] Upgrade SSE stream to broadcast structured telemetry (`agent_started`, `guardrail_triggered`, `tool_invoked`).
 
 ### 2. Security & Rate Limiting
 - [x] Integrate FastAPI dependencies for role-based access; map "reviewer", "review_admin", "observer" scopes.

@@ -102,6 +102,13 @@ class ReviewTrendStats(BaseModel):
     median_resolution_minutes_7d: float | None = None
 
 
+class ReviewVelocityStats(BaseModel):
+    per_reviewer_last_7d: dict[str, int] = Field(default_factory=dict)
+    median_resolution_minutes_last_7d: dict[str, float] = Field(default_factory=dict)
+    average_daily_closed_last_7d: float = 0.0
+    active_reviewers_last_7d: int = 0
+
+
 class ReviewMetricsResponse(BaseModel):
     generated_at: datetime
     totals: dict[str, int] = Field(default_factory=dict)
@@ -110,3 +117,4 @@ class ReviewMetricsResponse(BaseModel):
     resolution: ReviewResolutionStats = Field(default_factory=ReviewResolutionStats)
     queue_health: ReviewQueueHealthStats = Field(default_factory=ReviewQueueHealthStats)
     trends: ReviewTrendStats = Field(default_factory=ReviewTrendStats)
+    velocity: ReviewVelocityStats = Field(default_factory=ReviewVelocityStats)

@@ -215,6 +215,33 @@ const extractToolMetadata = (metadata?: Record<string, unknown>): ToolMetadata |
 
 const randomId = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 
+const TASK_EVENT_SCHEMA = "neuraforge.task-event.v1";
+
+interface TaskStreamEventEnvelope {
+  version: number;
+  schema?: string;
+  event: string;
+  type?: string;
+  sequence: number;
+  task_id: string;
+  run_id?: string;
+  timestamp?: string;
+  payload?: unknown;
+}
+
+const isTaskStreamEnvelope = (value: unknown): value is TaskStreamEventEnvelope => {
+  if (!isRecord(value)) return false;
+  if (typeof value.event !== "string") return false;
+  if (typeof value.sequence !== "number") return false;
+  if (typeof value.task_id !== "string") return false;
+  if ("schema" in value && typeof value.schema !== "string") return false;
+  const payload = value.payload;
+  if (payload === undefined || payload === null) {
+    return true;
+  }
+  return isRecord(payload);
+};
+
 export const TaskProvider = ({ children }: PropsWithChildren) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -407,10 +434,41 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
           setLifecycleEvents((previous) => [event, ...previous].slice(0, 100));
         };
 
-        const processEvent = (eventName: string, payload: Record<string, unknown>) => {
+        const processEvent = (
+          eventName: string,
+          payload: Record<string, unknown>,
+          envelope?: TaskStreamEventEnvelope | null,
+        ) => {
+          const taskIdentifier =
+            typeof payload.task_id === "string"
+              ? (payload.task_id as string)
+              : typeof envelope?.task_id === "string"
+                ? envelope.task_id
+                : undefined;
+          const eventTimestamp =
+            typeof payload.timestamp === "string"
+              ? (payload.timestamp as string)
+              : typeof envelope?.timestamp === "string"
+                ? envelope.timestamp
+                : undefined;
+          if (envelope) {
+            if (!("task_id" in payload) && taskIdentifier) {
+              payload.task_id = taskIdentifier;
+            }
+            if (!("run_id" in payload) && typeof envelope.run_id === "string") {
+              payload.run_id = envelope.run_id;
+            }
+            if (!("timestamp" in payload) && eventTimestamp) {
+              payload.timestamp = eventTimestamp;
+            }
+            if (!("sequence" in payload)) {
+              payload.sequence = envelope.sequence;
+            }
+          }
+
           if (eventName === "task_started") {
-            if (typeof payload.task_id === "string") {
-              activeTaskId = payload.task_id;
+            if (taskIdentifier) {
+              activeTaskId = taskIdentifier;
               setCurrentTaskId(activeTaskId);
             }
             return;
@@ -431,7 +489,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             const payloadKeys = Array.isArray(payload.payload_keys)
               ? payload.payload_keys.filter((item) => typeof item === "string")
               : undefined;
-            const timestampIso = typeof payload.timestamp === "string" ? payload.timestamp : undefined;
+            const timestampIso = eventTimestamp;
 
             const event: ToolEvent = {
               id: randomId(),
@@ -465,7 +523,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
           if (eventName === "agent_started") {
             const agentName = typeof payload.agent === "string" ? payload.agent : undefined;
             const stepId = typeof payload.step_id === "string" ? payload.step_id : undefined;
-            const timestampIso = typeof payload.timestamp === "string" ? payload.timestamp : undefined;
+            const timestampIso = eventTimestamp;
             appendLifecycleEvent({
               id: randomId(),
               type: "agent_started",
@@ -478,7 +536,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
 
           if (eventName === "agent_failed") {
             const agentName = typeof payload.agent === "string" ? payload.agent : "unknown_agent";
-            const timestampIso = typeof payload.timestamp === "string" ? payload.timestamp : undefined;
+            const timestampIso = eventTimestamp;
             const latencySeconds = typeof payload.latency === "number" ? payload.latency : undefined;
             const latencyMsExplicit = typeof payload.latency_ms === "number" ? payload.latency_ms : undefined;
             const latencyMs = typeof latencyMsExplicit === "number"
@@ -513,7 +571,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
           }
 
           if (eventName === "guardrail_triggered") {
-            const timestampIso = typeof payload.timestamp === "string" ? payload.timestamp : undefined;
+            const timestampIso = eventTimestamp;
             appendLifecycleEvent({
               id: randomId(),
               type: "guardrail_triggered",
@@ -563,7 +621,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               toolMetadata,
               metadata: mergedMetadata,
               content: toDisplayString(contentSource),
-              timestamp: formatTimestamp(typeof payload.timestamp === "string" ? payload.timestamp : undefined),
+              timestamp: formatTimestamp(eventTimestamp),
             };
 
             if (message.confidenceBreakdown) {
@@ -582,7 +640,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               id: randomId(),
               type: "agent_completed",
               agent: agentName,
-              timestamp: formatTimestamp(typeof payload.timestamp === "string" ? payload.timestamp : undefined),
+              timestamp: formatTimestamp(eventTimestamp),
               latencyMs:
                 typeof payload.latency_ms === "number"
                   ? payload.latency_ms
@@ -606,8 +664,9 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             return;
           }
 
-          if (eventName === "task_completed" && typeof payload.task_id === "string") {
-            activeTaskId = payload.task_id;
+          if (eventName === "task_completed" && taskIdentifier) {
+            activeTaskId = taskIdentifier;
+            setCurrentTaskId(taskIdentifier);
           }
         };
 
@@ -629,7 +688,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             }
 
             let eventName = "";
-            let dataPayload: Record<string, unknown> | null = null;
+            let dataPayload: unknown = null;
             const lines = chunk.split("\n");
             for (const line of lines) {
               if (line.startsWith("event:")) {
@@ -644,8 +703,45 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               }
             }
 
-            if (eventName && dataPayload) {
-              processEvent(eventName, dataPayload);
+            if (eventName && dataPayload !== null) {
+              let envelope: TaskStreamEventEnvelope | null = null;
+              let payloadRecord: Record<string, unknown> = {};
+
+              if (isTaskStreamEnvelope(dataPayload)) {
+                const envelopePayload = isRecord(dataPayload.payload) ? dataPayload.payload : {};
+                envelope = { ...dataPayload, payload: envelopePayload };
+                payloadRecord = { ...envelopePayload };
+              } else if (isRecord(dataPayload)) {
+                payloadRecord = { ...dataPayload };
+              }
+
+              if (envelope) {
+                if (!("task_id" in payloadRecord)) {
+                  payloadRecord.task_id = envelope.task_id;
+                }
+                if (!("timestamp" in payloadRecord) && typeof envelope.timestamp === "string") {
+                  payloadRecord.timestamp = envelope.timestamp;
+                }
+                if (!("run_id" in payloadRecord) && typeof envelope.run_id === "string") {
+                  payloadRecord.run_id = envelope.run_id;
+                }
+                payloadRecord.sequence = envelope.sequence;
+                if (envelope.schema) {
+                  payloadRecord.__schema = envelope.schema;
+                } else if (TASK_EVENT_SCHEMA && !("schema" in payloadRecord)) {
+                  payloadRecord.__schema = TASK_EVENT_SCHEMA;
+                }
+                payloadRecord.__version = envelope.version;
+              }
+
+              const effectiveEventName =
+                envelope && typeof envelope.type === "string" && envelope.type
+                  ? envelope.type
+                  : envelope && typeof envelope.event === "string" && envelope.event
+                    ? envelope.event
+                    : eventName;
+
+              processEvent(effectiveEventName, payloadRecord, envelope);
             }
           }
         }

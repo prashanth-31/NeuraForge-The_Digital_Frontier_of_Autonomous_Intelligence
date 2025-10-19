@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app import dependencies
@@ -108,3 +109,7 @@ def test_review_metrics_endpoint_exposes_backlog_fields() -> None:
     assert data["assignment"]["by_reviewer"]["reviewer-b"] == 1
     assert data["aging"]["open_oldest_minutes"] >= 170
     assert data["resolution"]["completed_last_24h"] == 1
+    assert data["velocity"]["per_reviewer_last_7d"]["reviewer-b"] == 1
+    assert data["velocity"]["median_resolution_minutes_last_7d"]["reviewer-b"] >= 170
+    assert data["velocity"]["average_daily_closed_last_7d"] == pytest.approx(0.14, rel=1e-3)
+    assert data["velocity"]["active_reviewers_last_7d"] == 1

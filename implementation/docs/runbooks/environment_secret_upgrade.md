@@ -11,16 +11,18 @@ This guide documents the approved process for rolling out configuration and secr
 - Tooling integrations accessed through MCP
 
 ## Environment Variable Matrix
-The baseline `.env` templates live in `environments/staging.env.example` and `environments/production.env.example`. Use the matrix below to determine responsibility and storage location for each setting.
+The baseline `.env` templates live in `environments/staging.env.example` and `environments/production.env.example`. Use the matrix below to determine responsibility, storage, and rotation cadence for each setting.
 
-| Category | Variable prefix | Staging source | Production source | Notes |
-| --- | --- | --- | --- | --- |
-| Core service | `ENVIRONMENT`, `API_V1_PREFIX`, `BACKEND_BASE_URL` | Checked-in template | Checked-in template | Update when endpoint paths change.
-| Data stores | `POSTGRES__*`, `REDIS__*`, `QDRANT__*` | Azure Key Vault references | Azure Key Vault references | Validate connectivity and rotation windows.
-| Auth | `AUTH__*` | Azure Key Vault secret | Azure Key Vault secret | Keep algorithm and expiry in version control; secrets rotate via vault.
-| Observability | `OBSERVABILITY__*` | Template overrides | Template overrides | Toggle features (e.g., `PROMETHEUS_ENABLED`) per environment.
-| MCP tooling | `TOOLS__MCP__*` | Mixed (Key Vault + AWS Secrets Manager) | Mixed (Key Vault + AWS Secrets Manager) | Signing secret stored in AWS Secrets; other credentials in Key Vault.
-| LLM provider | `OLLAMA__*` | Template for host/port; Key Vault for tokens if needed | Template for host/port; Key Vault for tokens if needed | Ensure model upgrades are coordinated with scaling plan.
+| Category | Variable prefix | Owner | Staging source | Production source | Rotation cadence | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| Core service | `ENVIRONMENT`, `API_V1_PREFIX`, `BACKEND_BASE_URL` | Platform | Checked-in template | Checked-in template | On change | Update when endpoint paths or prefixes change; no secrets involved.
+| Data stores | `POSTGRES__*`, `REDIS__*`, `QDRANT__*` | Infra | Azure Key Vault references | Azure Key Vault references | Semi-annual | Validate connectivity, certificate chains, and agree on rotation windows before cutting over.
+| Auth | `AUTH__*` | Security | Azure Key Vault secret | Azure Key Vault secret | Quarterly | Keep algorithm/expiry in version control; rotate secrets in vault and document version IDs.
+| Observability | `OBSERVABILITY__*` | Platform | Template overrides | Template overrides | On change | Toggle features (for example, `PROMETHEUS_ENABLED`) per environment and keep thresholds aligned with runbooks.
+| MCP tooling | `TOOLS__MCP__*` | Integrations | Mixed (Key Vault + AWS Secrets Manager) | Mixed (Key Vault + AWS Secrets Manager) | Quarterly | Signing secret stored in AWS Secrets; other credentials in Key Vault. Confirm both stores are updated together.
+| LLM provider | `OLLAMA__*` | AI Ops | Template for host/port; Key Vault for tokens if needed | Template for host/port; Key Vault for tokens if needed | Quarterly (tokens) | Coordinate model upgrades with scaling plan and ensure fallback models are documented.
+
+Document new variables directly in the templates with inline comments so future diffs surface intent. Whenever a new secure value is introduced, open a change request noting who owns rotation and how operators can validate success.
 
 ## Upgrade Checklist
 1. **Plan the change**
@@ -42,6 +44,12 @@ The baseline `.env` templates live in `environments/staging.env.example` and `en
    - Update `docs/daily/<date>.md` with the change summary and verification evidence.
    - Close the roadmap item by ticking the checkbox in `docs/PHASE7_ROADMAP.md` once both environments are aligned.
    - Schedule follow-up rotation reminders if the new secret has a defined expiry.
+
+## Secret Promotion Workflow
+- Draft the change in staging, including template updates, vault entries, and Terraform or Compose overrides if applicable.
+- Validate the backend start-up locally using `docker-compose up --build backend` with the updated `.env` to catch missing defaults before a remote rollout.
+- Capture screenshots or logs from Grafana, Alertmanager, or the API health check endpoints to prove the new values work as expected.
+- Brief the on-call operator before the production window so they know which metrics or alerts confirm success.
 
 ## Secret Management Notes
 - **Azure Key Vault** references follow the `@Microsoft.KeyVault(SecretUri=...)` format; confirm the service principal used by the deployment pipeline has access to the new version before rollout.

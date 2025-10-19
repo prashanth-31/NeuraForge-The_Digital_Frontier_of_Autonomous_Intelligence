@@ -176,6 +176,7 @@ def test_submit_task_stream_emits_agent_events(monkeypatch: pytest.MonkeyPatch):
 
     agent_completed = [event for event in events if event[0] == "agent_completed"]
     assert len(agent_completed) == 4
+    assert all("payload" in payload and isinstance(payload["payload"], dict) for _, payload in agent_completed)
     assert any(event[0] == "task_started" for event in events)
     assert any(event[0] == "task_completed" for event in events)
     assert len(llm.calls) == 4

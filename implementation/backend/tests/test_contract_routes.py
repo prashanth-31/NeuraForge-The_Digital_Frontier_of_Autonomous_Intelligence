@@ -83,9 +83,11 @@ def test_submit_task_stream_contract(monkeypatch):
     assert events[-1][0] == "task_completed"
 
     task_started_payload = events[0][1]
+    assert task_started_payload.get("version") == 1
+    assert task_started_payload.get("schema") == "neuraforge.task-event.v1"
     task_id = task_started_payload.get("task_id")
     assert isinstance(task_id, str) and task_id
     assert task_id in memory.ephemeral
     assert memory.ephemeral[task_id]["result"]["status"] == "completed"
     completed_payload = events[-1][1]
-    assert completed_payload.get("status") == "completed"
+    assert completed_payload.get("payload", {}).get("status") == "completed"

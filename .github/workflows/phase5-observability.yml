@@ -31,8 +31,10 @@ jobs:
           python -m pytest \
             tests/test_phase5_orchestration.py \
             tests/test_orchestrator_simulation.py \
-            tests/test_contract_routes.py \
-            tests/test_review_metrics_endpoint.py
+            tests/test_contract_routes.py
+
+      - name: Run review metrics acceptance
+        run: python -m pytest tests/test_review_metrics_endpoint.py
 
       - name: Run simulation harness validation
         run: |

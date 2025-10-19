@@ -46,6 +46,12 @@ Use this runbook after syncing observability artifacts from CI to validate that 
 - Clear exported environment variables (`Remove-Item Env:NEURAFORGE_*`).
 - Revoke temporary reviewer tokens if they were generated solely for the smoke test.
 
+## Troubleshooting
+- k6 fails with `401 Unauthorized`: confirm the reviewer JWT still exists and includes the `reviewer` scope; generate a fresh token if the smoke window expired.
+- Metrics missing in Prometheus: check that the backend container restarted with the synced dashboards by tailing the staging API logs (`docker compose logs backend`) and verifying the `.env` values match the operator export.
+- Alertmanager raises critical alerts: acknowledge the alert, reduce `NEURAFORGE_VUS` to baseline values, and double-check that staging alert thresholds mirror production to avoid noisy rehearsals.
+- Grafana dashboards show stale data: ensure `scripts/staging_sync_artifacts.py` ran within the last 24 hours and clear cached browser assets before reloading the panels.
+
 ## References
 - `implementation/scripts/staging_sync_artifacts.py`
 - `implementation/scripts/loadtesting/k6-submit-task.js`

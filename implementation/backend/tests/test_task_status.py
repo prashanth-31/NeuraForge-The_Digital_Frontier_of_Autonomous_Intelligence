@@ -30,9 +30,17 @@ class _FakeStore:
             return self._run
         return None
 
-    async def list_events(self, run_id: uuid.UUID) -> list[OrchestratorEvent]:
+    async def list_events(
+        self,
+        run_id: uuid.UUID,
+        *,
+        limit: int | None = None,
+    ) -> list[OrchestratorEvent]:
         if run_id == self._run.run_id:
-            return list(self._events)
+            events = list(self._events)
+            if limit is not None:
+                return events[:limit]
+            return events
         return []
 
 
