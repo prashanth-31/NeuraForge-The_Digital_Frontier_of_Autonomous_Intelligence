@@ -204,7 +204,9 @@ class OrchestratorStateStore:
         candidate = self._pool_or_coroutine
         if inspect.isawaitable(candidate):
             candidate = await candidate
-        if not isinstance(candidate, asyncpg.Pool):
+        if asyncpg is None:
+            raise RuntimeError("asyncpg is required for OrchestratorStateStore")
+        if not hasattr(candidate, "acquire") or not hasattr(candidate, "close"):
             raise RuntimeError("Invalid asyncpg pool supplied to OrchestratorStateStore")
         self._pool = candidate
         return self._pool

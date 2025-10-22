@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable, Callable, Iterable
+from typing import Awaitable, Callable, Iterable, Mapping
 
-from tenacity import AsyncRetrying, RetryError, stop_after_attempt, wait_exponential_jitter
+from tenacity import AsyncRetrying, RetryError, stop_after_attempt, wait_random_exponential
 
 from ..core.config import SchedulingSettings
 from ..orchestration.enums import LifecycleStatus
@@ -64,14 +64,39 @@ class RetryPolicy:
             max_backoff_seconds=settings.max_backoff_seconds,
         )
 
-    def merge(self, override: dict[str, object] | None) -> "RetryPolicy":
+    def merge(self, override: Mapping[str, object] | None) -> "RetryPolicy":
         if not override:
             return self
+
+        def _coerce_int(value: object, default: int) -> int:
+            if isinstance(value, bool):
+                return int(value)
+            if isinstance(value, (int, float)):
+                return int(value)
+            if isinstance(value, str):
+                try:
+                    return int(value)
+                except ValueError:
+                    return default
+            return default
+
+        def _coerce_float(value: object, default: float) -> float:
+            if isinstance(value, bool):
+                return float(value)
+            if isinstance(value, (int, float)):
+                return float(value)
+            if isinstance(value, str):
+                try:
+                    return float(value)
+                except ValueError:
+                    return default
+            return default
+
         return RetryPolicy(
-            max_attempts=int(override.get("max_attempts", self.max_attempts)),
-            base_backoff_seconds=float(override.get("backoff_seconds", self.base_backoff_seconds)),
-            backoff_multiplier=float(override.get("backoff_multiplier", self.backoff_multiplier)),
-            max_backoff_seconds=float(override.get("max_backoff_seconds", self.max_backoff_seconds)),
+            max_attempts=_coerce_int(override.get("max_attempts"), self.max_attempts),
+            base_backoff_seconds=_coerce_float(override.get("backoff_seconds"), self.base_backoff_seconds),
+            backoff_multiplier=_coerce_float(override.get("backoff_multiplier"), self.backoff_multiplier),
+            max_backoff_seconds=_coerce_float(override.get("max_backoff_seconds"), self.max_backoff_seconds),
         )
 
 
@@ -142,11 +167,20 @@ class AsyncioTaskScheduler(TaskScheduler):
 
             retry_policy = self._retry_defaults.merge(step.retry_policy)
             attempts = retry_policy.max_attempts if retry_policy.max_attempts > 0 else 1
-            wait_strategy = wait_exponential_jitter(
-                exp_base=max(1.5, retry_policy.backoff_multiplier),
-                min=retry_policy.base_backoff_seconds,
-                max=retry_policy.max_backoff_seconds if retry_policy.max_backoff_seconds > 0 else None,
-            )
+            max_arg = retry_policy.max_backoff_seconds if retry_policy.max_backoff_seconds > 0 else None
+            multiplier = max(retry_policy.base_backoff_seconds, 1.0)
+            exp_base = max(1.5, retry_policy.backoff_multiplier)
+            if max_arg is not None:
+                wait_strategy = wait_random_exponential(
+                    multiplier=multiplier,
+                    exp_base=exp_base,
+                    max=max_arg,
+                )
+            else:
+                wait_strategy = wait_random_exponential(
+                    multiplier=multiplier,
+                    exp_base=exp_base,
+                )
 
             async for attempt in AsyncRetrying(
                 stop=stop_after_attempt(attempts),
