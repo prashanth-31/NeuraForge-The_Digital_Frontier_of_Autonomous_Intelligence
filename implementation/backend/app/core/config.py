@@ -243,6 +243,10 @@ class Settings(BaseSettings):
     scoring: ScoringSettings = Field(default_factory=ScoringSettings)  # type: ignore[arg-type]
 
     backend_base_url: str = Field("http://localhost:8000")
+    frontend_origins: list[str] = Field(
+        default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
+        description="Origins permitted to access the API via CORS.",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

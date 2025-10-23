@@ -16,7 +16,7 @@ RUN curl -sSL https://install.python-poetry.org | python - \
 
 # Copy dependency files first (for caching)
 COPY pyproject.toml poetry.lock* ./
-RUN poetry install --no-interaction --no-ansi --only main
+RUN poetry install --no-interaction --no-ansi --only main --no-root
 
 # Copy application code
 COPY . .

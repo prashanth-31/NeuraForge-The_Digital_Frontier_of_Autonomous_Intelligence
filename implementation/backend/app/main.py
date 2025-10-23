@@ -4,6 +4,7 @@ import asyncio
 from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
@@ -48,6 +49,13 @@ async def app_lifespan(app: FastAPI):
 
 app = FastAPI(title="NeuraForge Backend", version="0.1.0", lifespan=app_lifespan)
 app.add_middleware(AuditLoggingMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.frontend_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 app.include_router(mcp_router)
 

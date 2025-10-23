@@ -25,6 +25,8 @@ sentence-transformers = "^5.1.1"
 transformers = "4.56.0"
 python-jose = { version = "^3.5.0", extras = ["cryptography"] }
 python-multipart = "^0.0.20"
+pyjwt = "^2.9.0"
+matplotlib = "^3.9.2"
 numpy = "^2.3.3"
 scipy = "^1.16.2"
 pandas = "^2.3.3"

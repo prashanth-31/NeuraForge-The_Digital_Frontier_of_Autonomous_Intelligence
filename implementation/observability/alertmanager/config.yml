@@ -18,15 +18,15 @@ route:
 receivers:
   - name: reviewers-critical
     webhook_configs:
-      - url: ${PAGER_WEBHOOK_URL}
+      - url: http://pager-proxy:8080/alerts
         send_resolved: true
 
   - name: reviewers-warning
     webhook_configs:
-      - url: ${SLACK_REVIEWERS_WEBHOOK_URL}
+      - url: http://pager-proxy:8080/review-alerts
         send_resolved: true
 
   - name: default
     webhook_configs:
-      - url: ${PAGER_WEBHOOK_URL}
+      - url: http://pager-proxy:8080/alerts
         send_resolved: true
