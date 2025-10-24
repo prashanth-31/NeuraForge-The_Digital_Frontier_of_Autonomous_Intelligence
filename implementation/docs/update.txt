@@ -1,3 +1,14 @@
-Replaced every asyncpg.types.Json usage in the stores with our own encoder/decoder (see memory.py, context.py, guardrails.py) and added json_encoding.py to handle JSONB conversions centrally. After a container restart the stream endpoint no longer crashes on JSON encoding, though the task still fails with the pre-existing “pool is not initialized” error. No tests were executed.
+Backend SSE was crashing before your agents ever reached Ollama: the Postgres pool tried to connect with the DSN postgresql+asyncpg://…, which asyncpg rejects. Every call to /api/v1/submit_task/stream then blew up, so the frontend never saw responses.
 
-Next up: 1) trace the orchestrator pool lifecycle so that pool is not initialized clears, 2) re-test /api/v1/submit_task(/stream) once the pools are fixed, and 3) run pytest before packaging the commit that now also includes your Docker/alembic tweaks plus the new JSON utility.
+I updated the DSN scheme to the asyncpg-compatible form in:
+
+.env
+.env.example
+staging.env.example
+production.env.example
+Restart the stack so the new env values load (e.g. from backend: docker compose up --build, or docker compose up -d if the image is current). Once the backend is back up, trigger the conversation again—the SSE stream should stay open, tasks will run through the orchestrator, and outputs will be saved to Postgres/Qdrant as intended.
+
+Next up:
+
+Bring the stack back (docker compose up …) and retry the conversation flow.
+Keep an eye on the backend logs for any lingering llm_… errors while the agents are running.

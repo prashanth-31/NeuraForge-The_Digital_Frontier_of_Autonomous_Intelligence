@@ -8,7 +8,6 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
 
 
 # revision identifiers, used by Alembic.
@@ -18,33 +17,18 @@ branch_labels = None
 depends_on = None
 
 
-review_status_enum = postgresql.ENUM(
+review_status_enum = sa.Enum(
     "open",
     "in_review",
     "resolved",
     "dismissed",
     name="review_status",
-    create_type=False,
 )
 
 
 def upgrade() -> None:
-    op.execute(
-        """
-        DO $$
-        BEGIN
-            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'review_status') THEN
-                CREATE TYPE review_status AS ENUM (
-                    'open',
-                    'in_review',
-                    'resolved',
-                    'dismissed'
-                );
-            END IF;
-        END
-        $$;
-        """
-    )
+    bind = op.get_bind()
+    review_status_enum.create(bind, checkfirst=True)
 
     op.create_table(
         "review_tickets",
@@ -85,4 +69,4 @@ def downgrade() -> None:
     op.drop_index("ix_review_tickets_status", table_name="review_tickets")
     op.drop_table("review_tickets")
 
-    op.execute("DROP TYPE IF EXISTS review_status")
+    review_status_enum.drop(op.get_bind(), checkfirst=True)

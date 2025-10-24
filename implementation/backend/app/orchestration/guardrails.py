@@ -15,7 +15,6 @@ from ..core.config import GuardrailSettings, Settings
 from ..core.metrics import increment_guardrail_decision
 from ..core.logging import get_logger
 from ..services.llm import LLMService
-from ..utils.json_encoding import encode_jsonb
 from .enums import GuardrailDecisionType
 
 logger = get_logger(name=__name__)
@@ -103,7 +102,6 @@ class GuardrailStore:
     async def record(self, *, task_id: str, run_id: UUID | None, decision: GuardrailDecision, agent: str | None, payload: dict[str, Any]) -> None:
         pool = await self._ensure_pool()
         async with pool.acquire() as connection:
-            encoded_payload = encode_jsonb(payload)
             await connection.execute(
                 self._INSERT,
                 task_id,
@@ -113,7 +111,7 @@ class GuardrailStore:
                 decision.risk_score,
                 decision.policy_id,
                 agent,
-                encoded_payload,
+                payload,
             )
 
     async def close(self) -> None:
