@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision = "202510140001"
@@ -16,7 +17,7 @@ branch_labels = None
 depends_on = None
 
 
-lifecycle_status_enum = sa.Enum(
+lifecycle_status_enum = postgresql.ENUM(
     "queued",
     "planned",
     "scheduled",
@@ -25,21 +26,55 @@ lifecycle_status_enum = sa.Enum(
     "failed",
     "cancelled",
     name="lifecycle_status",
+    create_type=False,
 )
 
-guardrail_decision_enum = sa.Enum(
+guardrail_decision_enum = postgresql.ENUM(
     "allow",
     "deny",
     "escalate",
     "review",
     name="guardrail_decision",
+    create_type=False,
 )
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    lifecycle_status_enum.create(bind, checkfirst=True)
-    guardrail_decision_enum.create(bind, checkfirst=True)
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'lifecycle_status') THEN
+                CREATE TYPE lifecycle_status AS ENUM (
+                    'queued',
+                    'planned',
+                    'scheduled',
+                    'in_progress',
+                    'completed',
+                    'failed',
+                    'cancelled'
+                );
+            END IF;
+        END
+        $$;
+        """
+    )
+    op.execute(
+        """
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'guardrail_decision') THEN
+                CREATE TYPE guardrail_decision AS ENUM (
+                    'allow',
+                    'deny',
+                    'escalate',
+                    'review'
+                );
+            END IF;
+        END
+        $$;
+        """
+    )
 
     op.create_table(
         "task_lifecycle_events",
@@ -115,5 +150,5 @@ def downgrade() -> None:
     op.drop_index("ix_task_lifecycle_task", table_name="task_lifecycle_events")
     op.drop_table("task_lifecycle_events")
 
-    guardrail_decision_enum.drop(op.get_bind(), checkfirst=True)
-    lifecycle_status_enum.drop(op.get_bind(), checkfirst=True)
+    op.execute("DROP TYPE IF EXISTS guardrail_decision")
+    op.execute("DROP TYPE IF EXISTS lifecycle_status")

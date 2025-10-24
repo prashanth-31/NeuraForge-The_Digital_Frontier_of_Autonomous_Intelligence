@@ -20,8 +20,9 @@ RUN poetry install --no-interaction --no-ansi --only main --no-root
 
 # Copy application code
 COPY . .
+RUN chmod +x docker-entrypoint.sh
 
 EXPOSE 8000
 
-# Start FastAPI server
-CMD ["poetry", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run database migrations before starting the API
+CMD ["./docker-entrypoint.sh"]

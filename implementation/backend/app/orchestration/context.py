@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from enum import Enum
+import inspect
 from typing import Any, AsyncIterator, Dict, Mapping, MutableMapping, Optional
 from uuid import UUID
 
@@ -13,6 +14,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 from ..core.config import Settings
 from ..services.retrieval import ContextAssembler, ContextBundle
+from ..utils.json_encoding import encode_jsonb
 
 
 class ContextStage(str, Enum):
@@ -99,13 +101,14 @@ class ContextSnapshotStore:
     async def record(self, snapshot: ContextSnapshot) -> None:
         pool = await self._ensure_pool()
         async with pool.acquire() as connection:
+            payload = encode_jsonb(snapshot.payload)
             await connection.execute(
                 self._UPSERT,
                 snapshot.task_id,
                 snapshot.run_id,
                 snapshot.stage.value,
                 snapshot.agent,
-                snapshot.payload,
+                payload,
             )
 
     async def close(self) -> None:
@@ -125,12 +128,17 @@ class ContextSnapshotStore:
         if self._pool is not None:
             return self._pool
         candidate = self._pool_or_factory
+        if hasattr(candidate, "__await__"):
+            candidate = await candidate
         if callable(candidate) and not isinstance(candidate, asyncpg.Pool):
-            candidate = await candidate()  # pragma: no cover - factory pattern not currently used
+            maybe_pool = candidate()
+            if inspect.isawaitable(maybe_pool):
+                maybe_pool = await maybe_pool
+            candidate = maybe_pool
         if isinstance(candidate, asyncpg.Pool):
             self._pool = candidate
             return self._pool
-        if isinstance(candidate, asyncpg.pool.Pool):  # type: ignore[attr-defined]
+        if hasattr(asyncpg, "pool") and isinstance(candidate, asyncpg.pool.Pool):  # type: ignore[attr-defined]
             self._pool = candidate
             return self._pool
         raise RuntimeError("Invalid asyncpg pool supplied to ContextSnapshotStore")
