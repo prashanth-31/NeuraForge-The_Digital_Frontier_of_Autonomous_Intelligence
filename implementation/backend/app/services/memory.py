@@ -29,6 +29,7 @@ from ..core.metrics import (
     increment_memory_ingest,
     increment_retrieval_results,
 )
+from ..utils.json_encoding import decode_jsonb, encode_jsonb
 
 logger = get_logger(name=__name__)
 
@@ -186,7 +187,8 @@ class PostgresRepository:
             return
         async with pool.acquire() as connection:
             agent = record.agent or record.payload.get("agent")
-            await connection.execute(self._UPSERT_EPISODE, record.task_id, agent, record.payload)
+            payload = encode_jsonb(record.payload)
+            await connection.execute(self._UPSERT_EPISODE, record.task_id, agent, payload)
         increment_memory_ingest(store="postgres", operation="upsert")
 
     async def upsert_batch(self, records: Sequence[EpisodeRecord]) -> None:
@@ -194,7 +196,14 @@ class PostgresRepository:
         if pool is None or not records:
             return
         async with pool.acquire() as connection:
-            args = [(rec.task_id, rec.agent or rec.payload.get("agent"), rec.payload) for rec in records]
+            args = [
+                (
+                    rec.task_id,
+                    rec.agent or rec.payload.get("agent"),
+                    encode_jsonb(rec.payload),
+                )
+                for rec in records
+            ]
             executemany = getattr(connection, "executemany", None)
             if callable(executemany):
                 result = executemany(self._UPSERT_EPISODE, args)
@@ -206,7 +215,12 @@ class PostgresRepository:
         increment_memory_ingest(store="postgres", operation="bulk_upsert")
 
     def _normalize_row(self, row: Any) -> EpisodeRecord:
-        payload = dict(row["payload"])
+        payload_raw = row["payload"]
+        payload = decode_jsonb(payload_raw)
+        if payload is None:
+            payload = {}
+        elif not isinstance(payload, dict):
+            payload = dict(payload)
         agent = row["agent"]
         if agent and "agent" not in payload:
             payload["agent"] = agent
