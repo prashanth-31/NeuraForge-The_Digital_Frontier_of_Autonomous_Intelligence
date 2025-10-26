@@ -2,3 +2,4 @@ implementation/backend/.venv/
 implementation/frontend/node_modules/
 implementation/Ollama
 .venv
+implementation/backend/models/
