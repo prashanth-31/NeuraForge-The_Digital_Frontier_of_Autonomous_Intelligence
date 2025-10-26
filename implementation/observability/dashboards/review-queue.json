@@ -1,0 +1,332 @@
+{
+  "uid": "review-queue",
+  "title": "Review Operations",
+  "schemaVersion": 39,
+  "version": 2,
+  "timezone": "browser",
+  "tags": ["phase7", "reviews"],
+  "style": "dark",
+  "editable": true,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Review Queue Alerts",
+        "type": "dashboard",
+        "enable": true,
+        "iconColor": "rgba(0, 211, 255, 0.9)",
+        "datasource": {
+          "type": "grafana",
+          "uid": "grafana"
+        },
+        "target": {
+          "type": "dashboard"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Open tickets",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(neuraforge_review_tickets{status=\"open\"})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 12 },
+              { "color": "red", "value": 16 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["last"],
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "In review",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 6, "y": 0, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(neuraforge_review_tickets{status=\"in_review\"})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 8 },
+              { "color": "red", "value": 12 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["last"],
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Unassigned",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 12, "y": 0, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(neuraforge_review_tickets{status=\"unassigned\"})"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["last"],
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Resolved (1h)",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 18, "y": 0, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(neuraforge_review_tickets{status=\"resolved\"}[1h])"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": 0 },
+              { "color": "green", "value": 5 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["last"],
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Open ticket trend",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 0, "y": 5, "w": 16, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "avg_over_time(neuraforge_review_tickets{status=\"open\"}[4h])",
+          "legendFormat": "4h avg"
+        },
+        {
+          "refId": "B",
+          "expr": "neuraforge_review_tickets{status=\"open\"}",
+          "legendFormat": "current"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 12 },
+              { "color": "red", "value": 16 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Ticket mix",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 16, "y": 5, "w": 8, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "neuraforge_review_tickets",
+          "legendFormat": "{{status}}"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 7,
+      "title": "Oldest ticket age",
+      "type": "stat",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 0, "y": 13, "w": 6, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "max(neuraforge_review_ticket_oldest_age_seconds)/60"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "m",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 60 },
+              { "color": "red", "value": 120 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "orientation": "horizontal",
+        "colorMode": "value",
+        "graphMode": "none",
+        "reduceOptions": {
+          "calcs": ["last"],
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 8,
+      "title": "Resolution velocity (15m)",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 6, "y": 13, "w": 10, "h": 5 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "increase(neuraforge_review_tickets{status=\"resolved\"}[15m])",
+          "legendFormat": "Resolved"
+        }
+      ],
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      }
+    },
+    {
+      "id": 9,
+      "title": "Reviewer filter link",
+      "type": "text",
+      "gridPos": { "x": 16, "y": 13, "w": 8, "h": 5 },
+      "options": {
+        "content": "Use the reviewer console filters to drill into policy or owner views. Example: [/reviews?status=open&unassigned=true](https://console.neuraforge.example/reviews?status=open&unassigned=true)",
+        "mode": "markdown"
+      }
+    }
+  ]
+}

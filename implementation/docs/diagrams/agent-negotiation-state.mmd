@@ -1,0 +1,16 @@
+%% Agent Negotiation State Diagram
+%% Render with: mmdc -i agent-negotiation-state.mmd -o agent-negotiation-state.png
+
+%%{init: {"theme": "dark"}}%%
+stateDiagram-v2
+    [*] --> TaskQueued
+    TaskQueued --> ContextHydrated: Load memory snapshot
+    ContextHydrated --> AgentSelection: Capability match
+    AgentSelection --> DraftResponses: Agents generate outputs
+    DraftResponses --> ConfidenceVoting: Share confidence scores
+    ConfidenceVoting --> ConsensusReached: Agreement within threshold
+    ConfidenceVoting --> ConflictDetected: Divergent outputs
+    ConflictDetected --> MetaSynthesis: Meta-agent summarizes & scores
+    MetaSynthesis --> ConsensusReached: Synthesized result accepted
+    ConsensusReached --> MemoryUpdate: Persist to Redis/Postgres/Qdrant
+    MemoryUpdate --> [*]

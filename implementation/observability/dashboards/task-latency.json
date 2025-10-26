@@ -1,0 +1,169 @@
+{
+  "uid": "task-guardrail-health",
+  "title": "Task & Guardrail Health",
+  "schemaVersion": 39,
+  "version": 1,
+  "timezone": "browser",
+  "tags": ["phase7", "observability"],
+  "style": "dark",
+  "editable": true,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Review Queue Alerts",
+        "type": "dashboard",
+        "enable": true,
+        "iconColor": "rgba(255, 68, 0, 0.9)",
+        "datasource": {
+          "type": "grafana",
+          "uid": "grafana"
+        },
+        "target": {
+          "type": "dashboard"
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Task p95 latency by agent-count",
+      "type": "timeseries",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 9 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.95, sum by (le, agent_count) (rate(neuraforge_task_latency_seconds_bucket{entry_point=\"api\"}[5m])))",
+          "legendFormat": "{{agent_count}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 45 },
+              { "color": "red", "value": 60 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "agent_count=.*"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Agent Count: {{agent_count}}"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "right",
+          "calcs": ["last"]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Guardrail decisions per policy",
+      "type": "bargauge",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 0, "y": 9, "w": 24, "h": 7 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (policy_id) (increase(neuraforge_guardrail_decision_total{decision=\"escalate\"}[15m]))",
+          "legendFormat": "Escalate: {{policy_id}}"
+        },
+        {
+          "refId": "B",
+          "expr": "sum by (policy_id) (increase(neuraforge_guardrail_decision_total{decision=\"deny\"}[15m]))",
+          "legendFormat": "Deny: {{policy_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "yellow", "value": 3 },
+              { "color": "red", "value": 4 }
+            ]
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Escalate.*"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green" },
+                    { "color": "yellow", "value": 3 },
+                    { "color": "red", "value": 5 }
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "Deny.*"
+            },
+            "properties": [
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green" },
+                    { "color": "red", "value": 1 }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "displayMode": "lcd",
+        "orientation": "vertical",
+        "reduceOptions": {
+          "calcs": ["last"],
+          "values": false
+        }
+      }
+    }
+  ]
+}

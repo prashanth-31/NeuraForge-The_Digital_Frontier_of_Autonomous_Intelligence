@@ -1,0 +1,105 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://docs.neuraforge.ai/mcp/response.schema.json",
+  "title": "MCP Tool Response",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "status",
+    "timestamp"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Echo of the request identifier for correlation."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "description": "Semantic version for the response envelope schema (major.minor.patch)."
+    },
+    "status": {
+      "type": "object",
+      "required": [
+        "code"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "enum": [
+            "success",
+            "accepted",
+            "retry",
+            "error"
+          ]
+        },
+        "http": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 599
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the response was generated."
+    },
+    "duration_ms": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Elapsed execution time reported by the tool in milliseconds."
+    },
+    "output": {
+      "type": [
+        "object",
+        "array",
+        "string",
+        "number",
+        "boolean",
+        "null"
+      ],
+      "description": "Primary data returned by the tool."
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Optional metadata such as latency, cache flags, or tool diagnostics.",
+      "additionalProperties": true
+    },
+    "headers": {
+      "type": "object",
+      "description": "Optional HTTP-like headers returned by the tool for downstream processing.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "errors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "required": [
+          "message"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,18 @@
+{
+    "research": {
+        "description": "Investigates source material, synthesizes findings with citations, and extracts key signals from noisy corpora.",
+        "dependencies": []
+    },
+    "finance": {
+        "description": "Performs quantitative analysis over market data, forecasts trends, and contextualizes financial risk for decisions.",
+        "dependencies": ["research"]
+    },
+    "creative": {
+        "description": "Transforms insights into narratives, visual-ready summaries, and audience-tailored storytelling artifacts.",
+        "dependencies": ["research"]
+    },
+    "enterprise": {
+        "description": "Produces executive-ready recommendations, policy-aware action plans, and cross-functional alignment guidance.",
+        "dependencies": ["finance", "creative"]
+    }
+}

@@ -1,0 +1,53 @@
+groups:
+  - name: review-tickets
+    interval: 30s
+    rules:
+      - alert: ReviewQueueWarning
+        expr: sum(neuraforge_review_tickets{status="open"}) > 12
+        for: 10m
+        labels:
+          severity: warning
+          team: reviewers
+        annotations:
+          summary: "Reviewer queue nearing capacity"
+          description: "Open review tickets have exceeded 12 for ten minutes. Assign additional reviewers or slow new escalations."
+
+      - alert: ReviewQueueCritical
+        expr: sum(neuraforge_review_tickets{status="open"}) > 16
+        for: 10m
+        labels:
+          severity: critical
+          team: reviewers
+        annotations:
+          summary: "Reviewer queue backlog critical"
+          description: "Open review tickets exceeded 16 for ten minutes. Page the reviewer on-call and escalate to product owner."
+
+      - alert: ReviewUnassignedBacklog
+        expr: sum(neuraforge_review_tickets{status="unassigned"}) >= 3
+        for: 5m
+        labels:
+          severity: critical
+          team: reviewers
+        annotations:
+          summary: "Unassigned review tickets accumulating"
+          description: "Three or more open tickets remain unassigned for five minutes. Redistribute workload immediately."
+
+      - alert: ReviewOldestTicketStale
+        expr: neuraforge_review_ticket_oldest_age_seconds > 7200
+        for: 10m
+        labels:
+          severity: critical
+          team: reviewers
+        annotations:
+          summary: "Oldest review ticket older than two hours"
+          description: "An open review ticket has waited more than two hours. Page the duty reviewer and unblock."
+
+      - alert: ReviewStuckInProgress
+        expr: increase(neuraforge_review_tickets{status="in_review"}[30m]) == 0 and sum(neuraforge_review_tickets{status="in_review"}) > 0
+        for: 30m
+        labels:
+          severity: warning
+          team: reviewers
+        annotations:
+          summary: "Review tickets stalled in progress"
+          description: "No review tickets have completed in the last 30 minutes despite active in-review items. Investigate workflow bottlenecks."

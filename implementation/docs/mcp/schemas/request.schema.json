@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://docs.neuraforge.ai/mcp/request.schema.json",
+  "title": "MCP Tool Request",
+  "type": "object",
+  "required": [
+    "id",
+    "version",
+    "timestamp",
+    "tool",
+    "payload"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "description": "Unique identifier for the invocation request (UUID recommended)."
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^1\\.\\d+\\.\\d+$",
+      "description": "Semantic version for the request envelope schema (major.minor.patch)."
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the request is created."
+    },
+    "tool": {
+      "type": "string",
+  "pattern": "^[A-Za-z0-9_.\\/\\-]+$",
+      "description": "Logical tool name or catalog identifier being invoked."
+    },
+    "trace_id": {
+      "type": "string",
+      "description": "Optional distributed trace identifier propagated to downstream services.",
+      "minLength": 1
+    },
+    "context": {
+      "type": "object",
+      "description": "Optional contextual metadata supplied by the orchestrator (task id, agent, trace, etc.).",
+      "additionalProperties": true
+    },
+    "auth": {
+      "type": "object",
+      "description": "Authentication envelope containing credential hints or scoped tokens.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "bearer",
+            "api_key",
+            "basic",
+            "none"
+          ]
+        },
+        "token": {
+          "type": "string"
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "additionalProperties": true
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Additional request metadata such as priority, retry counts, or orchestration hints.",
+      "additionalProperties": true
+    },
+    "payload": {
+      "type": "object",
+      "description": "Tool-specific input payload validated by the tool's input schema.",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

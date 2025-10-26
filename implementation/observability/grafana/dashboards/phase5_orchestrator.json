@@ -1,0 +1,91 @@
+{
+  "title": "Phase 5 Orchestrator Overview",
+  "timezone": "browser",
+  "editable": true,
+  "style": "dark",
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Orchestrator Throughput",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "orchestrator:throughput_per_minute",
+          "legendFormat": "Completed runs/min",
+          "interval": ""
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "type": "timeseries",
+      "title": "Negotiation Consensus",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum(rate(neuraforge_negotiation_consensus_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "interval": ""
+        },
+        {
+          "expr": "histogram_quantile(0.9, sum(rate(neuraforge_negotiation_consensus_bucket[5m])) by (le))",
+          "legendFormat": "p90",
+          "interval": ""
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "type": "stat",
+      "title": "Current Success Rate",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "neuraforge_orchestrator_success_rate",
+          "interval": ""
+        }
+      ],
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 8}
+    },
+    {
+      "type": "stat",
+      "title": "SLA Violations (5m)",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(increase(neuraforge_orchestrator_sla_events_total{category=\"violated\"}[5m]))",
+          "interval": ""
+        }
+      ],
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 8}
+    },
+    {
+      "type": "timeseries",
+      "title": "Guardrail Decisions",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "sum(rate(neuraforge_guardrail_decisions_total[5m])) by (decision)",
+          "legendFormat": "{{decision}}",
+          "interval": ""
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 12}
+    },
+    {
+      "type": "timeseries",
+      "title": "Escalations",
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "targets": [
+        {
+          "expr": "rate(neuraforge_orchestrator_escalations_total[5m])",
+          "legendFormat": "Escalations/min",
+          "interval": ""
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 12}
+    }
+  ],
+  "schemaVersion": 38,
+  "version": 1
+}

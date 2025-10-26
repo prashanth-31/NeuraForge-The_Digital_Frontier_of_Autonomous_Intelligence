@@ -1,0 +1,8 @@
+-r requirements.txt
+pytest
+pytest-asyncio
+pytest-httpx
+httpx
+PyJWT
+ruff
+coverage

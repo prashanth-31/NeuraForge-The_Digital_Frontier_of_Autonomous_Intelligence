@@ -1,0 +1,32 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ["alertname", "team"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 2h
+  receiver: reviewers-warning
+  routes:
+    - matchers:
+        - severity="critical"
+      receiver: reviewers-critical
+    - matchers:
+        - team!="reviewers"
+      receiver: default
+
+receivers:
+  - name: reviewers-critical
+    webhook_configs:
+      - url: http://pager-proxy:8080/alerts
+        send_resolved: true
+
+  - name: reviewers-warning
+    webhook_configs:
+      - url: http://pager-proxy:8080/review-alerts
+        send_resolved: true
+
+  - name: default
+    webhook_configs:
+      - url: http://pager-proxy:8080/alerts
+        send_resolved: true

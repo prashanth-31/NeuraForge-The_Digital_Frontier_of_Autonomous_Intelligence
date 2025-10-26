@@ -1,0 +1,841 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { differenceInMinutes, formatDistanceToNow } from "date-fns";
+import {
+  ClipboardList,
+  MessageSquareText,
+  CheckCircle2,
+  UserPlus,
+  RotateCcw,
+  Loader2,
+  AlertTriangle,
+  BarChart3,
+  Clock3,
+  Gauge,
+  Users,
+} from "lucide-react";
+
+import AppLayout from "@/components/AppLayout";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card } from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { useToast } from "@/components/ui/use-toast";
+import { useAuth } from "@/contexts/AuthContext";
+import { API_BASE_URL, REVIEW_API_TOKEN, buildReviewHeaders } from "@/lib/api";
+import { cn } from "@/lib/utils";
+
+type ReviewStatus = "open" | "in_review" | "resolved" | "dismissed";
+
+type ReviewNote = {
+  note_id: string;
+  author: string;
+  content: string;
+  created_at: string;
+};
+
+type ReviewTicket = {
+  ticket_id: string;
+  task_id: string;
+  status: ReviewStatus;
+  summary: string | null;
+  created_at: string;
+  updated_at: string;
+  assigned_to: string | null;
+  sources: string[];
+  escalation_payload?: {
+    prompt?: string;
+    meta?: Record<string, unknown>;
+    negotiation?: Record<string, unknown>;
+  };
+  notes: ReviewNote[];
+};
+
+type EnrichedTicket = ReviewTicket & {
+  latest_note: ReviewNote | null;
+};
+
+type ActionParams = {
+  ticketId: string;
+  body?: Record<string, unknown>;
+};
+
+type ReviewMetrics = {
+  generated_at: string;
+  totals: Record<string, number>;
+  assignment: {
+    by_reviewer: Record<string, number>;
+    unassigned_open: number;
+  };
+  aging: {
+    open_average_minutes: number;
+    open_oldest_minutes: number;
+    in_review_average_minutes: number;
+  };
+  resolution: {
+    average_minutes: number | null;
+    median_minutes: number | null;
+    completed_last_24h: number;
+  };
+};
+
+const fetchTickets = async (token: string | undefined): Promise<ReviewTicket[]> => {
+  if (!token) {
+    throw new Error("Reviewer token not configured");
+  }
+  const response = await fetch(`${API_BASE_URL}/api/v1/reviews`, {
+    headers: buildReviewHeaders(token),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || "Failed to load review tickets");
+  }
+
+  return response.json();
+};
+
+const fetchReviewMetrics = async (token: string | undefined): Promise<ReviewMetrics> => {
+  if (!token) {
+    throw new Error("Reviewer token not configured");
+  }
+  const response = await fetch(`${API_BASE_URL}/api/v1/reviews/metrics`, {
+    headers: buildReviewHeaders(token),
+  });
+
+  if (!response.ok) {
+    const detail = await response.text();
+    throw new Error(detail || "Failed to load review metrics");
+  }
+
+  return response.json();
+};
+
+const Reviews = () => {
+  const queryClient = useQueryClient();
+  const { user } = useAuth();
+  const { toast } = useToast();
+  const previousTicketsRef = useRef<Map<string, EnrichedTicket> | null>(null);
+
+  const reviewerToken = useMemo(() => {
+    const metadataToken = typeof user?.user_metadata?.review_api_token === "string"
+      ? user.user_metadata.review_api_token.trim()
+      : undefined;
+    return metadataToken || REVIEW_API_TOKEN || undefined;
+  }, [user]);
+
+  const reviewerLabel = user?.email ?? user?.id ?? "unknown";
+
+  const [statusFilter, setStatusFilter] = useState<ReviewStatus | "all">("all");
+  const [reviewerFilter, setReviewerFilter] = useState<string>("all");
+  const [ageFilter, setAgeFilter] = useState<string>("any");
+  const filtersActive = statusFilter !== "all" || reviewerFilter !== "all" || ageFilter !== "any";
+
+  const {
+    data: tickets = [],
+    isLoading,
+    error,
+  } = useQuery({
+    queryKey: ["review-tickets", reviewerToken],
+    queryFn: () => fetchTickets(reviewerToken),
+    enabled: Boolean(reviewerToken),
+    refetchInterval: reviewerToken ? 15000 : false,
+  });
+
+  const {
+    data: metrics,
+    isLoading: metricsLoading,
+    error: metricsError,
+  } = useQuery({
+    queryKey: ["review-metrics", reviewerToken],
+    queryFn: () => fetchReviewMetrics(reviewerToken),
+    enabled: Boolean(reviewerToken),
+    refetchInterval: reviewerToken ? 30000 : false,
+  });
+
+  const enrichedTickets = useMemo<EnrichedTicket[]>(
+    () =>
+      tickets.map((ticket) => ({
+        ...ticket,
+        latest_note: ticket.notes.length ? ticket.notes[ticket.notes.length - 1] : null,
+      })),
+    [tickets],
+  );
+
+  const reviewerOptions = useMemo(() => {
+    const reviewers = new Set<string>();
+    enrichedTickets.forEach((ticket) => {
+      if (ticket.assigned_to) {
+        reviewers.add(ticket.assigned_to);
+      }
+    });
+    return Array.from(reviewers).sort((a, b) => a.localeCompare(b));
+  }, [enrichedTickets]);
+
+  const filteredTickets = useMemo(() => {
+    const matchAgeFilter = (createdAt: string) => {
+      if (ageFilter === "any") {
+        return true;
+      }
+      const minutesOpen = Math.max(0, differenceInMinutes(new Date(), new Date(createdAt)));
+      if (ageFilter === "lt_30") {
+        return minutesOpen < 30;
+      }
+      if (ageFilter === "30_60") {
+        return minutesOpen >= 30 && minutesOpen < 60;
+      }
+      if (ageFilter === "1_6h") {
+        return minutesOpen >= 60 && minutesOpen < 360;
+      }
+      if (ageFilter === "gt_6h") {
+        return minutesOpen >= 360;
+      }
+      return true;
+    };
+
+    return enrichedTickets.filter((ticket) => {
+      if (statusFilter !== "all" && ticket.status !== statusFilter) {
+        return false;
+      }
+
+      if (reviewerFilter === "unassigned") {
+        if (ticket.assigned_to !== null && ticket.assigned_to !== undefined) {
+          return false;
+        }
+      } else if (reviewerFilter !== "all" && ticket.assigned_to !== reviewerFilter) {
+        return false;
+      }
+
+      if (!matchAgeFilter(ticket.created_at)) {
+        return false;
+      }
+
+      return true;
+    });
+  }, [enrichedTickets, statusFilter, reviewerFilter, ageFilter]);
+
+  const groupedTickets = useMemo(() => {
+    return {
+      open: filteredTickets.filter((ticket) => ticket.status === "open"),
+      in_review: filteredTickets.filter((ticket) => ticket.status === "in_review"),
+      closed: filteredTickets.filter((ticket) => ticket.status === "resolved" || ticket.status === "dismissed"),
+    };
+  }, [filteredTickets]);
+
+  const totalTicketsByStatus = useMemo(() => {
+    return {
+      open: enrichedTickets.filter((ticket) => ticket.status === "open").length,
+      in_review: enrichedTickets.filter((ticket) => ticket.status === "in_review").length,
+      closed: enrichedTickets.filter((ticket) => ticket.status === "resolved" || ticket.status === "dismissed").length,
+    };
+  }, [enrichedTickets]);
+
+  const formatMinutes = (minutes: number | null | undefined) => {
+    if (minutes === null || minutes === undefined || Number.isNaN(minutes)) {
+      return "—";
+    }
+    if (minutes < 1) {
+      return "<1m";
+    }
+    if (minutes < 60) {
+      return `${Math.round(minutes)}m`;
+    }
+    const hours = minutes / 60;
+    if (hours < 24) {
+      return `${hours.toFixed(1)}h`;
+    }
+    return `${(hours / 24).toFixed(1)}d`;
+  };
+
+  const queueAlerts = useMemo(() => {
+    if (!metrics) {
+      return [] as Array<{ title: string; description: string }>;
+    }
+
+    const alerts: Array<{ title: string; description: string }> = [];
+    const openCount = metrics.totals?.open ?? 0;
+    const unassigned = metrics.assignment?.unassigned_open ?? 0;
+    const oldestOpen = metrics.aging?.open_oldest_minutes ?? 0;
+    const avgOpen = metrics.aging?.open_average_minutes ?? 0;
+
+    if (openCount >= 12) {
+      alerts.push({
+        title: "High open queue",
+        description: `There are ${openCount} tickets waiting. Consider rebalancing reviewers or adjusting agent thresholds.`,
+      });
+    }
+
+    if (unassigned >= 3) {
+      alerts.push({
+        title: "Unassigned backlog",
+        description: `${unassigned} tickets are unassigned. Assign owners to keep SLA intact.`,
+      });
+    }
+
+    if (oldestOpen >= 120 || avgOpen >= 90) {
+      alerts.push({
+        title: "Aging tickets detected",
+        description: `Oldest ticket has been open ${formatMinutes(oldestOpen)}; average open time is ${formatMinutes(avgOpen)}.`,
+      });
+    }
+
+    return alerts;
+  }, [metrics]);
+
+  const invalidateReviewData = () => {
+    queryClient.invalidateQueries({ queryKey: ["review-tickets", reviewerToken] });
+    queryClient.invalidateQueries({ queryKey: ["review-metrics", reviewerToken] });
+  };
+
+  const performAction = async (endpoint: string, { ticketId, body }: ActionParams, method: "POST" | "PATCH" = "POST") => {
+    if (!reviewerToken) {
+      throw new Error("Reviewer token not configured");
+    }
+    const response = await fetch(`${API_BASE_URL}/api/v1/reviews/${ticketId}/${endpoint}`, {
+      method,
+      headers: buildReviewHeaders(reviewerToken),
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(detail || "Action failed");
+    }
+    return response.json();
+  };
+
+  const assignMutation = useMutation({
+    mutationFn: (params: ActionParams) =>
+      performAction("assign", {
+        ...params,
+        body: { reviewer_id: reviewerLabel, ...(params.body ?? {}) },
+      }),
+    onSuccess: invalidateReviewData,
+    onError: (err: Error) => toast({ title: "Assignment failed", description: err.message, variant: "destructive" }),
+  });
+
+  const unassignMutation = useMutation({
+    mutationFn: (params: ActionParams) => performAction("unassign", params, "PATCH"),
+    onSuccess: invalidateReviewData,
+    onError: (err: Error) => toast({ title: "Unassign failed", description: err.message, variant: "destructive" }),
+  });
+
+  const noteMutation = useMutation({
+    mutationFn: (params: ActionParams) =>
+      performAction("notes", {
+        ...params,
+        body: { author: reviewerLabel, ...(params.body ?? {}) },
+      }),
+    onSuccess: invalidateReviewData,
+    onError: (err: Error) => toast({ title: "Note failed", description: err.message, variant: "destructive" }),
+  });
+
+  const resolveMutation = useMutation({
+    mutationFn: (params: ActionParams & { status: Exclude<ReviewStatus, "open" | "in_review"> }) =>
+      performAction(
+        "resolve",
+        {
+          ticketId: params.ticketId,
+          body: {
+            status: params.status,
+            reviewer_id: reviewerLabel,
+            ...(params.body ?? {}),
+          },
+        },
+      ),
+    onSuccess: invalidateReviewData,
+    onError: (err: Error) => toast({ title: "Resolution failed", description: err.message, variant: "destructive" }),
+  });
+
+  useEffect(() => {
+    if (!enrichedTickets.length) {
+      previousTicketsRef.current = new Map();
+      return;
+    }
+
+    const previousMap = previousTicketsRef.current;
+    const currentMap = new Map(enrichedTickets.map((ticket) => [ticket.ticket_id, ticket]));
+
+    if (!previousMap) {
+      previousTicketsRef.current = currentMap;
+      return;
+    }
+
+    enrichedTickets.forEach((ticket) => {
+      const previous = previousMap.get(ticket.ticket_id);
+      if (!previous) {
+        toast({
+          title: "New review ticket",
+          description: buildToastDescription(ticket, "created"),
+        });
+        return;
+      }
+
+      if (previous.status !== ticket.status) {
+        toast({
+          title: ticket.status === "resolved" ? "Ticket resolved" : ticket.status === "dismissed" ? "Ticket dismissed" : "Status updated",
+          description: buildToastDescription(ticket, ticket.status),
+        });
+        return;
+      }
+
+      if (previous.assigned_to !== ticket.assigned_to) {
+        toast({
+          title: ticket.assigned_to ? "Ticket assigned" : "Ticket unassigned",
+          description: buildToastDescription(ticket, ticket.assigned_to ? "assigned" : "unassigned"),
+        });
+        return;
+      }
+
+      if (previous.notes.length < ticket.notes.length && ticket.latest_note) {
+        toast({
+          title: "New reviewer note",
+          description: `${ticket.latest_note.author}: ${ticket.latest_note.content}`,
+        });
+      }
+    });
+
+    previousTicketsRef.current = currentMap;
+  }, [enrichedTickets, toast]);
+
+  const ensureNote = (action: string) => {
+    const content = window.prompt(`Add a note for ${action}`);
+    if (!content) {
+      return undefined;
+    }
+    const trimmed = content.trim();
+    return trimmed.length ? trimmed : undefined;
+  };
+
+  const renderTicketHeader = (ticket: EnrichedTicket, showSummary = true) => {
+    const title = ticket.summary?.trim() || `Ticket ${ticket.ticket_id.slice(0, 8)}`;
+    const prompt = typeof ticket.escalation_payload?.prompt === "string" ? ticket.escalation_payload.prompt : "Prompt unavailable";
+    return (
+      <div className="space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <h3 className="text-lg font-semibold text-foreground">{title}</h3>
+          <Badge variant="outline" className="capitalize">
+            {ticket.status.replace("_", " ")}
+          </Badge>
+          {ticket.assigned_to && <Badge variant="secondary">Assigned to {ticket.assigned_to}</Badge>}
+        </div>
+        {showSummary && (
+          <p className="text-sm text-muted-foreground whitespace-pre-wrap">{prompt}</p>
+        )}
+      </div>
+    );
+  };
+
+  const openTicketsContent = groupedTickets.open.length ? (
+    <div className="space-y-4">
+      {groupedTickets.open.map((ticket) => (
+        <Card key={ticket.ticket_id} className="p-4 transition-smooth hover-lift">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-4">
+              {renderTicketHeader(ticket)}
+              <div className="space-y-2 text-xs text-muted-foreground">
+                <div className="flex items-center gap-2">
+                  <ClipboardList className="h-4 w-4" />
+                  Created {formatDistanceToNow(new Date(ticket.created_at), { addSuffix: true })}
+                </div>
+                <div className="flex items-center gap-2">
+                  <MessageSquareText className="h-4 w-4" />
+                  {ticket.notes.length} note{ticket.notes.length === 1 ? "" : "s"}
+                </div>
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 min-w-[200px]">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => assignMutation.mutate({ ticketId: ticket.ticket_id })}
+                disabled={assignMutation.isPending}
+              >
+                <UserPlus className="mr-2 h-4 w-4" /> Assign to me
+              </Button>
+              <Button
+                variant="secondary"
+                size="sm"
+                onClick={() => {
+                  const content = ensureNote("context update");
+                  if (!content) return;
+                  noteMutation.mutate({ ticketId: ticket.ticket_id, body: { content } });
+                }}
+                disabled={noteMutation.isPending}
+              >
+                <MessageSquareText className="mr-2 h-4 w-4" /> Add note
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => resolveMutation.mutate({ ticketId: ticket.ticket_id, status: "dismissed" })}
+                disabled={resolveMutation.isPending}
+              >
+                <RotateCcw className="mr-2 h-4 w-4" /> Dismiss
+              </Button>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  ) : (
+    <Card className="p-8 text-center text-muted-foreground">
+      <p>No open review tickets 🎉</p>
+    </Card>
+  );
+
+  const activeTicketsContent = groupedTickets.in_review.length ? (
+    <div className="space-y-4">
+      {groupedTickets.in_review.map((ticket) => (
+        <Card key={ticket.ticket_id} className="p-4 transition-smooth hover-lift">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-3">
+              {renderTicketHeader(ticket)}
+              <div className="space-y-2 text-xs text-muted-foreground">
+                <div className="flex items-center gap-2">
+                  <ClipboardList className="h-4 w-4" />
+                  Updated {formatDistanceToNow(new Date(ticket.updated_at), { addSuffix: true })}
+                </div>
+                {ticket.latest_note && (
+                  <div className="flex items-center gap-2">
+                    <MessageSquareText className="h-4 w-4" />
+                    Latest note by {ticket.latest_note.author}: {ticket.latest_note.content}
+                  </div>
+                )}
+              </div>
+            </div>
+            <div className="flex flex-col gap-2 min-w-[200px]">
+              <Button
+                variant="default"
+                size="sm"
+                onClick={() => resolveMutation.mutate({ ticketId: ticket.ticket_id, status: "resolved" })}
+                disabled={resolveMutation.isPending}
+              >
+                <CheckCircle2 className="mr-2 h-4 w-4" /> Resolve
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => unassignMutation.mutate({ ticketId: ticket.ticket_id })}
+                disabled={unassignMutation.isPending}
+              >
+                Unassign
+              </Button>
+            </div>
+          </div>
+        </Card>
+      ))}
+    </div>
+  ) : (
+    <Card className="p-8 text-center text-muted-foreground">
+      <p>No tickets actively under review.</p>
+    </Card>
+  );
+
+  const closedTicketsContent = groupedTickets.closed.length ? (
+    <div className="grid gap-4 md:grid-cols-2">
+      {groupedTickets.closed.map((ticket) => (
+        <Card key={ticket.ticket_id} className="p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Badge
+              variant={ticket.status === "resolved" ? "default" : "outline"}
+              className={cn("capitalize")}
+            >
+              {ticket.status.replace("_", " ")}
+            </Badge>
+            {ticket.assigned_to && <span className="text-xs text-muted-foreground">by {ticket.assigned_to}</span>}
+          </div>
+          <h4 className="text-sm font-semibold text-foreground">
+            {ticket.summary?.trim() || `Ticket ${ticket.ticket_id.slice(0, 8)}`}
+          </h4>
+          <p className="text-xs text-muted-foreground mt-1 line-clamp-3">
+            {typeof ticket.escalation_payload?.prompt === "string"
+              ? ticket.escalation_payload.prompt
+              : "Prompt unavailable"}
+          </p>
+        </Card>
+      ))}
+    </div>
+  ) : (
+    <Card className="p-6 text-center text-muted-foreground">
+      <p>No closed tickets yet.</p>
+    </Card>
+  );
+
+  const loadingState = isLoading ? (
+    <div className="flex items-center justify-center py-12 text-muted-foreground">
+      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+      Loading tickets...
+    </div>
+  ) : error ? (
+    <div className="text-sm text-destructive">{(error as Error).message}</div>
+  ) : null;
+
+  return (
+    <AppLayout>
+      <div className="flex-1 overflow-auto p-6">
+        <div className="max-w-6xl mx-auto space-y-8">
+          <div>
+            <h1 className="text-3xl font-bold text-foreground">Reviewer Console</h1>
+            <p className="text-muted-foreground mt-2">
+              Track escalations, collaborate with agents, and keep service levels on track.
+            </p>
+          </div>
+
+          {!reviewerToken && (
+            <Card className="border-dashed border-2 border-destructive/40 bg-destructive/10 p-6">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="h-5 w-5 text-destructive mt-0.5" />
+                <div className="space-y-2 text-sm text-destructive">
+                  <p className="font-semibold">Reviewer API token missing.</p>
+                  <p>
+                    Provide a token via <code>VITE_REVIEW_API_TOKEN</code> or add <code>review_api_token</code> to your
+                    Supabase user metadata, then refresh the page.
+                  </p>
+                </div>
+              </div>
+            </Card>
+          )}
+
+          {reviewerToken && metrics && !metricsLoading && !metricsError && (
+            <section className="space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-xl font-semibold text-foreground">Queue metrics</h2>
+                <Badge variant="outline">
+                  Updated {formatDistanceToNow(new Date(metrics.generated_at), { addSuffix: true })}
+                </Badge>
+              </div>
+              <div className="grid gap-4 md:grid-cols-4">
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <BarChart3 className="h-5 w-5 text-primary" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Open</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.totals.open ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <Gauge className="h-5 w-5 text-emerald-500" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">In review</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.totals.in_review ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <Users className="h-5 w-5 text-secondary" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Unassigned</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.assignment.unassigned_open ?? 0}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+                <Card className="p-4">
+                  <div className="flex items-center gap-3">
+                    <Clock3 className="h-5 w-5 text-amber-500" />
+                    <div>
+                      <p className="text-xs text-muted-foreground uppercase tracking-wide">Resolved (24h)</p>
+                      <p className="text-2xl font-semibold text-foreground">
+                        {metrics.resolution.completed_last_24h}
+                      </p>
+                    </div>
+                  </div>
+                </Card>
+              </div>
+
+              <div className="grid gap-4 md:grid-cols-3">
+                <Card className="p-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Avg time open</p>
+                  <p className="text-lg font-semibold text-foreground">
+                    {formatMinutes(metrics.aging.open_average_minutes)}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground mt-1">
+                    Oldest {formatMinutes(metrics.aging.open_oldest_minutes)}
+                  </p>
+                </Card>
+                <Card className="p-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Avg time in review</p>
+                  <p className="text-lg font-semibold text-foreground">
+                    {formatMinutes(metrics.aging.in_review_average_minutes)}
+                  </p>
+                </Card>
+                <Card className="p-4">
+                  <p className="text-xs text-muted-foreground uppercase tracking-wide">Avg resolution</p>
+                  <p className="text-lg font-semibold text-foreground">
+                    {formatMinutes(metrics.resolution.average_minutes)}
+                  </p>
+                  {metrics.resolution.median_minutes !== null && (
+                    <p className="text-[11px] text-muted-foreground mt-1">
+                      Median {formatMinutes(metrics.resolution.median_minutes)}
+                    </p>
+                  )}
+                </Card>
+              </div>
+
+              {queueAlerts.length > 0 && (
+                <div className="space-y-2">
+                  {queueAlerts.map((alert) => (
+                    <Alert key={alert.title} variant="destructive">
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertTitle>{alert.title}</AlertTitle>
+                      <AlertDescription>{alert.description}</AlertDescription>
+                    </Alert>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
+
+          {metricsError && (
+            <div className="text-sm text-destructive">{(metricsError as Error).message}</div>
+          )}
+
+          {reviewerToken && (
+            <section className="border border-border/50 bg-muted/30 rounded-lg p-4 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Filters</p>
+                  <p className="text-xs text-muted-foreground">Scope the panels by status, assignment, and ticket age.</p>
+                </div>
+                <Badge variant="outline">
+                  Showing {filteredTickets.length} of {enrichedTickets.length}
+                </Badge>
+              </div>
+              <div className="grid gap-3 md:grid-cols-3">
+                <Select value={statusFilter} onValueChange={(value) => setStatusFilter(value as ReviewStatus | "all")}>
+                  <SelectTrigger aria-label="Status filter">
+                    <SelectValue placeholder="Status" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All statuses</SelectItem>
+                    <SelectItem value="open">Open</SelectItem>
+                    <SelectItem value="in_review">In review</SelectItem>
+                    <SelectItem value="resolved">Resolved</SelectItem>
+                    <SelectItem value="dismissed">Dismissed</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Select value={reviewerFilter} onValueChange={setReviewerFilter}>
+                  <SelectTrigger aria-label="Reviewer filter">
+                    <SelectValue placeholder="Reviewer" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="all">All reviewers</SelectItem>
+                    <SelectItem value="unassigned">Unassigned</SelectItem>
+                    {reviewerOptions.map((reviewer) => (
+                      <SelectItem key={reviewer} value={reviewer}>
+                        {reviewer}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select value={ageFilter} onValueChange={setAgeFilter}>
+                  <SelectTrigger aria-label="Age filter">
+                    <SelectValue placeholder="Age" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="any">All ages</SelectItem>
+                    <SelectItem value="lt_30">Under 30 minutes</SelectItem>
+                    <SelectItem value="30_60">30 – 60 minutes</SelectItem>
+                    <SelectItem value="1_6h">1 – 6 hours</SelectItem>
+                    <SelectItem value="gt_6h">Over 6 hours</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              {filtersActive && (
+                <div className="flex justify-end">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      setStatusFilter("all");
+                      setReviewerFilter("all");
+                      setAgeFilter("any");
+                    }}
+                  >
+                    Reset filters
+                  </Button>
+                </div>
+              )}
+            </section>
+          )}
+
+          {loadingState}
+
+          {reviewerToken && !isLoading && !error && (
+            <div className="space-y-10 pb-16">
+              <section>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-semibold text-foreground">New tickets</h2>
+                  <Badge variant="secondary">
+                    {groupedTickets.open.length} of {totalTicketsByStatus.open} waiting
+                  </Badge>
+                </div>
+                {openTicketsContent}
+              </section>
+
+              <Separator />
+
+              <section>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-semibold text-foreground">Active reviews</h2>
+                  <Badge variant="secondary">
+                    {groupedTickets.in_review.length} of {totalTicketsByStatus.in_review} in progress
+                  </Badge>
+                </div>
+                {activeTicketsContent}
+              </section>
+
+              <Separator />
+
+              <section>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-semibold text-foreground">Recently closed</h2>
+                  <Badge variant="outline">
+                    {groupedTickets.closed.length} of {totalTicketsByStatus.closed}
+                  </Badge>
+                </div>
+                {closedTicketsContent}
+              </section>
+            </div>
+          )}
+        </div>
+      </div>
+    </AppLayout>
+  );
+};
+
+function buildToastDescription(ticket: EnrichedTicket, reason: string): string {
+  const title = ticket.summary?.trim() || ticket.task_id;
+  switch (reason) {
+    case "created":
+      return `${title} opened${ticket.assigned_to ? ` (default ${ticket.assigned_to})` : ""}`;
+    case "assigned":
+      return `${title} assigned to ${ticket.assigned_to ?? "unknown"}`;
+    case "unassigned":
+      return `${title} returned to queue`;
+    case "resolved":
+      return `${title} verified and closed`;
+    case "dismissed":
+      return `${title} dismissed after review`;
+    default:
+      return title;
+  }
+}
+
+export default Reviews;
