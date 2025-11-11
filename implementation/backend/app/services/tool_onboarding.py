@@ -39,7 +39,7 @@ CREATIVE_TOOLS: List[PlannedTool] = [
 ]
 
 ENTERPRISE_TOOLS: List[PlannedTool] = [
-    PlannedTool(alias="enterprise.playbook", resolved="enterprise/notion", category="enterprise", description="Composite playbook orchestrator"),
+    PlannedTool(alias="enterprise.playbook", resolved="enterprise/playbook", category="enterprise", description="Composite playbook orchestrator"),
     PlannedTool(alias="enterprise.notion", resolved="enterprise/notion", category="enterprise", description="Notion knowledge connector"),
     PlannedTool(alias="enterprise.calendar", resolved="enterprise/calendar", category="enterprise", description="Calendar synchronization"),
     PlannedTool(alias="enterprise.policy", resolved="enterprise/policy_checker", category="enterprise", description="Policy compliance check"),

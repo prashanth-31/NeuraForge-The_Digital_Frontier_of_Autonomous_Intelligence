@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from ..agents.base import AgentContext
@@ -20,7 +21,9 @@ class FinanceAgent:
     capability: AgentCapability = AgentCapability.FINANCE
     system_prompt: str = (
         "You are NeuraForge's Finance Agent. Provide high-level forecasts, key risks, and actionable"
-        " next steps using available context. Respond with structured bullet points."
+        " next steps using available context. Respond with structured bullet points. When live tool"
+        " metrics are available, treat them as the source of truth, cite their timestamps, and avoid"
+        " repeating stale historical figures unless you explicitly flag them as legacy context."
     )
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
@@ -80,6 +83,7 @@ class FinanceAgent:
         prior = _collect_prior_outputs(task.prior_exchanges)
         retrieved = context_section or "(no retrieved context)"
         tool_data = self._format_tool_metrics(tool_result)
+        tool_json = self._format_tool_json(tool_result)
         handoff = self._format_handoff(task.metadata)
         return (
             f"Business question:\n{task.prompt}\n\n"
@@ -87,7 +91,8 @@ class FinanceAgent:
             f"Shared context from peers:\n{handoff}\n\n"
             f"Earlier agent signals:\n{prior}\n\n"
             f"Retrieved context:\n{retrieved}\n\n"
-            f"Tool metrics:\n{tool_data}\n\n"
+            f"Tool metrics summary:\n{tool_data}\n\n"
+            f"Raw tool metrics JSON (primary source, prefer over model priors):\n{tool_json}\n\n"
             "Estimate revenue or cost implications, surface 2-3 headline metrics, and outline immediate actions."
         )
 
@@ -215,10 +220,39 @@ class FinanceAgent:
         metrics = self._extract_tool_metrics(tool_result) if tool_result else []
         if not metrics:
             return "(tool metrics unavailable)"
-        return "\n".join(
-            f"- {item.get('name', 'metric')}: {item.get('value', 'n/a')} ({item.get('trend', 'stable')})"
-            for item in metrics
-        )
+        lines: list[str] = []
+        for metric in metrics[:3]:
+            symbol = metric.get("symbol") or "?"
+            company = metric.get("company_name") or metric.get("long_name") or symbol
+            price = metric.get("price") or metric.get("regularMarketPrice")
+            change_pct = metric.get("change_percent") or metric.get("regularMarketChangePercent")
+            change_value = metric.get("change") or metric.get("regularMarketChange")
+            updated = metric.get("updated_at") or metric.get("regularMarketTime")
+            previous_close = metric.get("previous_close") or metric.get("regularMarketPreviousClose")
+
+            price_str = self._format_price(price, metric.get("currency"))
+            change_parts: list[str] = []
+            if change_value is not None:
+                change_parts.append(self._format_price(change_value, metric.get("currency"), prefix="Δ"))
+            if change_pct is not None:
+                change_parts.append(f"{change_pct:+.2f}%")
+            change_str = " ".join(change_parts) if change_parts else "flat"
+
+            previous_str = self._format_price(previous_close, metric.get("currency")) if previous_close is not None else "n/a"
+            timestamp = self._format_timestamp(updated)
+            lines.append(f"- {company} ({symbol}): {price_str} ({change_str}) vs prev {previous_str} as of {timestamp}")
+            fundamentals_summary = self._summarize_fundamentals(metric.get("fundamentals"), metric.get("currency"))
+            if fundamentals_summary:
+                lines.append(f"  {fundamentals_summary}")
+        return "\n".join(lines)
+
+    def _format_tool_json(self, tool_result: ToolInvocationResult | None) -> str:
+        if tool_result is None or not isinstance(tool_result.response, dict):
+            return "(no tool payload)"
+        try:
+            return json.dumps(tool_result.response, indent=2, sort_keys=True, default=str)
+        except TypeError:
+            return "(tool payload not serializable)"
 
     @staticmethod
     def _extract_tool_metrics(tool_result: ToolInvocationResult | None) -> list[dict[str, Any]]:
@@ -231,6 +265,36 @@ class FinanceAgent:
         return []
 
     @staticmethod
+    def _format_price(value: Any, currency: str | None, prefix: str = "") -> str:
+        try:
+            if value is None:
+                return "n/a"
+            amount = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        unit = currency or "USD"
+        prefix = f"{prefix} " if prefix else ""
+        return f"{prefix}{unit} {amount:,.2f}"
+
+    @staticmethod
+    def _format_timestamp(raw: Any) -> str:
+        if raw is None:
+            return "unknown time"
+        if isinstance(raw, (int, float)):
+            try:
+                dt = datetime.fromtimestamp(float(raw), tz=UTC)
+            except (OverflowError, ValueError):
+                return "unknown time"
+            return dt.strftime("%Y-%m-%d %H:%M %Z")
+        if isinstance(raw, str):
+            try:
+                dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            except ValueError:
+                return raw
+            return dt.strftime("%Y-%m-%d %H:%M %Z")
+        return str(raw)
+
+    @staticmethod
     def _tool_metadata(tool_result: ToolInvocationResult) -> dict[str, Any]:
         return {
             "name": tool_result.tool,
@@ -238,6 +302,88 @@ class FinanceAgent:
             "cached": tool_result.cached,
             "latency": round(tool_result.latency, 4),
         }
+
+    def _summarize_fundamentals(self, fundamentals: Any, fallback_currency: str | None) -> str:
+        if not isinstance(fundamentals, dict) or not fundamentals:
+            return ""
+        currency = fundamentals.get("currency") or fallback_currency or "USD"
+        parts: list[str] = []
+
+        trailing = fundamentals.get("trailing")
+        if isinstance(trailing, dict):
+            revenue = trailing.get("revenue")
+            net_income = trailing.get("net_income")
+            trailing_parts: list[str] = []
+            if revenue is not None:
+                trailing_parts.append(f"TTM revenue {self._format_amount(revenue, currency)}")
+            if net_income is not None:
+                trailing_parts.append(f"TTM net income {self._format_amount(net_income, currency)}")
+            if trailing_parts:
+                parts.append("; ".join(trailing_parts))
+
+        quarterly = fundamentals.get("quarterly")
+        if isinstance(quarterly, list) and quarterly:
+            latest = quarterly[0]
+            if isinstance(latest, dict):
+                period = latest.get("period", "recent quarter")
+                revenue = latest.get("total_revenue")
+                net_income = latest.get("net_income")
+                quarter_parts: list[str] = []
+                if revenue is not None:
+                    quarter_parts.append(f"revenue {self._format_amount(revenue, currency)}")
+                if net_income is not None:
+                    quarter_parts.append(f"net income {self._format_amount(net_income, currency)}")
+                if quarter_parts:
+                    parts.append(f"Latest quarter ({period}): {', '.join(quarter_parts)}")
+
+        guidance = fundamentals.get("guidance")
+        if isinstance(guidance, dict) and guidance:
+            guidance_parts: list[str] = []
+            target_mean = guidance.get("target_mean_price")
+            if target_mean is not None:
+                guidance_parts.append(f"target price {self._format_price(target_mean, currency)}")
+            forward_eps = guidance.get("forward_eps")
+            if forward_eps is not None:
+                try:
+                    guidance_parts.append(f"forward EPS {float(forward_eps):.2f}")
+                except (TypeError, ValueError):
+                    pass
+            revenue_growth = guidance.get("revenue_growth")
+            if revenue_growth is not None:
+                try:
+                    guidance_parts.append(f"revenue growth {float(revenue_growth)*100:.1f}%")
+                except (TypeError, ValueError):
+                    pass
+            earnings_growth = guidance.get("earnings_growth")
+            if earnings_growth is not None:
+                try:
+                    guidance_parts.append(f"earnings growth {float(earnings_growth)*100:.1f}%")
+                except (TypeError, ValueError):
+                    pass
+            if guidance_parts:
+                parts.append("Guidance: " + "; ".join(guidance_parts))
+
+        return "; ".join(parts)
+
+    @staticmethod
+    def _format_amount(value: Any, currency: str | None) -> str:
+        try:
+            amount = float(value)
+        except (TypeError, ValueError):
+            return "n/a"
+        unit = currency or "USD"
+        absolute = abs(amount)
+        scale = 1.0
+        suffix = ""
+        for threshold, label in ((1_000_000_000_000.0, "T"), (1_000_000_000.0, "B"), (1_000_000.0, "M")):
+            if absolute >= threshold:
+                scale = threshold
+                suffix = label
+                break
+        formatted = amount / scale if scale != 1.0 else amount
+        if suffix:
+            return f"{unit} {formatted:,.2f}{suffix}"
+        return f"{unit} {formatted:,.2f}"
 
     @staticmethod
     def _filtered_metadata(metadata: dict[str, Any]) -> dict[str, Any]:

@@ -396,6 +396,8 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
         return;
       }
 
+      const continuationTaskId = currentTaskId && typeof currentTaskId === "string" ? currentTaskId : null;
+
       const timestamp = formatTimestamp();
       const userMessage: ChatMessage = {
         id: randomId(),
@@ -413,12 +415,21 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       setTaskStatus(null);
 
       try {
+        const payload: Record<string, unknown> = {
+          prompt: trimmed,
+          metadata,
+        };
+
+        if (continuationTaskId) {
+          payload.continuation_task_id = continuationTaskId;
+        }
+
         const response = await fetch(`${API_BASE_URL}/api/v1/submit_task/stream`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
           },
-          body: JSON.stringify({ prompt: trimmed, metadata }),
+          body: JSON.stringify(payload),
         });
 
         if (!response.ok || !response.body) {
@@ -765,7 +776,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
         setIsStreaming(false);
       }
     },
-    [isStreaming, refreshHistory, refreshTaskStatus],
+    [currentTaskId, isStreaming, refreshHistory, refreshTaskStatus],
   );
 
   const value = useMemo(

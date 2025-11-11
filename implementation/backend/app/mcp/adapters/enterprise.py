@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import BaseModel, Field, HttpUrl, model_validator
+
+from app.services.enterprise_playbook import (
+    actions_from_notion,
+    actions_from_policy,
+    assemble_policy_document,
+    derive_playbook_query,
+    extract_policy_hints,
+)
 
 from .base import MCPToolAdapter
 
@@ -211,7 +219,88 @@ class CRMAdapter(MCPToolAdapter):
         }
 
 
+class EnterprisePlaybookInput(BaseModel):
+    prompt: str | None = Field(default=None, max_length=8_000)
+    metadata: dict[str, Any] | None = Field(default=None)
+    prior_outputs: list[dict[str, Any]] | None = Field(default=None)
+
+    model_config = {"extra": "forbid"}
+
+
+class EnterprisePlaybookOutput(BaseModel):
+    query: str
+    actions: list[dict[str, Any]]
+    notion: dict[str, Any]
+    policy: dict[str, Any]
+
+
+class EnterprisePlaybookAdapter(MCPToolAdapter):
+    name = "enterprise/playbook"
+    description = "Synthesizes Notion playbooks and policy checks into actionable enterprise guidance."
+    labels = ("enterprise", "strategy")
+    InputModel = EnterprisePlaybookInput
+    OutputModel = EnterprisePlaybookOutput
+
+    async def _invoke(self, payload_model: EnterprisePlaybookInput) -> Mapping[str, Any]:
+        payload = payload_model.model_dump(mode="python")
+        query = derive_playbook_query(payload)
+
+        notion_result: dict[str, Any] | None = None
+        notion_error: str | None = None
+        try:
+            notion_adapter = NotionConnectorAdapter()
+            notion_response = await notion_adapter.invoke({"action": "search", "query": query})
+            notion_result = dict(notion_response)
+        except Exception as exc:  # pragma: no cover - defensive guard
+            notion_error = str(exc)
+
+        actions = actions_from_notion(notion_result or {})
+
+        policy_result: dict[str, Any] | None = None
+        policy_error: str | None = None
+        if not actions:
+            document = assemble_policy_document(payload)
+            policies = extract_policy_hints(payload)
+            policy_payload = {"document": document, "policies": policies}
+            try:
+                policy_adapter = PolicyCheckerAdapter()
+                policy_response = await policy_adapter.invoke(policy_payload)
+                policy_result = dict(policy_response)
+            except Exception as exc:  # pragma: no cover - defensive guard
+                policy_error = str(exc)
+            else:
+                actions = actions_from_policy(policy_result)
+
+        if not actions:
+            details = ", ".join(filter(None, [notion_error, policy_error]))
+            fallback_impact = details or "No downstream enterprise tooling responded; escalate for manual review."
+            actions = [
+                {
+                    "action": "Review enterprise playbook configuration",
+                    "impact": fallback_impact,
+                    "origin": "enterprise_playbook",
+                }
+            ]
+
+        return {
+            "query": query,
+            "actions": actions,
+            "notion": {
+                "results": notion_result.get("results", []) if notion_result else [],
+                "cached": None,
+                "error": notion_error,
+            },
+            "policy": {
+                "findings": policy_result.get("findings", []) if policy_result else [],
+                "compliant": policy_result.get("compliant") if policy_result else None,
+                "cached": None,
+                "error": policy_error,
+            },
+        }
+
+
 ENTERPRISE_ADAPTER_CLASSES: tuple[type[MCPToolAdapter], ...] = (
+    EnterprisePlaybookAdapter,
     NotionConnectorAdapter,
     CalendarSyncAdapter,
     PolicyCheckerAdapter,
@@ -220,6 +309,7 @@ ENTERPRISE_ADAPTER_CLASSES: tuple[type[MCPToolAdapter], ...] = (
 
 
 __all__ = [
+    "EnterprisePlaybookAdapter",
     "NotionConnectorAdapter",
     "CalendarSyncAdapter",
     "PolicyCheckerAdapter",

@@ -20,3 +20,4 @@ scipy
 pandas
 python-dotenv
 prometheus-client
+yfinance

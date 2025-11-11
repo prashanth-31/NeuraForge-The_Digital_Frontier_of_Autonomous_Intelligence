@@ -88,6 +88,12 @@ def test_submit_task_stream_contract(monkeypatch):
     task_id = task_started_payload.get("task_id")
     assert isinstance(task_id, str) and task_id
     assert task_id in memory.ephemeral
-    assert memory.ephemeral[task_id]["result"]["status"] == "completed"
+    stored_result = memory.ephemeral[task_id]["result"]
+    assert stored_result["status"] == "completed"
+    assert "report" in stored_result
+    assert stored_result["report"].get("headline")
     completed_payload = events[-1][1]
-    assert completed_payload.get("payload", {}).get("status") == "completed"
+    final_event_payload = completed_payload.get("payload", {})
+    assert final_event_payload.get("status") == "completed"
+    assert "report" in final_event_payload
+    assert final_event_payload["report"].get("headline")

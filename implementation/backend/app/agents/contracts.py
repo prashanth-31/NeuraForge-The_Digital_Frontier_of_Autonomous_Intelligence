@@ -30,6 +30,17 @@ class AgentContract:
 
 def _build_contracts() -> Dict[AgentCapability, AgentContract]:
     return {
+        AgentCapability.GENERAL: AgentContract(
+            metadata=AgentContractMetadata(
+                name="general_agent",
+                capability=AgentCapability.GENERAL,
+                description="Provides broad overviews, clarifications, and triages tasks for specialist follow-up.",
+                tools=["summarizer"],
+                default_timeout_seconds=40,
+            ),
+            input_model=AgentInput,
+            output_model=AgentOutput,
+        ),
         AgentCapability.RESEARCH: AgentContract(
             metadata=AgentContractMetadata(
                 name="research_agent",

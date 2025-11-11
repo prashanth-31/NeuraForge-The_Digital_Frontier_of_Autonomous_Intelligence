@@ -70,7 +70,11 @@ services:
     networks:
       - neuraforge-net
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      test:
+        [
+          "CMD-SHELL",
+          "bash -c 'exec 3<>/dev/tcp/localhost/6333 && printf \"GET /healthz HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n\" >&3 && timeout 5 cat <&3 | grep -q \"200 OK\"'",
+        ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -83,6 +87,31 @@ services:
     volumes:
       - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./observability/rules:/etc/prometheus/rules:ro
+    networks:
+      - neuraforge-net
+
+  loki:
+    image: grafana/loki:3.0.0
+    container_name: neuraforge-loki
+    command: ["-config.file=/etc/loki/config.yml"]
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./observability/loki/config.yml:/etc/loki/config.yml:ro
+      - ./observability/loki/data:/var/lib/loki
+    networks:
+      - neuraforge-net
+
+  promtail:
+    image: grafana/promtail:3.0.0
+    container_name: neuraforge-promtail
+    command: ["-config.file=/etc/promtail/config.yml"]
+    volumes:
+      - ./observability/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - loki
     networks:
       - neuraforge-net
 

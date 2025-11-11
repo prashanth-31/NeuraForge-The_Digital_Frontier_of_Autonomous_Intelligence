@@ -1,0 +1,108 @@
+%% High-Level Design Diagram for NeuraForge
+%% Render with: mmdc -i docs/diagrams/high-level-design.mmd -o docs/diagrams/high-level-design.png
+
+flowchart LR
+    %% Client Layer
+    subgraph Client_Layer[Client Layer]
+        U[User]
+        F["Frontend\\nNext.js + React"]
+        U --> F
+    end
+
+    %% API Gateway Layer
+    subgraph API_Gateway[API & Entry Points]
+        A["FastAPI Application\\n(app/main.py)"]
+        WS[REST & Streaming Endpoints]
+        A --> WS
+    end
+
+    %% Queue & Orchestration Layer
+    subgraph Orchestration[Task Orchestration]
+        Q["Task Queue\\n(queue/)"]
+        O["LangGraph Orchestrator\\n(orchestration/graph.py)"]
+        R["Dynamic Agent Router\\n(orchestration/routing.py)"]
+        Q --> O
+        O --> R
+    end
+
+    %% Agent Layer
+    subgraph Agents[Specialized Agents]
+        RA[Research Agent]
+        FA[Finance Agent]
+        CA[Creative Agent]
+        EA[Enterprise Agent]
+    end
+
+    %% Tooling & External Integrations
+    subgraph Tooling[MCP Tools & Services]
+        TS["Tool Service\\n(services/tools.py)"]
+        ST[Tavily / DuckDuckGo]
+        YF[yfinance]
+        CD[Custom Domain Tools]
+        TS --> ST
+        TS --> YF
+        TS --> CD
+    end
+
+    %% Intelligence Layer
+    subgraph Intelligence[LLM & Retrieval]
+        LLM[Ollama Hosted LLM]
+        EMB["Embedding Service\\n(services/embedding.py)"]
+        RET["Retrieval Service\\n(services/retrieval.py)"]
+    end
+
+    %% Memory & Storage Layer
+    subgraph Storage[Hybrid Memory & Stores]
+        REDIS[("Redis\\nWorking Memory")]
+        PG[("PostgreSQL\\nEpisodic Memory")]
+        QDR[("Qdrant\\nSemantic Memory")]
+    end
+
+    %% Observability & Ops Layer
+    subgraph Observability[Observability & Ops]
+        PROM[Prometheus]
+        GRAF[Grafana]
+        ALERT[Alertmanager]
+        LOGS["Structured Logging\\n(core/logging.py)"]
+        PROM --> GRAF
+        PROM --> ALERT
+        LOGS --> PROM
+    end
+
+    %% Data Science & Benchmarking
+    subgraph Benchmarking[Benchmarking & QA]
+        BENCH["Benchmark Harness\\n(monitoring/benchmark.py)"]
+        SIM["Simulation Harness\\n(orchestration/simulation.py)"]
+        BENCH --> PROM
+    end
+
+    %% Client Flow
+    F --> A
+    WS --> Q
+    O --> Agents
+    Agents --> TS
+    Agents --> LLM
+    Agents --> RET
+    RET --> EMB
+    RET --> REDIS
+    RET --> PG
+    RET --> QDR
+    EMB --> QDR
+    LLM --> Agents
+    TS --> Agents
+
+    %% Feedback Loops
+    REDIS --> O
+    PG --> O
+    QDR --> O
+    BENCH --> O
+    SIM --> O
+
+    %% Observability Links
+    A --> LOGS
+    Q --> LOGS
+    O --> LOGS
+    Agents --> LOGS
+    Tooling --> LOGS
+    Intelligence --> LOGS
+    Storage --> LOGS

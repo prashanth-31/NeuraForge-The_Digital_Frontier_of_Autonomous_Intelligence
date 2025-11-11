@@ -36,6 +36,16 @@ class OllamaSettings(BaseModel):
     model: str = Field("llama3", description="Default model served via Ollama.")
 
 
+class PlannerLLMSettings(BaseModel):
+    model: str = Field("llama3.2:1b", description="Model used for orchestration planning.")
+    temperature: float = Field(0.0, ge=0.0, le=1.0, description="Sampling temperature for planner calls.")
+    max_output_tokens: int = Field(2048, ge=128, description="Maximum tokens expected from planner outputs.")
+    system_prompt: str = Field(
+        "You are NeuraForge's orchestration planner. Produce deterministic JSON plans selecting agents and tools.",
+        description="System prompt supplied to the planner model.",
+    )
+
+
 class AuthSettings(BaseModel):
     jwt_secret_key: str = Field("0" * 32, min_length=32)
     jwt_algorithm: Literal["HS256", "HS384", "HS512"] = "HS256"
@@ -245,6 +255,7 @@ class Settings(BaseSettings):
     consolidation: ConsolidationSettings = Field(default_factory=ConsolidationSettings)  # type: ignore[arg-type]
     tools: ToolSettings = Field(default_factory=ToolSettings)  # type: ignore[arg-type]
     scoring: ScoringSettings = Field(default_factory=ScoringSettings)  # type: ignore[arg-type]
+    planner_llm: PlannerLLMSettings = Field(default_factory=PlannerLLMSettings)  # type: ignore[arg-type]
 
     backend_base_url: str = Field("http://localhost:8000")
     frontend_origins: list[str] = Field(

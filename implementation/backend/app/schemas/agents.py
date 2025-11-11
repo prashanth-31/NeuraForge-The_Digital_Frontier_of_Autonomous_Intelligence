@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, HttpUrl, confloat
 
 
 class AgentCapability(str, Enum):
+    GENERAL = "general"
     RESEARCH = "research"
     FINANCE = "finance"
     CREATIVE = "creative"

@@ -390,6 +390,10 @@ def increment_tool_error(*, tool: str) -> None:
     TOOL_ERRORS_TOTAL.labels(tool=tool).inc()
 
 
+def increment_finance_quote_fallback(*, provider: str, reason: str) -> None:
+    FINANCE_QUOTE_FALLBACK_TOTAL.labels(provider=provider, reason=reason).inc()
+
+
 def observe_confidence_component(*, agent: str, component: str, value: float) -> None:
     CONFIDENCE_COMPONENT_VALUE.labels(agent=agent, component=component).observe(value)
 

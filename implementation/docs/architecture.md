@@ -14,9 +14,11 @@ NeuraForge is a local-first, multi-agent intelligence platform designed to orche
 ```mermaid
 %%{init: {"theme": "forest", "flowchart": {"curve": "basis"}} }%%
 graph TD
-    A[Frontend (Next.js 14 + Socket.io)] -->|Tasks / Streams| B[FastAPI Backend]
+    A[Frontend (React 18 + Vite SPA)] -->|Tasks / SSE Streams| B[FastAPI Backend]
     B -->|Task Submission| C[Task Queue Manager]
     C -->|Jobs| D[LangGraph Orchestrator]
+    D -->|Plan Request| P[LLM Planner (llama3.2:1b)]
+    P -->|Agent Plan| D
     D -->|Context Ops| E[Hybrid Memory Service]
     D -->|LLM Calls| F[LangChain + Ollama]
     D -->|Agent Requests| G[Specialized Agents]
@@ -31,10 +33,10 @@ graph TD
 ```
 
 ### Layer Breakdown
-1. **Frontend Experience** (existing in `frontend/`): Next.js 14 + React, Tailwind UI, Socket.io client for streaming updates.
-2. **API Gateway** (`backend/app/main.py`): FastAPI serves REST + WebSocket endpoints, performs auth and schema validation.
+1. **Frontend Experience** (existing in `frontend/`): React 18 + Vite single-page app with Tailwind UI, TanStack Query caching, and a manual Server-Sent Events (SSE) reader layered on top of the `fetch` streaming API.
+2. **API Gateway** (`backend/app/main.py`): FastAPI serves REST endpoints plus Server-Sent Event (SSE) streams, performs auth, and handles schema validation.
 3. **Task Coordination** (`backend/app/queue/`): Async in-process queue with optional Redis backend to buffer long-running jobs.
-4. **LangGraph Orchestration** (`backend/app/orchestration/`): `DynamicAgentRouter` performs capability-based dispatch using local embeddings, while LangGraph nodes handle negotiation between agents.
+4. **LangGraph Orchestration** (`backend/app/orchestration/`): The `LLMOrchestrationPlanner` (backed by `llama3.2:1b`) proposes ordered agent/tool plans which the LangGraph-based orchestrator enforces end-to-end with no heuristic router fallback.
 5. **Agent Layer** (`backend/app/agents/`): Domain-specific logic for Research, Finance, Creative, Enterprise agents (extendable via LangChain tools).
 6. **Hybrid Memory** (`backend/app/services/memory.py`): Unified interface to Redis (working memory), PostgreSQL (episodic logs), Qdrant (semantic vectors).
 7. **LLM Layer** (`backend/app/utils/embeddings.py`, LangChain integrations): Ollama-hosted LLaMA 3 for completions; Sentence Transformers all-mpnet-base-v2 served from `backend/models/all-mpnet-base-v2/` for embedding generation.
@@ -65,30 +67,41 @@ graph TD
 | Orchestrator Observability Map | _generate from_ `docs/diagrams/orchestrator-observability.mmd` | - |
 
 ### Request Lifecycle
-1. **User submits a task** via the frontend Socket.io client or REST endpoint.
+1. **User submits a task** via the frontend fetch client, which POSTs to `/submit_task/stream` and immediately begins consuming the streamed SSE response (or uses the plain JSON submit endpoint for fire-and-forget tasks).
 2. **FastAPI** validates the payload (`TaskRequest`) and enqueues a job through `TaskQueueManager`.
 3. **Queue worker** invokes the LangGraph orchestrator with a normalized task object.
-4. **Orchestrator** selects agents based on capabilities, hydrates context from `HybridMemoryService`, and calls out to the LLM layer when needed.
+4. **Orchestrator** captures a planner-directed sequence of agents and required tools, hydrates context from `HybridMemoryService`, and calls out to the LLM layer when needed.
 5. **Agents** perform domain-specific reasoning, enriching outputs with confidence scores and memory references.
 6. **Conflict Resolver** evaluates agent outputs; if disagreements arise, it triggers comparative scoring or meta-synthesis.
-7. **Results** are stored back into the hybrid memory (Redis for short-term replay, Postgres for audit history, Qdrant for semantic recall) and streamed to the frontend.
+7. **Results** are stored back into the hybrid memory (Redis for short-term replay, Postgres for audit history, Qdrant for semantic recall) and streamed to the frontend over SSE events (task lifecycle, tool telemetry, completion payloads).
 8. **Observability** captures metrics and structured logs for each task execution, enabling replay and benchmarking.
 
-## Dynamic Agent Routing
-- **Router Entry Point**: `backend/app/orchestration/routing.py` exports `DynamicAgentRouter`, the single orchestration entry used by `/submit_task` flows.
-- **Capability Catalog**: Agent descriptors and dependency graphs live in `backend/app/orchestration/capabilities.json`. Every agent must provide a descriptive blurb so the embedding index stays current.
-- **Hybrid Scoring**: The router blends lightweight keyword heuristics with cosine similarity scores from the local all-mpnet-base-v2 model. Keyword hits keep cold-start behaviour predictable; semantic scoring ensures nuanced matching.
-- **Local Embeddings**: The SentenceTransformer is cached in `backend/models/all-mpnet-base-v2/`. On first boot the router will download the model; subsequent runs reuse the on-disk copy. Keep this folder under version control ignore rules but document manual sync steps for teammates.
-- **Dependency Expansion**: Capability dependencies declared in the catalog are expanded before graph execution so prerequisite agents always run first.
-- **Tunable Thresholds**: Confidence cutoffs and max-route limits are parameterised in `DynamicAgentRouterSettings` (Pydantic). Adjust via environment variables to iterate on selection aggressiveness without code changes.
-- **Greeting Shortcut**: A fast-path bypasses heavy orchestration when the task is a simple greeting, preventing unnecessary model loads.
-- **Operational Checklist**: Whenever a new agent ships, update the catalog, regenerate its embeddings (rerun the router warm-start helper), and add regression tests under `backend/tests/test_orchestrator_simulation.py` to cover the new capability.
+## Planner-Led Orchestration
+- **Planner Entry Point**: `backend/app/orchestration/llm_planner.py` exports `LLMOrchestrationPlanner`, the sole orchestration selector invoked by `/submit_task` flows.
+- **Capability Catalog**: Agent descriptors and dependency graphs live in `backend/app/orchestration/capabilities.json`, and we load them into the planner prompt so the LLM reasons over consistent metadata.
+- **Plan Schema**: Planner outputs must conform to `PlannerPlanModel` (ordered agents, tool lists, rationale, handoff notes); validation failures raise `PlannerError` and surface a planner violation event back to the client stream.
+- **Execution Flow**: LangGraph executes each planned step sequentially, binding `AgentContext` with planner-specified tool aliases and persisting intermediate results between agents.
+- **Failure Handling**: Invalid planner output or plan enforcement errors emit a `planner_failed` stream event, stamp the task with `failure.type="planner_failed"`, and abort the run—there is no heuristic routing fallback.
+- **Operational Checklist**: When shipping a new agent or tool, update the capability catalog, refresh the planner prompt fixtures, and add regression tests under `backend/tests/test_orchestrator_simulation.py` to cover the new plan branch.
+### Planner Enforcement & Telemetry
+- **Tool Contracts**: Planner-supplied primary/fallback tool lists are attached to each `AgentContext`, and `_ToolSession` verifies at least one of them succeeds before the agent can finish.
+- **Plan Metadata**: Planner results are persisted alongside task metadata (`state["routing"]["planner"]`) and streamed to clients so downstream consumers can reference the intended path.
+- **Metrics & Alerts**: Prometheus tracks `neuraforge_planner_plan_total`, adherence ratios, and violation counts, enabling Grafana to highlight deviations or repeated planner failures.
+- **Plan Drift Audits**: Weekly notebooks replay canonical tasks and diff the generated plans against golden outputs to catch prompt drift before it affects production runs.
+
+### Conversation Continuations & Metadata
+- **Continuation IDs**: The frontend `TaskContext` threads `continuation_task_id` through follow-up prompts so the backend can stitch conversation chains for HybridMemory lookups.
+- **Metadata Normalisation**: `_ensure_conversation_metadata` (in `backend/app/api/routes.py`) guarantees every task persists `root_task_id`, `latest_task_id`, `previous_task_id`, and optional `continuation_task_id` inside both the task state and shared context.
+- **Hydrated Follow-ups**: When a continuation ID is provided, `_seed_conversation_state` hydrates outputs, metadata, and shared context from the prior task before the orchestrator runs, ensuring downstream agents receive the accumulated provenance.
+- **Frontend State**: SSE responses update the client-side `TaskContext`, which exposes conversation-aware history panes and allows users to branch new tasks from any prior run while maintaining memory integrity.
 
 ### Tool-First Agent Loops
 - **Mandatory Tool Evidence**: Each agent must log at least one successful MCP tool invocation before returning an answer when tooling is enabled. The orchestrator enforces this policy and will fail the run with a `ToolFirstPolicyViolation` if an agent attempts to respond without validated tool output.
 - **Execution Wiring**: `Orchestrator` wraps the shared `ToolService` per agent invocation, records per-tool success/failure metrics, and propagates violation events to the task stream and state store for auditability.
+- **Local MCP Router**: `ToolService` talks to the in-process MCP router (`/mcp/tools/...`) so adapters run inside the FastAPI app; aliases such as `finance.snapshot` resolve to `finance/yfinance` and benefit from shared caching, retries, and circuit-breaker safeguards.
 - **Metadata Enrichment**: Agent outputs are automatically annotated with a `tools_used` list (alias, resolved identifier, cache status, latency) so downstream planners, reviewers, and telemetry dashboards can trace the provenance of every response.
 - **Failure Handling**: If a tool call errors, the orchestrator surfaces the failure details and aborts the run rather than allowing an LLM-only fallback, keeping the system aligned with the tool-first contract.
+- **Finance Snapshot Resilience**: The `finance/yfinance` adapter now falls back to on-demand historical bars when live quote APIs rate-limit, normalising metrics (price, change, volume, timestamps) before returning them to agents and ensuring follow-up analyses cite up-to-date figures.
 
 ### Memory Strategy
 - **Working Memory (Redis)**: Recent conversation turns, agent state, cache entries for quick lookups.
@@ -100,7 +113,7 @@ graph TD
 - **Python Environment**: Managed via Poetry/uv (pending lock-in) with FastAPI, LangChain, LangGraph, asyncpg, redis-py, qdrant-client.
 - **Ollama Runtime**: Hosts LLaMA 3 model locally; orchestrator communicates over HTTP.
 - **Data Services**: Redis, PostgreSQL, and Qdrant provisioned through Docker Compose with persistent volumes.
-- **Frontend**: Bun/Vite dev server for Next.js app; communicates with backend via REST + WebSocket endpoints.
+- **Frontend**: Vite dev server for the React SPA; communicates with the backend via REST and SSE streaming endpoints.
 
 ## 5. Observability & Monitoring
 - **Logging**: Structured JSON logs via `structlog`, enriched with correlation IDs and task metadata.
@@ -146,8 +159,8 @@ graph TD
 - Cover happy-path agent executions with fixtures/mocks.
 
 ### Phase 5 – Orchestrator & Negotiation Logic
-- Design LangGraph DAG for capability-based routing and fallback strategies.
-- Ship the embedding-backed `DynamicAgentRouter`, wire it into orchestration entrypoints, and document model bootstrap steps for the local all-mpnet-base-v2 cache.
+- Design LangGraph DAG for planner-enforced sequencing and failure-handling strategies.
+- Ship the `LLMOrchestrationPlanner`, wire it into orchestration entrypoints, and document the plan schema, prompt controls, and validation path.
 - Implement negotiation loop (confidence voting, reassignment) and persistence of negotiation logs.
 - Introduce task queue workers consuming orchestrator jobs with graceful shutdown handling.
 - Add integration tests validating routing decisions across multiple agent capabilities.
@@ -160,7 +173,7 @@ graph TD
 - Add regression tests covering conflicting agent outputs and synthesis results.
 
 ### Phase 7 – FastAPI Integration & Observability
-- Extend REST + Socket.io endpoints to stream agent progress and final outcomes.
+- Extend REST + SSE streaming endpoints to expose agent progress and final outcomes.
 - Instrument Prometheus metrics (request latency, queue depth, agent success rate) and publish dashboards in Grafana.
 - Harden security: JWT-protected routes, rate limiting, audit logging.
 - Expand CI pipeline to run lint, type-check, unit, and integration suites; document local troubleshooting guide.
@@ -169,7 +182,7 @@ graph TD
 ```
 backend/
  ├─ app/
- │   ├─ api/                 # FastAPI routers (REST/WebSocket)
+ │   ├─ api/                 # FastAPI routers (REST/SSE)
  │   ├─ agents/              # Domain-specific agent implementations
  │   ├─ core/                # Config, logging, security primitives
  │   ├─ monitoring/          # Benchmarking and observability utilities
@@ -187,7 +200,7 @@ backend/
 - [ ] Start Ollama with LLaMA 3 model locally.
 - [ ] Launch Docker Compose stack for Redis, PostgreSQL, Qdrant, Prometheus, Grafana, and Alertmanager.
 - [ ] Run FastAPI app with `uvicorn app.main:app --reload`.
-- [ ] Start Next.js frontend dev server (`bun dev`).
+- [ ] Start the Vite frontend dev server (`npm run dev`).
 - [ ] Execute test suite (`pytest`).
 
 ## 10. CI/CD & Staging Integration

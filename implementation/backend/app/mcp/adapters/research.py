@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import logging
 from datetime import UTC, datetime
 from typing import Any, ClassVar, Sequence
 
@@ -18,6 +19,8 @@ except ModuleNotFoundError:  # pragma: no cover - gracefully degrade during test
     AsyncQdrantClient = None  # type: ignore[assignment]
     qmodels = None  # type: ignore[assignment]
 
+
+logger = logging.getLogger(__name__)
 
 DIGEST_NAMESPACE = "neuraforge:doc-loader"
 _HTTP_URL_ADAPTER = TypeAdapter(HttpUrl)
@@ -51,15 +54,16 @@ class DuckDuckGoSearchAdapter(MCPToolAdapter):
     InputModel = DuckDuckGoSearchInput
     OutputModel = DuckDuckGoSearchOutput
 
-    _endpoint = "https://duckduckgo.com/"
+    _endpoint = "https://api.duckduckgo.com/"
     _headers = {
         "User-Agent": "NeuraForge-MCP-Research/1.0",
         "Accept": "application/json",
     }
 
     async def _invoke(self, payload_model: DuckDuckGoSearchInput) -> dict[str, Any]:
+        sanitized_query = " ".join(payload_model.query.split()).strip()
         params = {
-            "q": payload_model.query,
+            "q": sanitized_query,
             "format": "json",
             "no_redirect": 1,
             "t": "neuraforge-mcp",
@@ -67,13 +71,31 @@ class DuckDuckGoSearchAdapter(MCPToolAdapter):
         }
         async with httpx.AsyncClient(timeout=10.0, headers=self._headers) as client:
             response = await client.get(self._endpoint, params=params)
+        if response.is_redirect:
+            logger.warning(
+                "research_duckduckgo_redirect",
+                extra={"location": response.headers.get("Location"), "query": sanitized_query},
+            )
+            return {
+                "query": sanitized_query,
+                "fetched_at": datetime.now(UTC),
+                "results": [],
+            }
             response.raise_for_status()
+        try:
             data = response.json()
+        except ValueError as exc:
+            logger.warning("research_duckduckgo_json_error", extra={"error": str(exc), "query": sanitized_query})
+            return {
+                "query": sanitized_query,
+                "fetched_at": datetime.now(UTC),
+                "results": [],
+            }
 
         raw_topics = data.get("RelatedTopics") or []
         organic = self._flatten_topics(raw_topics)
         return {
-            "query": payload_model.query,
+            "query": sanitized_query,
             "fetched_at": datetime.now(UTC),
             "results": [entry.model_dump() for entry in organic[: payload_model.max_results]],
         }

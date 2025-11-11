@@ -8,8 +8,8 @@ from pytest_httpx import HTTPXMock
 pytestmark = pytest.mark.asyncio
 
 
-EXPECTED_RESEARCH_TOOLS = {
-    "search/duckduckgo",
+RESEARCH_SEARCH_ALIASES = {"search/tavily", "search/duckduckgo"}
+RESEARCH_REQUIRED_TOOLS = {
     "research/arxiv",
     "research/wikipedia",
     "research/doc_loader",
@@ -54,10 +54,14 @@ async def _fetch_live_catalog() -> dict:
 async def _assert_catalog_contains(payload: dict) -> None:
     entries = payload.get("tools") or []
     names = {item.get("name") for item in entries if isinstance(item, dict)}
-    missing_research = EXPECTED_RESEARCH_TOOLS - names
+    missing_research = RESEARCH_REQUIRED_TOOLS - names
     missing_finance = EXPECTED_FINANCE_TOOLS - names
     missing_creative = EXPECTED_CREATIVE_TOOLS - names
     missing_enterprise = EXPECTED_ENTERPRISE_TOOLS - names
+    assert RESEARCH_SEARCH_ALIASES & names, (
+        "Missing research search tool alias in catalog: expected one of "
+        f"{sorted(RESEARCH_SEARCH_ALIASES)}"
+    )
     assert not missing_research, f"Missing research tools in catalog: {sorted(missing_research)}"
     assert not missing_finance, f"Missing finance tools in catalog: {sorted(missing_finance)}"
     assert not missing_creative, f"Missing creative tools in catalog: {sorted(missing_creative)}"
@@ -71,7 +75,8 @@ async def test_catalog_includes_research_and_finance_tools(httpx_mock: HTTPXMock
         return
 
     expected_names = (
-        EXPECTED_RESEARCH_TOOLS
+        RESEARCH_REQUIRED_TOOLS
+        | RESEARCH_SEARCH_ALIASES
         | EXPECTED_FINANCE_TOOLS
         | EXPECTED_CREATIVE_TOOLS
         | EXPECTED_ENTERPRISE_TOOLS

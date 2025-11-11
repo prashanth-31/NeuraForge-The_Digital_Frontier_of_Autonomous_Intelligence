@@ -27,6 +27,9 @@ class AgentContext:
     context: "ContextAssembler | None" = None
     tools: ToolService | None = None
     scorer: ConfidenceScorer | None = None
+    planned_tools: list[str] | None = None
+    fallback_tools: list[str] | None = None
+    planner_reason: str | None = None
 
 
 class BaseAgent(Protocol):

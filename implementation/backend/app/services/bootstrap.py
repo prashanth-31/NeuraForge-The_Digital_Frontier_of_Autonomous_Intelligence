@@ -26,8 +26,27 @@ logger = get_logger(name=__name__)
 async def ensure_foundation_ready(settings: Settings) -> None:
     """Ensure datastore collections and external tooling are ready before serving."""
 
-    await _ensure_qdrant_collection(settings)
-    await _wait_for_mcp_readiness(settings)
+    try:
+        await _ensure_qdrant_collection(settings)
+    except Exception as exc:  # pragma: no cover - defensive guard during startup
+        if settings.environment == "production":
+            raise
+        logger.warning(
+            "qdrant_bootstrap_degraded",
+            error=str(exc),
+            environment=settings.environment,
+        )
+
+    try:
+        await _wait_for_mcp_readiness(settings)
+    except Exception as exc:  # pragma: no cover - defensive guard during startup
+        if settings.environment == "production":
+            raise
+        logger.warning(
+            "mcp_bootstrap_degraded",
+            error=str(exc),
+            environment=settings.environment,
+        )
 
 
 async def _ensure_qdrant_collection(settings: Settings) -> None:

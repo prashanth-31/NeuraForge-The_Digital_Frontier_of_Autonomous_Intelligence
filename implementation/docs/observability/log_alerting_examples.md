@@ -4,30 +4,22 @@ This guide shows two approaches for turning NeuraForge's structured logs into ac
 
 ## 1. Loki + Promtail + Grafana
 
-1. **Ship logs with Promtail**
-   - Install Promtail alongside the backend host.
-   - Configure the scrape job to watch the backend log file (or stdout).
-   - Example snippet:
-     ```yaml
-     scrape_configs:
-       - job_name: neuraforge-backend
-         static_configs:
-           - targets: ["localhost"]
-             labels:
-               job: neuraforge
-               __path__: /var/log/neuraforge/*.log
-     ```
-2. **Label enrichment**
-   - Promtail automatically forwards the JSON payload; Loki stores labels.
-   - Add pipeline stages to promote key fields (e.g., `route`, `identity`, `status_code`).
-3. **Alert rule in Grafana**
-   - Query example (count 5xx over 5 minutes):
-     ```logql
-     sum(rate({job="neuraforge"} | json | status_code >= 500 [5m]))
-     ```
-   - Create a Grafana alert: trigger when value > 0 for two consecutive evaluations.
-4. **Notification channel**
-   - Use Grafana's contact points (Slack, PagerDuty, email) to route alerts.
+1. **Bring the logging stack online**
+  - The repository now ships Loki and Promtail in `docker-compose.yml`.
+  - From `implementation/` run `docker compose up -d loki promtail grafana` (Prometheus and Alertmanager start automatically as dependencies).
+  - Promtail follows every container via the bundled `observability/promtail-config.yml`, promoting Docker labels such as `compose_service`, `container`, and `level`.
+2. **Explore the logs**
+  - Open Grafana at <http://localhost:3000> (credentials: `admin`/`admin`).
+  - Navigate to *Explore → Loki* and execute `{compose_service="backend"}` to live-stream backend entries.
+  - A pre-provisioned dashboard (`Backend Loki Logs`) under the **Phase 5** folder captures the same query, plus panels for error counts and guardrail warnings. Select another service with the dashboard variable if needed.
+3. **Create an alert**
+  - Example LogQL for 5xx bursts:  
+    ```logql
+    sum(count_over_time({compose_service="$service"} | json | status >= 500 [5m]))
+    ```
+  - Convert the panel to a Grafana alert (threshold > 0 for 2 evaluations) or persist it as a Loki ruler rule. Ruler storage is already wired to Alertmanager (`observability/loki/config.yml`).
+4. **Reuse existing contact points**
+  - Grafana routes alerts through the same Alertmanager contact points as the Prometheus stack. Choose a contact point (Slack, email, PagerDuty) when creating the rule and add runbook links for reviewer hand-off.
 
 ### Why it matters
 - Audit logs land in Loki with hashed payloads and request metadata.
@@ -61,6 +53,7 @@ This guide shows two approaches for turning NeuraForge's structured logs into ac
 ### Optional Enhancements
 - Export alert payloads to PagerDuty for on-call rotations.
 - Combine the histogram metric `neuraforge_task_latency_seconds` with log alerts (e.g., when latency p95 > 60s **and** guardrail escalations occur within the same window).
+- Track the counter `neuraforge_finance_quote_fallback_total{provider="yfinance"}` to catch Yahoo Finance throttling or credential issues and wire it into the new `FinanceQuoteFallbackSpike` alert.
 
 ## Linking Alerts to Observability Dashboards
 - Grafana panels can overlay alert annotations by referencing the same Loki/Prometheus queries.
@@ -68,4 +61,5 @@ This guide shows two approaches for turning NeuraForge's structured logs into ac
 
 ## Next Steps
 - Check `implementation/scripts/loadtesting/k6-submit-task.js` for synthetic load generation to validate alert thresholds.
-- Update runbooks (`docs/runbooks/reviewer_operations.md`) with the alert playbooks once finalized.
+- Update runbooks (`docs/runbooks/reviewer_operations.md`) with alert playbooks once finalized.
+- If Loki retains old container timestamps, clear `implementation/observability/loki/data/` (after stopping the stack) so that Promtail and the ruler start fresh.

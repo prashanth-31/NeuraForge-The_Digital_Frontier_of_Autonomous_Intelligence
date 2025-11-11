@@ -11,6 +11,7 @@ from .orchestrator import OrchestratorEventModel
 class TaskRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    continuation_task_id: str | None = Field(default=None)
 
 
 class TaskResponse(BaseModel):
@@ -43,6 +44,9 @@ class TaskStatusResponse(BaseModel):
     plan: dict[str, Any] | None = None
     negotiation: dict[str, Any] | None = None
     guardrails: dict[str, Any] | None = None
+    meta: dict[str, Any] | None = None
+    dossier: dict[str, Any] | None = None
+    report: dict[str, Any] | None = None
     metrics: TaskStatusMetrics = Field(default_factory=TaskStatusMetrics)
     last_error: str | None = None
     created_at: datetime | None = None

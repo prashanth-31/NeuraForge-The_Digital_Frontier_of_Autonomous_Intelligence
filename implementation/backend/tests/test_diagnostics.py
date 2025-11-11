@@ -12,18 +12,23 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_mcp_diagnostics_enabled(monkeypatch: pytest.MonkeyPatch, client: TestClient) -> None:
+@pytest.mark.parametrize("search_alias", ["search/tavily", "search/duckduckgo"])
+def test_mcp_diagnostics_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    client: TestClient,
+    search_alias: str,
+) -> None:
     diagnostics_payload = {
         "enabled": True,
         "endpoint": "http://mock",
         "catalog_size": 2,
-        "aliases": {"research.search": "search/duckduckgo"},
+        "aliases": {"research.search": search_alias},
         "last_health": {"status": "ok", "timestamp": "2025-10-13T00:00:00+00:00", "error": None},
         "last_catalog_refresh": "2025-10-13T00:00:05+00:00",
         "last_error": None,
         "last_invocation": {
             "tool": "research.search",
-            "resolved": "search/duckduckgo",
+            "resolved": search_alias,
             "cached": False,
             "latency": 0.42,
             "timestamp": "2025-10-13T00:00:10+00:00",

@@ -49,6 +49,18 @@ class DynamicAgentRouter:
     """Hybrid semantic + heuristic agent selector with dependency-aware ordering."""
 
     _CAPABILITY_KEYWORDS: Mapping[AgentCapability, tuple[str, ...]] = {
+        AgentCapability.GENERAL: (
+            "general",
+            "overview",
+            "clarify",
+            "explain",
+            "introduction",
+            "summary",
+            "high level",
+            "basics",
+            "what is",
+            "help",
+        ),
         AgentCapability.RESEARCH: (
             "research",
             "investigate",

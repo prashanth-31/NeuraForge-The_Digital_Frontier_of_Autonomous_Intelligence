@@ -39,24 +39,32 @@ class LLMService:
 
     settings: Settings
     _client: Any
+    model: str
     default_system_prompt: str = (
         "You are NeuraForge's orchestration assistant. Be concise, structured, and cite key signals."
     )
     _client_cache: ClassVar[dict[str, Any]] = {}
 
     @classmethod
-    def from_settings(cls, settings: Settings, *, client: Any | None = None) -> "LLMService":
+    def from_settings(
+        cls,
+        settings: Settings,
+        *,
+        model: str | None = None,
+        client: Any | None = None,
+    ) -> "LLMService":
+        model_name = model or settings.ollama.model
         if client is None:
-            cache_key = f"{settings.ollama.host}:{settings.ollama.port}:{settings.ollama.model}"
+            cache_key = f"{settings.ollama.host}:{settings.ollama.port}:{model_name}"
             cached = cls._client_cache.get(cache_key)
             if cached is None:
                 if ChatOllama is None:  # pragma: no cover - handled in runtime logs
                     raise RuntimeError("langchain_ollama is not installed")
                 base_url = _build_base_url(settings.ollama.host, settings.ollama.port)
-                cached = ChatOllama(model=settings.ollama.model, base_url=base_url, temperature=0.1)
+                cached = ChatOllama(model=model_name, base_url=base_url, temperature=0.1)
                 cls._client_cache[cache_key] = cached
             client = cached
-        return cls(settings=settings, _client=client)
+        return cls(settings=settings, _client=client, model=model_name)
 
     async def generate(
         self,
@@ -76,7 +84,7 @@ class LLMService:
             logger.exception(
                 "llm_generation_failed",
                 error=str(exc),
-                model=self.settings.ollama.model,
+                model=self.model,
                 host=self.settings.ollama.host,
             )
             return "LLM generation temporarily unavailable."

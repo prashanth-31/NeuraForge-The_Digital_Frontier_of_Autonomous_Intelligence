@@ -13,6 +13,7 @@ from app.agents.base import AgentContext
 from app.agents.creative import CreativeAgent
 from app.agents.enterprise import EnterpriseAgent
 from app.agents.finance import FinanceAgent
+from app.agents.general import GeneralistAgent
 from app.agents.research import ResearchAgent
 from app.api.routes import _build_orchestration_pipeline
 from app.core.config import Settings, get_settings
@@ -67,7 +68,7 @@ async def _run_benchmark(settings: Settings, scenarios: list[SimulationScenario]
         memory_service = HybridMemoryService.from_settings(settings)
         memory = await exit_stack.enter_async_context(memory_service.lifecycle())
         llm_service = LLMService.from_settings(settings)
-        agents = [ResearchAgent(), FinanceAgent(), CreativeAgent(), EnterpriseAgent()]
+        agents = [GeneralistAgent(), ResearchAgent(), FinanceAgent(), CreativeAgent(), EnterpriseAgent()]
         orchestrator, embedding_service, context_assembler = await _build_orchestration_pipeline(
             agents=agents,
             settings=settings,

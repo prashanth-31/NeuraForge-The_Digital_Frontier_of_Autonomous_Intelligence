@@ -159,7 +159,7 @@ async def test_tool_service_request_signer(tool_settings: MCPToolSettings) -> No
 async def test_tool_service_onboarding_status(tool_settings: MCPToolSettings) -> None:
     service = ToolService(tool_settings)
     service._catalog = {
-        "search/tavily": MCPToolDescriptor(name="search/tavily"),
+        "search/duckduckgo": MCPToolDescriptor(name="search/duckduckgo"),
         "finance/yfinance": MCPToolDescriptor(name="finance/yfinance"),
         "creative/stylizer": MCPToolDescriptor(name="creative/stylizer"),
     }
@@ -192,7 +192,7 @@ async def test_tool_service_emits_events(monkeypatch: pytest.MonkeyPatch, tool_s
     events: list[dict] = []
 
     async def fake_dispatch(self: ToolService, resolved_tool: str, payload: dict) -> dict:
-        assert resolved_tool == "search/tavily"
+        assert resolved_tool == "search/duckduckgo"
         return {"results": [{"title": "example"}]}
 
     monkeypatch.setattr(ToolService, "_dispatch", fake_dispatch, raising=False)

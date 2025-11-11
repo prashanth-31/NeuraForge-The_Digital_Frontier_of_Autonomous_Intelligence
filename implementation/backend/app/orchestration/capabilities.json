@@ -1,4 +1,8 @@
 {
+    "general": {
+        "description": "Handles broad questions, clarifications, and triage before engaging specialized agents.",
+        "dependencies": []
+    },
     "research": {
         "description": "Investigates source material, synthesizes findings with citations, and extracts key signals from noisy corpora.",
         "dependencies": []

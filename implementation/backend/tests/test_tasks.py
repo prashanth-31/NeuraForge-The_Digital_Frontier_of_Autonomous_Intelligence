@@ -100,6 +100,8 @@ def test_submit_task_executes_agents_and_persists_results(submit_client):
     assert task_id in memory.ephemeral
     stored = memory.ephemeral[task_id]["result"]
     assert stored["status"] == "completed"
+    assert "report" in stored
+    assert stored["report"].get("headline")
 
     history = client.get(f"/api/v1/history/{task_id}")
     assert history.status_code == 200
@@ -181,3 +183,12 @@ def test_submit_task_stream_emits_agent_events(monkeypatch: pytest.MonkeyPatch):
     assert any(event[0] == "task_completed" for event in events)
     assert len(llm.calls) == 4
     assert memory.ephemeral
+    completed_envelope = next(payload for event, payload in events if event == "task_completed")
+    final_payload = completed_envelope["payload"]
+    assert "report" in final_payload
+    assert final_payload["report"].get("headline")
+    task_id = final_payload.get("task_id")
+    assert isinstance(task_id, str) and task_id in memory.ephemeral
+    stored_result = memory.ephemeral[task_id]["result"]
+    assert "report" in stored_result
+    assert stored_result["report"].get("headline")

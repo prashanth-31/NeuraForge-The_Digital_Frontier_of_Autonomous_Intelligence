@@ -15,6 +15,7 @@ from app.schemas.agents import AgentCapability, AgentInput, AgentOutput
 def test_contract_registry_contains_all_capabilities() -> None:
     metadata = {item.capability for item in list_contracts()}
     assert metadata == {
+        AgentCapability.GENERAL,
         AgentCapability.RESEARCH,
         AgentCapability.FINANCE,
         AgentCapability.CREATIVE,
@@ -55,6 +56,10 @@ def test_validate_agent_response_enforces_capability() -> None:
 
 
 def test_get_contract_metadata_matches_registry() -> None:
+    general_contract: AgentContract = get_contract(AgentCapability.GENERAL)
+    assert general_contract.metadata.name == "general_agent"
+    assert general_contract.metadata.description.startswith("Provides broad overviews")
+
     contract: AgentContract = get_contract(AgentCapability.CREATIVE)
     assert contract.metadata.name == "creative_agent"
     assert contract.metadata.supports_streaming is True

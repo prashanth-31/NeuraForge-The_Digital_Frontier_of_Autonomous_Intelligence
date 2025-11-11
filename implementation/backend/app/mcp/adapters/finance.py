@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import base64
 import io
+import logging
+import math
 import os
 import time
+import csv
 from datetime import UTC, datetime
-from typing import Any, Literal, Sequence
+from typing import Any, Literal, Mapping, Sequence
 
 import httpx
 import numpy as np
@@ -14,12 +18,42 @@ import pandas as pd
 from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
+from app.core import metrics
+
 from .base import MCPToolAdapter
 
 YAHOO_QUOTE_ENDPOINT = "https://query1.finance.yahoo.com/v7/finance/quote"
+YAHOO_CRUMB_ENDPOINT = "https://query1.finance.yahoo.com/v1/test/getcrumb"
+YAHOO_DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0"
 YAHOO_SEARCH_ENDPOINT = "https://query2.finance.yahoo.com/v1/finance/search"
 COINGECKO_NEWS_ENDPOINT = "https://api.coingecko.com/api/v3/news"
 _FINBERT_MODEL_ID = "ProsusAI/finbert"
+
+# Minimal keyword-to-symbol mapping to avoid repeated remote lookups for common equities.
+KEYWORD_SYMBOL_OVERRIDES: dict[str, list[str]] = {
+    "amazon": ["AMZN"],
+    "amzn": ["AMZN"],
+    "apple": ["AAPL"],
+    "aapl": ["AAPL"],
+    "microsoft": ["MSFT"],
+    "msft": ["MSFT"],
+    "google": ["GOOGL", "GOOG"],
+    "alphabet": ["GOOGL", "GOOG"],
+    "meta": ["META"],
+    "facebook": ["META"],
+    "netflix": ["NFLX"],
+    "tesla": ["TSLA"],
+    "tsla": ["TSLA"],
+    "nvidia": ["NVDA"],
+    "nvda": ["NVDA"],
+    "samsung": ["005930.KS", "SSNLF"],
+    "samsung electronics": ["005930.KS"],
+    "ssnlf": ["SSNLF"],
+    "005930": ["005930.KS"],
+}
+
+
+logger = logging.getLogger(__name__)
 
 
 class YahooFinanceMetrics(BaseModel):
@@ -74,6 +108,16 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
     _lookup_base_delay: float = 0.5
     _quote_max_attempts: int = 4
     _quote_base_delay: float = 0.75
+    _quote_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
+    _quote_cache_lock: asyncio.Lock = asyncio.Lock()
+    _quote_cache_ttl: float = 900.0
+    _quote_session_lock: asyncio.Lock = asyncio.Lock()
+    _quote_session_cookies: httpx.Cookies | None = None
+    _quote_session_crumb: str | None = None
+    _quote_session_refreshed_at: float = 0.0
+    _quote_session_ttl: float = 1800.0
+    _crumb_max_attempts: int = 3
+    _crumb_base_delay: float = 0.75
 
     async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
         symbols = payload_model.symbols
@@ -113,14 +157,27 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
                 for metric in metrics
             ]
 
+        enriched = []
+        for metric in filtered_metrics:
+            payload = metric.model_dump()
+            fundamentals = _extract_fundamentals_payload(quotes, metric.symbol)
+            if fundamentals is not None:
+                payload.setdefault("fundamentals", fundamentals)
+            enriched.append(payload)
+
         return {
             "requested": symbols,
             "generated_at": datetime.now(UTC),
-            "metrics": [metric.model_dump() for metric in filtered_metrics],
+            "metrics": enriched,
         }
 
     async def _lookup_symbols(self, query: str) -> list[str]:
         normalized = query.strip().lower()
+        if not normalized:
+            return []
+        keyword_matches = _keyword_symbol_lookup(normalized)
+        if keyword_matches:
+            return keyword_matches
         now = time.monotonic()
         async with self._lookup_cache_lock:
             cached = self._lookup_cache.get(normalized)
@@ -156,9 +213,12 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
                 return symbols
 
         if last_error is not None:
+            keyword_matches = _keyword_symbol_lookup(normalized)
+            if keyword_matches:
+                return keyword_matches
             raise ValueError(f"Symbol lookup failed after retries: {last_error}") from last_error
 
-        return []
+        return _keyword_symbol_lookup(normalized)
 
     async def _perform_symbol_lookup(self, normalized_query: str) -> dict[str, Any]:
         params = {"q": normalized_query, "quotesCount": 5}
@@ -168,12 +228,43 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
             return response.json()
 
     async def _fetch_quotes(self, symbols: Sequence[str]) -> list[dict[str, Any]]:
-        params = {"symbols": ",".join(symbols)}
+        symbols_tuple = tuple(sorted(symbols))
+        cache_key = ",".join(symbols_tuple)
+        cached = await self._get_cached_quotes(cache_key)
+        if cached is not None:
+            needs_fundamentals = any("fundamentals" not in entry for entry in cached)
+            if needs_fundamentals:
+                cached = await self._attach_fundamentals([dict(entry) for entry in cached], symbols_tuple)
+                await self._set_quote_cache(cache_key, cached)
+            return [dict(entry) for entry in cached]
+        params = {"symbols": ",".join(symbols_tuple), "lang": "en-US", "region": "US"}
         delay = self._quote_base_delay
         last_error: Exception | None = None
+        refresh_session = False
         for attempt in range(1, self._quote_max_attempts + 1):
-            async with httpx.AsyncClient(timeout=8.0) as client:
-                response = await client.get(YAHOO_QUOTE_ENDPOINT, params=params)
+            crumb, cookies = await self._ensure_quote_session(force_refresh=refresh_session)
+            headers = {
+                "User-Agent": YAHOO_DEFAULT_USER_AGENT,
+                "Accept": "application/json",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Connection": "keep-alive",
+            }
+            request_params = dict(params)
+            if crumb:
+                request_params["crumb"] = crumb
+            async with httpx.AsyncClient(timeout=8.0, headers=headers, cookies=cookies) as client:
+                response = await client.get(YAHOO_QUOTE_ENDPOINT, params=request_params)
+            if response.status_code in (401, 403):
+                refresh_session = True
+                last_error = httpx.HTTPStatusError(
+                    "unauthorized",
+                    request=response.request,
+                    response=response,
+                )
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, 6.0)
+                continue
+            refresh_session = False
             if response.status_code == 429:
                 last_error = httpx.HTTPStatusError("rate limited", request=response.request, response=response)
                 await asyncio.sleep(delay)
@@ -187,12 +278,359 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
                 delay = min(delay * 2, 6.0)
                 continue
             payload = response.json()
-            return payload.get("quoteResponse", {}).get("result", [])
+            quotes = [dict(item) for item in payload.get("quoteResponse", {}).get("result", [])]
+            quotes = await self._attach_fundamentals(quotes, symbols_tuple)
+            await self._set_quote_cache(cache_key, quotes)
+            return quotes
 
         if last_error is not None:
-            raise last_error
+            fallback_quotes = await self._fetch_quotes_via_yfinance(symbols_tuple)
+            if fallback_quotes:
+                logger.warning(
+                    "finance_yfinance_http_fallback",
+                    extra={"symbols": symbols_tuple, "reason": str(last_error)},
+                )
+                fallback_quotes = await self._attach_fundamentals([dict(item) for item in fallback_quotes], symbols_tuple)
+                await self._set_quote_cache(cache_key, fallback_quotes)
+                metrics.increment_finance_quote_fallback(
+                    provider="yfinance",
+                    reason=_classify_fallback_reason(last_error),
+                )
+                return fallback_quotes
 
-        return []
+            stooq_quotes = await self._fetch_quotes_via_stooq(symbols_tuple)
+            if stooq_quotes:
+                logger.warning(
+                    "finance_stooq_http_fallback",
+                    extra={"symbols": symbols_tuple, "reason": str(last_error)},
+                )
+                await self._set_quote_cache(cache_key, stooq_quotes)
+                metrics.increment_finance_quote_fallback(
+                    provider="stooq",
+                    reason=_classify_fallback_reason(last_error),
+                )
+                return [dict(item) for item in stooq_quotes]
+
+            cached = await self._get_cached_quotes(cache_key)
+            if cached is not None:
+                metrics.increment_finance_quote_fallback(
+                    provider="cache",
+                    reason=_classify_fallback_reason(last_error),
+                )
+                return [dict(entry) for entry in cached]
+            logger.error(
+                "finance_quote_fetch_failed",
+                extra={"symbols": symbols_tuple, "reason": str(last_error)},
+            )
+            return [{"symbol": symbol} for symbol in symbols_tuple]
+
+        cached = await self._get_cached_quotes(cache_key)
+        if cached is not None:
+            return [dict(entry) for entry in cached]
+
+        return [{"symbol": symbol} for symbol in symbols_tuple]
+
+    async def _ensure_quote_session(self, *, force_refresh: bool = False) -> tuple[str | None, httpx.Cookies | None]:
+        async with self._quote_session_lock:
+            if force_refresh or self._quote_session_needs_refresh():
+                return await self._refresh_quote_session_locked()
+            cookies = copy.copy(self._quote_session_cookies) if self._quote_session_cookies is not None else None
+            return self._quote_session_crumb, cookies
+
+    def _quote_session_needs_refresh(self) -> bool:
+        if self._quote_session_refreshed_at == 0.0:
+            return True
+        return (time.monotonic() - self._quote_session_refreshed_at) > self._quote_session_ttl
+
+    async def _refresh_quote_session_locked(self) -> tuple[str | None, httpx.Cookies | None]:
+        crumb: str | None = None
+        cookies: httpx.Cookies | None = None
+        previous_crumb = self._quote_session_crumb
+        previous_cookies = self._quote_session_cookies
+        try:
+            crumb, cookies = await self._fetch_yahoo_crumb()
+        except Exception as exc:  # pragma: no cover - defensive guard
+            logger.warning("finance_yahoo_crumb_fetch_failed", extra={"error": str(exc)})
+            crumb = None
+            cookies = None
+
+        if crumb is None and previous_crumb is not None:
+            crumb = previous_crumb
+            cookies = previous_cookies
+
+        if crumb is not None:
+            self._quote_session_crumb = crumb
+            self._quote_session_cookies = cookies
+            self._quote_session_refreshed_at = time.monotonic()
+        else:
+            self._quote_session_refreshed_at = 0.0
+
+        return crumb, copy.copy(cookies) if cookies is not None else None
+
+    async def _fetch_yahoo_crumb(self) -> tuple[str | None, httpx.Cookies | None]:
+        headers = {
+            "User-Agent": YAHOO_DEFAULT_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Connection": "keep-alive",
+        }
+        delay = self._crumb_base_delay
+        last_error: Exception | None = None
+        for attempt in range(1, self._crumb_max_attempts + 1):
+            async with httpx.AsyncClient(timeout=8.0, headers=headers) as client:
+                response = await client.get(YAHOO_CRUMB_ENDPOINT, params={"lang": "en-US", "region": "US"})
+                if response.status_code == 429:
+                    last_error = httpx.HTTPStatusError("rate limited", request=response.request, response=response)
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 6.0)
+                    continue
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPError as exc:
+                    last_error = exc
+                    await asyncio.sleep(delay)
+                    delay = min(delay * 2, 6.0)
+                    continue
+                crumb_value = response.text.strip() or None
+                cookies = copy.copy(client.cookies) if client.cookies else None
+                return crumb_value, cookies
+        if last_error is not None:
+            raise last_error
+        return None, None
+
+    async def _fetch_quotes_via_stooq(self, symbols: Sequence[str]) -> list[dict[str, Any]]:
+        results: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": YAHOO_DEFAULT_USER_AGENT}) as client:
+            for symbol in symbols:
+                stooq_symbol = symbol.lower()
+                if "." not in stooq_symbol:
+                    stooq_symbol = f"{stooq_symbol}.us"
+                params = {"s": stooq_symbol, "i": "d"}
+                try:
+                    response = await client.get("https://stooq.com/q/d/l/", params=params)
+                    response.raise_for_status()
+                except httpx.HTTPError:
+                    continue
+                content = response.text.strip()
+                if not content:
+                    continue
+                reader = csv.DictReader(content.splitlines())
+                latest_row: dict[str, str] | None = None
+                for row in reader:
+                    latest_row = row
+                if not latest_row:
+                    continue
+                try:
+                    close_price = float(latest_row.get("Close", ""))
+                except ValueError:
+                    close_price = None
+                try:
+                    open_price = float(latest_row.get("Open", ""))
+                except ValueError:
+                    open_price = None
+                try:
+                    day_high = float(latest_row.get("High", ""))
+                except ValueError:
+                    day_high = None
+                try:
+                    day_low = float(latest_row.get("Low", ""))
+                except ValueError:
+                    day_low = None
+                try:
+                    volume = int(float(latest_row.get("Volume", "")))
+                except ValueError:
+                    volume = None
+                payload = {
+                    "symbol": symbol,
+                    "regularMarketPrice": close_price,
+                    "regularMarketOpen": open_price,
+                    "regularMarketDayHigh": day_high,
+                    "regularMarketDayLow": day_low,
+                    "regularMarketVolume": volume,
+                }
+                results.append(payload)
+        return results
+
+    async def _fetch_quotes_via_yfinance(self, symbols: Sequence[str]) -> list[dict[str, Any]]:
+        try:
+            import yfinance as yf  # type: ignore[import-not-found]
+        except ImportError:
+            return []
+
+        async def _gather() -> list[dict[str, Any]]:
+            def _fetch_sync() -> list[dict[str, Any]]:
+                tickers = yf.Tickers(" ".join(symbols))
+                results: list[dict[str, Any]] = []
+                for symbol in symbols:
+                    ticker = tickers.tickers.get(symbol)
+                    if ticker is None:
+                        continue
+                    try:
+                        fast_info = dict(getattr(ticker, "fast_info", {}) or {})
+                    except Exception:  # pragma: no cover - defensive guard
+                        fast_info = {}
+                    price = fast_info.get("last_price") or fast_info.get("regular_market_price")
+                    prev_close = fast_info.get("previous_close") or fast_info.get("regular_market_previous_close")
+                    open_price = fast_info.get("open") or fast_info.get("regular_market_open")
+                    day_low = fast_info.get("day_low") or fast_info.get("regular_market_day_low")
+                    day_high = fast_info.get("day_high") or fast_info.get("regular_market_day_high")
+                    volume = fast_info.get("regular_market_volume") or fast_info.get("volume")
+                    year_low = fast_info.get("year_low") or fast_info.get("fifty_two_week_low")
+                    year_high = fast_info.get("year_high") or fast_info.get("fifty_two_week_high")
+                    market_cap = fast_info.get("market_cap")
+                    updated = fast_info.get("regular_market_time") or fast_info.get("last_market_time")
+
+                    history_timestamp: datetime | None = None
+                    need_history = any(
+                        candidate is None for candidate in (price, prev_close, open_price, day_low, day_high, volume)
+                    )
+                    if need_history:
+                        try:
+                            history = ticker.history(period="5d", interval="1d")
+                        except Exception:  # pragma: no cover - defensive guard
+                            history = None
+                        if history is not None and not history.empty:
+                            last_row = history.iloc[-1]
+                            history_timestamp = getattr(last_row, "name", None)
+                            price = price if price is not None else last_row.get("Close")
+                            open_price = open_price if open_price is not None else last_row.get("Open")
+                            day_low = day_low if day_low is not None else last_row.get("Low")
+                            day_high = day_high if day_high is not None else last_row.get("High")
+                            volume = volume if volume is not None else last_row.get("Volume")
+                            if prev_close is None:
+                                if len(history) > 1:
+                                    prev_close = history.iloc[-2].get("Close")
+                                else:
+                                    prev_close = last_row.get("Close")
+                    if updated is None and history_timestamp is not None:
+                        try:
+                            updated = history_timestamp.to_pydatetime().timestamp()
+                        except AttributeError:
+                            try:
+                                updated = datetime.fromisoformat(str(history_timestamp)).timestamp()
+                            except Exception:  # pragma: no cover - defensive
+                                updated = None
+
+                    price = _safe_float(price)
+                    prev_close = _safe_float(prev_close)
+                    open_price = _safe_float(open_price)
+                    day_low = _safe_float(day_low)
+                    day_high = _safe_float(day_high)
+                    volume = _safe_int(volume)
+                    year_low = _safe_float(year_low)
+                    year_high = _safe_float(year_high)
+
+                    change = None
+                    change_percent = None
+                    if price is not None and prev_close not in (None, 0):
+                        change = float(price) - float(prev_close)
+                        if prev_close:
+                            change_percent = (change / float(prev_close)) * 100.0
+
+                    long_name = None
+                    try:
+                        info = ticker.get_info()
+                    except Exception:  # pragma: no cover - defensive guard
+                        info = {}
+                    else:
+                        long_name = info.get("longName") or info.get("shortName")
+
+                    results.append(
+                        {
+                            "symbol": symbol,
+                            "longName": long_name,
+                            "currency": fast_info.get("currency") or fast_info.get("currency_code"),
+                            "regularMarketPrice": price,
+                            "regularMarketChange": change,
+                            "regularMarketChangePercent": change_percent,
+                            "regularMarketPreviousClose": prev_close,
+                            "regularMarketOpen": open_price,
+                            "regularMarketDayLow": day_low,
+                            "regularMarketDayHigh": day_high,
+                            "regularMarketVolume": volume,
+                            "fiftyTwoWeekLow": year_low,
+                            "fiftyTwoWeekHigh": year_high,
+                            "marketCap": market_cap,
+                            "regularMarketTime": updated,
+                        }
+                    )
+                return results
+
+            return await asyncio.to_thread(_fetch_sync)
+
+        try:
+            quotes = await _gather()
+        except Exception:  # pragma: no cover - defensive guard
+            logger.exception("finance_yfinance_fallback_failed", extra={"symbols": symbols})
+            return []
+
+        now = datetime.now(UTC)
+        normalized: list[dict[str, Any]] = []
+        for entry in quotes:
+            entry = dict(entry)
+            if entry.get("regularMarketTime") is None:
+                entry["regularMarketTime"] = now.timestamp()
+            normalized.append(entry)
+        return normalized
+
+    async def _attach_fundamentals(
+        self,
+        quotes: list[dict[str, Any]],
+        symbols: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        fundamentals = await self._fetch_fundamentals(symbols)
+        if not fundamentals:
+            return quotes
+        for entry in quotes:
+            symbol = entry.get("symbol")
+            if isinstance(symbol, str):
+                payload = fundamentals.get(symbol)
+                if payload:
+                    entry["fundamentals"] = payload
+        return quotes
+
+    async def _fetch_fundamentals(self, symbols: Sequence[str]) -> dict[str, Any]:
+        try:
+            import yfinance as yf  # type: ignore[import-not-found]
+        except ImportError:
+            return {}
+
+        symbols_tuple = tuple(symbols)
+        if not symbols_tuple:
+            return {}
+
+        def _collect() -> dict[str, Any]:
+            tickers = yf.Tickers(" ".join(symbols_tuple))
+            collected: dict[str, Any] = {}
+            for symbol in symbols_tuple:
+                ticker = tickers.tickers.get(symbol)
+                if ticker is None:
+                    continue
+                fundamentals = _build_fundamentals_snapshot(ticker)
+                if fundamentals:
+                    collected[symbol] = fundamentals
+            return collected
+
+        try:
+            return await asyncio.to_thread(_collect)
+        except Exception:  # pragma: no cover - fallback safety
+            logger.exception("finance_fundamentals_fetch_failed", extra={"symbols": symbols_tuple})
+            return {}
+
+    async def _get_cached_quotes(self, key: str) -> list[dict[str, Any]] | None:
+        async with self._quote_cache_lock:
+            entry = self._quote_cache.get(key)
+            if not entry:
+                return None
+            timestamp, payload = entry
+            if time.monotonic() - timestamp > self._quote_cache_ttl:
+                del self._quote_cache[key]
+                return None
+            return [dict(item) for item in payload]
+
+    async def _set_quote_cache(self, key: str, payload: list[dict[str, Any]]) -> None:
+        async with self._quote_cache_lock:
+            self._quote_cache[key] = (time.monotonic(), [dict(item) for item in payload])
 
 
 class PandasAnalyticsRequest(BaseModel):
@@ -552,6 +990,28 @@ def _fallback_finbert_pipeline(text: str, top_k: int = 1):
     return scores[:top_k]
 
 
+def _keyword_symbol_lookup(normalized_query: str) -> list[str]:
+    if not normalized_query:
+        return []
+    matches: list[str] = []
+    tokens = normalized_query.replace("-", " ").replace("/", " ").split()
+    for token in tokens:
+        symbols = KEYWORD_SYMBOL_OVERRIDES.get(token)
+        if not symbols:
+            continue
+        for symbol in symbols:
+            if symbol not in matches:
+                matches.append(symbol)
+    if matches:
+        return matches
+    for keyword, symbols in KEYWORD_SYMBOL_OVERRIDES.items():
+        if keyword in normalized_query:
+            for symbol in symbols:
+                if symbol not in matches:
+                    matches.append(symbol)
+    return matches
+
+
 def _load_dataframe(payload_model: PandasAnalyticsRequest) -> pd.DataFrame:
     if payload_model.frame is not None:
         return pd.DataFrame(payload_model.frame)
@@ -564,7 +1024,10 @@ def _safe_float(value: Any) -> float | None:
     try:
         if value is None:
             return None
-        return float(value)
+        candidate = float(value)
+        if math.isnan(candidate) or math.isinf(candidate):
+            return None
+        return candidate
     except (TypeError, ValueError):
         return None
 
@@ -621,6 +1084,149 @@ FINANCE_ADAPTER_CLASSES: tuple[type[MCPToolAdapter], ...] = (
 )
 
 
+def _extract_fundamentals_payload(quotes: Sequence[Mapping[str, Any]], symbol: str) -> dict[str, Any] | None:
+    if not symbol:
+        return None
+    target = symbol.upper()
+    for entry in quotes:
+        entry_symbol = entry.get("symbol")
+        if isinstance(entry_symbol, str) and entry_symbol.upper() == target:
+            fundamentals = entry.get("fundamentals")
+            if isinstance(fundamentals, Mapping) and fundamentals:
+                return copy.deepcopy(dict(fundamentals))
+    return None
+
+
+def _build_fundamentals_snapshot(ticker: Any) -> dict[str, Any] | None:
+    annual_entries = _extract_financial_entries(_safe_dataframe(getattr(ticker, "financials", None)), limit=4)
+    quarterly_entries = _extract_financial_entries(
+        _safe_dataframe(getattr(ticker, "quarterly_financials", None)),
+        limit=6,
+    )
+
+    trailing_revenue = _compute_trailing_total(quarterly_entries, "total_revenue")
+    trailing_net_income = _compute_trailing_total(quarterly_entries, "net_income")
+
+    fundamentals: dict[str, Any] = {}
+    if trailing_revenue is not None or trailing_net_income is not None:
+        trailing_payload: dict[str, Any] = {}
+        if trailing_revenue is not None:
+            trailing_payload["revenue"] = trailing_revenue
+        if trailing_net_income is not None:
+            trailing_payload["net_income"] = trailing_net_income
+        fundamentals["trailing"] = trailing_payload
+
+    if annual_entries:
+        fundamentals["annual"] = annual_entries
+    if quarterly_entries:
+        fundamentals["quarterly"] = quarterly_entries
+
+    info: Mapping[str, Any] | None = None
+    try:
+        info_candidate = ticker.get_info()
+    except Exception:  # pragma: no cover - defensive guard
+        info_candidate = None
+    if isinstance(info_candidate, Mapping):
+        info = info_candidate
+        currency = info.get("financialCurrency") or info.get("currency")
+        if isinstance(currency, str) and currency:
+            fundamentals["currency"] = currency
+        guidance = _extract_guidance_fields(info)
+        if guidance:
+            fundamentals["guidance"] = guidance
+
+    return fundamentals or None
+
+
+def _extract_financial_entries(frame: pd.DataFrame | None, *, limit: int) -> list[dict[str, Any]]:
+    if frame is None or frame.empty:
+        return []
+    entries: list[dict[str, Any]] = []
+    columns = list(frame.columns)[:limit]
+    for column in columns:
+        record: dict[str, Any] = {"period": _format_period_label(column)}
+        for source_key, alias in ("Total Revenue", "total_revenue"), ("Net Income", "net_income"):
+            value = None
+            if source_key in frame.index:
+                try:
+                    value = frame.loc[source_key, column]
+                except Exception:  # pragma: no cover - guard against missing data
+                    value = None
+            record[alias] = _safe_float(value)
+        entries.append(record)
+    return entries
+
+
+def _compute_trailing_total(entries: Sequence[Mapping[str, Any]], key: str, count: int = 4) -> float | None:
+    values: list[float] = []
+    for entry in entries:
+        candidate = entry.get(key)
+        if candidate is None:
+            continue
+        number = _safe_float(candidate)
+        if number is None:
+            continue
+        values.append(number)
+        if len(values) >= count:
+            break
+    if not values:
+        return None
+    return float(sum(values))
+
+
+def _safe_dataframe(candidate: Any) -> pd.DataFrame | None:
+    if isinstance(candidate, pd.DataFrame):
+        return candidate
+    return None
+
+
+def _format_period_label(period: Any) -> str:
+    if isinstance(period, pd.Timestamp):
+        return period.to_pydatetime().date().isoformat()
+    if isinstance(period, datetime):
+        return period.date().isoformat()
+    return str(period)
+
+
+def _extract_guidance_fields(info: Mapping[str, Any]) -> dict[str, Any]:
+    guidance_map = {
+        "forward_eps": "forwardEps",
+        "forward_pe": "forwardPE",
+        "target_mean_price": "targetMeanPrice",
+        "target_high_price": "targetHighPrice",
+        "target_low_price": "targetLowPrice",
+        "target_median_price": "targetMedianPrice",
+        "revenue_growth": "revenueGrowth",
+        "earnings_growth": "earningsGrowth",
+    }
+    guidance: dict[str, Any] = {}
+    for key, source in guidance_map.items():
+        value = info.get(source)
+        numeric = _safe_float(value)
+        if numeric is not None:
+            guidance[key] = numeric
+    return guidance
+
+
+def _classify_fallback_reason(error: Exception | None) -> str:
+    if isinstance(error, httpx.HTTPStatusError):
+        status = error.response.status_code if error.response is not None else None
+        if status == 429:
+            return "rate_limited"
+        if status == 401:
+            return "unauthorized"
+        if status == 403:
+            return "forbidden"
+        if status is not None:
+            return f"http_{status}"
+        return "http_error"
+    if isinstance(error, httpx.TimeoutException):
+        return "timeout"
+    if isinstance(error, httpx.HTTPError):
+        return "http_error"
+    if isinstance(error, ValueError):
+        return "value_error"
+    return "error"
 __all__ = [
     "YahooFinanceSnapshotAdapter",
     "PandasAnalyticsAdapter",
