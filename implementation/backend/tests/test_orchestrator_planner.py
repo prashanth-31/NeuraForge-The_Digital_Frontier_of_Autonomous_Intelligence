@@ -6,7 +6,7 @@ import pytest
 
 from app.agents.base import AgentContext
 from app.orchestration.graph import Orchestrator, ToolFirstPolicyViolation
-from app.orchestration.llm_planner import PlannerError, PlannerExecutionPlan, PlannedAgentStep
+from app.orchestration.llm_planner import PlannerError, PlannerPlan, PlannedAgentStep
 from app.schemas.agents import AgentCapability, AgentOutput
 
 
@@ -25,6 +25,10 @@ class _StubAgent:
         self.name = name
         self.capability = capability
         self.calls = 0
+        self.description = f"Stub agent for {name}"
+        self.tool_preference: list[str] = []
+        self.fallback_agent: str | None = None
+        self.confidence_bias = 0.5
 
     async def handle(self, task, *, context):  # pragma: no cover - exercised in tests
         self.calls += 1
@@ -39,7 +43,7 @@ class _StubAgent:
 
 class _PlannerStub:
     async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):
-        return PlannerExecutionPlan(
+        return PlannerPlan(
             steps=[
                 PlannedAgentStep(
                     agent="creative_agent",
@@ -48,16 +52,16 @@ class _PlannerStub:
                     reason="Creative agent best matches user request",
                 )
             ],
-            raw_response="{\"agents\": []}",
+            raw_response="{\"steps\": []}",
             metadata={"handoff_strategy": "sequential"},
         )
 
 
 class _EmptyPlannerStub:
     async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):
-        return PlannerExecutionPlan(
+        return PlannerPlan(
             steps=[],
-            raw_response="{}",
+            raw_response="{\"steps\": []}",
             metadata={"handoff_strategy": "sequential"},
         )
 
@@ -69,7 +73,7 @@ class _ErrorPlannerStub:
 
 class _UnknownAgentPlannerStub:
     async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):
-        return PlannerExecutionPlan(
+        return PlannerPlan(
             steps=[
                 PlannedAgentStep(
                     agent="non_existent_agent",
@@ -78,8 +82,49 @@ class _UnknownAgentPlannerStub:
                     reason="Invalid agent",
                 )
             ],
-            raw_response="{\"agents\":[{\"agent\":\"non_existent_agent\"}]}",
+            raw_response="{\"steps\":[{\"agent\":\"non_existent_agent\"}]}",
             metadata={},
+        )
+
+
+class _MultiStepPlannerStub:
+    async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):
+        return PlannerPlan(
+            steps=[
+                PlannedAgentStep(
+                    agent="general_agent",
+                    tools=[],
+                    fallback_tools=[],
+                    reason="Provide initial greeting",
+                    confidence=0.92,
+                ),
+                PlannedAgentStep(
+                    agent="creative_agent",
+                    tools=["creative.write"],
+                    fallback_tools=["search.web"],
+                    reason="Craft the requested creative output",
+                    confidence=0.88,
+                ),
+            ],
+            raw_response="{\"steps\": []}",
+            metadata={"handoff_strategy": "sequential"},
+        )
+
+
+class _LowConfidencePlannerStub:
+    async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):
+        return PlannerPlan(
+            steps=[
+                PlannedAgentStep(
+                    agent="creative_agent",
+                    tools=["creative.write"],
+                    fallback_tools=[],
+                    reason="Attempt creative solution",
+                    confidence=0.3,
+                )
+            ],
+            raw_response="{\"steps\": []}",
+            metadata={"handoff_strategy": "sequential"},
         )
 
 
@@ -104,6 +149,10 @@ class _ToolUsingAgent:
         self.name = name
         self.capability = capability
         self._tool_to_use = tool_to_use
+        self.description = f"Tool-using stub for {name}"
+        self.tool_preference = [tool_to_use]
+        self.fallback_agent = None
+        self.confidence_bias = 0.6
 
     async def handle(self, task, *, context: AgentContext):
         await context.tools.invoke(self._tool_to_use, {"prompt": task.prompt})  # type: ignore[union-attr]
@@ -238,3 +287,59 @@ async def test_planner_raises_when_planned_tools_unused() -> None:
             {"id": "task-violation", "prompt": "Draft copy", "metadata": {}},
             context=context,
         )
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_executes_multiple_planner_steps_with_metadata() -> None:
+    general = _StubAgent("general_agent", AgentCapability.GENERAL)
+    creative = _StubAgent("creative_agent", AgentCapability.CREATIVE)
+    planner = _MultiStepPlannerStub()
+    orchestrator = Orchestrator(agents=[general, creative], orchestration_planner=planner)
+    context = AgentContext(memory=_StubMemory(), llm=_StubLLM())
+
+    result = await orchestrator.route_task(
+        {"id": "task-multi", "prompt": "Plan a product announcement", "metadata": {}},
+        context=context,
+    )
+
+    assert general.calls == 1
+    assert creative.calls == 1
+    outputs = result["outputs"]
+    assert len(outputs) == 2
+    first_step_meta = outputs[0]["metadata"]["planner_step"]
+    second_step_meta = outputs[1]["metadata"]["planner_step"]
+    assert first_step_meta["index"] == 0
+    assert first_step_meta["executed_agent"] == "general_agent"
+    assert first_step_meta["planned_agent"] == "general_agent"
+    assert second_step_meta["index"] == 1
+    assert second_step_meta["executed_agent"] == "creative_agent"
+    assert second_step_meta["planned_agent"] == "creative_agent"
+    assert second_step_meta["executed_tools"] == ["creative.write"]
+    shared_steps = result["shared_context"]["planner_steps"]
+    assert len(shared_steps) == 2
+    assert shared_steps[1]["executed_agent"] == "creative_agent"
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_step_routes_to_general_agent() -> None:
+    general = _StubAgent("general_agent", AgentCapability.GENERAL)
+    creative = _StubAgent("creative_agent", AgentCapability.CREATIVE)
+    planner = _LowConfidencePlannerStub()
+    orchestrator = Orchestrator(agents=[general, creative], orchestration_planner=planner)
+    context = AgentContext(memory=_StubMemory(), llm=_StubLLM())
+
+    result = await orchestrator.route_task(
+        {"id": "task-low-confidence", "prompt": "Write a poem", "metadata": {}},
+        context=context,
+    )
+
+    assert general.calls == 1
+    assert creative.calls == 0
+    output_meta = result["outputs"][0]["metadata"]["planner_step"]
+    assert output_meta["planned_agent"] == "creative_agent"
+    assert output_meta["executed_agent"] == "general_agent"
+    assert output_meta["fallback_applied"] is True
+    assert "confidence_threshold" in output_meta
+    planner_meta = result["routing"]["metadata"]["planner"]
+    overrides = planner_meta.get("step_overrides")
+    assert overrides and overrides[0]["executed_agent"] == "general_agent"

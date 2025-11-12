@@ -6,6 +6,7 @@ from typing import Any, ClassVar, Iterable, Mapping
 
 from pydantic import BaseModel
 
+from app.tools.base import MCPToolAdapter as InstrumentedMCPToolAdapter
 
 @dataclass(slots=True, frozen=True)
 class ToolDescriptor:
@@ -16,7 +17,7 @@ class ToolDescriptor:
     labels: tuple[str, ...] = ()
 
 
-class MCPToolAdapter(ABC):
+class MCPToolAdapter(InstrumentedMCPToolAdapter, ABC):
     """Base adapter for MCP tools using pydantic models for validation."""
 
     name: ClassVar[str]
@@ -39,7 +40,7 @@ class MCPToolAdapter(ABC):
     def all_descriptors(cls) -> Iterable[ToolDescriptor]:  # pragma: no cover - convenience hook
         yield cls.descriptor()
 
-    async def invoke(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    async def _run(self, payload: Mapping[str, Any]) -> Mapping[str, Any]:
         model = self.InputModel.model_validate(payload)
         result = await self._invoke(model)
         return self.OutputModel.model_validate(result).model_dump(mode="json")

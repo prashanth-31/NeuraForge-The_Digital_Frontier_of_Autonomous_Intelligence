@@ -164,6 +164,80 @@
           "values": false
         }
       }
+    },
+    {
+      "id": 3,
+      "title": "Tool failures by type (15m)",
+      "type": "table",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (agent, tool, failure_type, canonical) (increase(neuraforge_agent_tool_failure_total[15m]))",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Value"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Failures (15m)"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "canonical"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Canonical"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failure_type"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "Failure Type"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "footer": {
+          "show": false
+        },
+        "sortBy": [
+          {
+            "displayName": "Failures (15m)",
+            "desc": true
+          }
+        ]
+      }
     }
   ]
 }

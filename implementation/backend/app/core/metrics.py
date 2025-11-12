@@ -38,6 +38,12 @@ AGENT_TOOL_POLICY_TOTAL = Counter(
     labelnames=("agent", "outcome"),
 )
 
+AGENT_TOOL_FAILURE_TOTAL = Counter(
+    "neuraforge_agent_tool_failure_total",
+    "Tool invocation failures grouped by agent, tool, and failure category",
+    labelnames=("agent", "tool", "failure_type", "canonical"),
+)
+
 ORCHESTRATOR_RUNS_TOTAL = Counter(
     "neuraforge_orchestrator_runs_total",
     "Total orchestrator runs by status",
@@ -202,6 +208,12 @@ TOOL_INVOCATIONS_TOTAL = Counter(
     labelnames=("tool", "cached"),
 )
 
+FINANCE_QUOTE_FALLBACK_TOTAL = Counter(
+    "neuraforge_finance_quote_fallback_total",
+    "Count of finance quote fallback attempts by provider and reason",
+    labelnames=("provider", "reason"),
+)
+
 TOOL_ERRORS_TOTAL = Counter(
     "neuraforge_tool_errors_total",
     "Tool invocation failures",
@@ -265,6 +277,15 @@ def record_agent_tool_invocation(*, agent: str, tool: str, outcome: str) -> None
 
 def record_agent_tool_policy(*, agent: str, outcome: str) -> None:
     AGENT_TOOL_POLICY_TOTAL.labels(agent=agent, outcome=outcome).inc()
+
+
+def record_agent_tool_failure(*, agent: str, tool: str, failure_type: str, canonical: bool) -> None:
+    AGENT_TOOL_FAILURE_TOTAL.labels(
+        agent=agent,
+        tool=tool,
+        failure_type=failure_type,
+        canonical=str(canonical).lower(),
+    ).inc()
 
 
 def mark_orchestrator_run_started(*, entry_point: str, task_id: str | None = None) -> None:

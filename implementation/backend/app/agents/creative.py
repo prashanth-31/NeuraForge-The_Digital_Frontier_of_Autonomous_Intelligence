@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..agents.base import AgentContext
@@ -20,6 +20,10 @@ class CreativeAgent:
         "You are NeuraForge's Creative Agent. Craft compelling narratives, taglines, or storytelling"
         " snippets tailored to the task. Blend clarity with creativity."
     )
+    description: str = "Creates expressive, poetic, or stylistic content tailored to the brief."
+    tool_preference: list[str] = field(default_factory=lambda: ["creative.tonecheck"])
+    fallback_agent: str | None = "general_agent"
+    confidence_bias: float = 0.8
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("creative_agent_task", task=task.model_dump())

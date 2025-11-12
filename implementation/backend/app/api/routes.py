@@ -4,7 +4,7 @@ import asyncio
 import copy
 import json
 import uuid
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, suppress
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
@@ -1058,8 +1058,21 @@ async def submit_task_stream(
                 if event == "__END__":
                     break
                 yield _format_sse(event, data)
+        except asyncio.CancelledError:
+            runner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner_task
+            raise
+        except Exception:
+            runner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner_task
+            raise
         finally:
-            await runner_task
+            if not runner_task.done():
+                runner_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await runner_task
 
     headers = {
         "Cache-Control": "no-cache",

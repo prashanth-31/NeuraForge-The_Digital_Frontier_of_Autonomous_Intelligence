@@ -14,6 +14,7 @@ from .core.audit import AuditLoggingMiddleware
 from .core.config import get_settings
 from .core.logging import configure_logging, get_logger
 from .mcp.router import router as mcp_router
+from .tools.api import router as tools_router
 from .services.bootstrap import ensure_foundation_ready
 from .services.consolidation import ConsolidationJob
 
@@ -54,12 +55,14 @@ app.add_middleware(AuditLoggingMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.frontend_origins,
+    allow_origin_regex=getattr(settings, "frontend_origin_regex", None),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 app.include_router(mcp_router)
+app.include_router(tools_router, prefix="/tools")
 
 
 @app.get("/health", tags=["health"])

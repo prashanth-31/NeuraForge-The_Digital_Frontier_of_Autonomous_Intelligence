@@ -57,7 +57,7 @@ def _build_contracts() -> Dict[AgentCapability, AgentContract]:
                 name="finance_agent",
                 capability=AgentCapability.FINANCE,
                 description="Provides financial analysis leveraging market data and compliance checks.",
-                tools=["mcp://finance/yfinance", "calculator"],
+                tools=["mcp://finance/alpha_vantage", "calculator"],
                 default_timeout_seconds=60,
             ),
             input_model=AgentInput,

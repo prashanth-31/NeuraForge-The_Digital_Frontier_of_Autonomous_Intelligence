@@ -12,7 +12,7 @@ This guide enumerates the Phase 4 agent interfaces. Contracts are enforced via P
 | Capability | Agent Name         | Description                                                            | Tooling (MCP)                                                                                 | Timeout |
 |------------|--------------------|------------------------------------------------------------------------|-----------------------------------------------------------------------------------------------|---------|
 | Research   | `research_agent`   | Synthesizes research-backed insights with citations and gap analysis.  | `search/tavily`, `research/summarizer`, `research/qdrant`, `research/doc_loader`             | 45s     |
-| Finance    | `finance_agent`    | Produces financial assessments with market data and compliance checks. | `finance/yfinance`, `finance/pandas`, `finance/plot`, `finance/finbert`                      | 60s     |
+| Finance    | `finance_agent`    | Produces financial assessments with market data and compliance checks. | `finance/alpha_vantage`, `finance/pandas`, `finance/plot`, `finance/finbert`                  | 60s     |
 | Creative   | `creative_agent`   | Crafts stylized content aligned to brand and tone guidelines.          | `creative/stylizer`, `creative/tone_checker`, `creative/whisper_transcription`               | 75s*    |
 | Enterprise | `enterprise_agent` | Delivers strategic recommendations referencing policy and knowledge.   | `enterprise/playbook` (composite), `enterprise/notion`, `enterprise/policy_checker`, `enterprise/crm` | 90s     |
 

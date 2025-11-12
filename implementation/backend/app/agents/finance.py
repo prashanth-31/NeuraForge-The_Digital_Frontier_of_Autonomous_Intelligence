@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +25,10 @@ class FinanceAgent:
         " metrics are available, treat them as the source of truth, cite their timestamps, and avoid"
         " repeating stale historical figures unless you explicitly flag them as legacy context."
     )
+    description: str = "Performs financial analysis, forecasting, and headline metric synthesis."
+    tool_preference: list[str] = field(default_factory=lambda: ["finance.snapshot"])
+    fallback_agent: str | None = "enterprise_agent"
+    confidence_bias: float = 0.9
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("finance_agent_task", task=task.model_dump())

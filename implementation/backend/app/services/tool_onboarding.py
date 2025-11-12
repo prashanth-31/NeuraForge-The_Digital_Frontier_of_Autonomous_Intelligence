@@ -23,7 +23,12 @@ RESEARCH_TOOLS: List[PlannedTool] = [
 ]
 
 FINANCE_TOOLS: List[PlannedTool] = [
-    PlannedTool(alias="finance.snapshot", resolved="finance/yfinance", category="finance", description="Yahoo Finance snapshot"),
+    PlannedTool(
+        alias="finance.snapshot",
+        resolved="finance/alpha_vantage",
+        category="finance",
+        description="Alpha Vantage equity snapshot",
+    ),
     PlannedTool(alias="finance.analytics", resolved="finance/pandas", category="finance", description="Pandas analytics sandbox"),
     PlannedTool(alias="finance.plot", resolved="finance/plot", category="finance", description="Plotting utility"),
     PlannedTool(alias="finance.news", resolved="finance/coingecko_news", category="finance", description="CoinGecko news feed"),

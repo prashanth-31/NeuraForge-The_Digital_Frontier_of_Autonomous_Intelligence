@@ -221,7 +221,21 @@ class AsyncioTaskScheduler(TaskScheduler):
         for step in plan.steps:
             pending[step.step_id] = asyncio.create_task(gated_executor(step))
 
-        await asyncio.gather(*pending.values())
+        async def _cancel_pending() -> None:
+            for task in pending.values():
+                if not task.done():
+                    task.cancel()
+            if pending:
+                await asyncio.gather(*pending.values(), return_exceptions=True)
+
+        try:
+            await asyncio.gather(*pending.values())
+        except asyncio.CancelledError:
+            await _cancel_pending()
+            raise
+        except Exception:
+            await _cancel_pending()
+            raise
 
     def _extract_duration_minutes(self, step: PlannedStep) -> int:
         metadata = step.metadata or {}

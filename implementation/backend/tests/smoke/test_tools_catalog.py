@@ -17,6 +17,7 @@ RESEARCH_REQUIRED_TOOLS = {
     "research/summarizer",
 }
 EXPECTED_FINANCE_TOOLS = {
+    "finance/alpha_vantage",
     "finance/yfinance",
     "finance/pandas",
     "finance/plot",

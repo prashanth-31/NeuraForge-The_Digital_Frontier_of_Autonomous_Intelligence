@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import copy
+import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
@@ -15,6 +16,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 from ..agents.base import AgentContext, BaseAgent
 from ..agents.contracts import validate_agent_request, validate_agent_response
+from ..core.config import TOOL_ENFORCEMENT_POLICY
 from ..core.logging import get_logger
 from ..core.metrics import (
     increment_agent_event,
@@ -23,15 +25,17 @@ from ..core.metrics import (
     observe_agent_latency,
     observe_negotiation_metrics,
     record_agent_tool_invocation,
+    record_agent_tool_failure,
     record_agent_tool_policy,
     record_plan_metrics,
     record_sla_event,
 )
 from ..schemas.agents import AgentInput, AgentOutput
+from ..tools.exceptions import ToolError
 from .context import ContextAssemblyContract, ContextSnapshot, ContextSnapshotStore, ContextStage
 from .dossier import build_decision_dossier
 from .guardrails import GuardrailDecisionType, GuardrailManager
-from .llm_planner import LLMOrchestrationPlanner, PlannerError, PlannerExecutionPlan, PlannedAgentStep
+from .llm_planner import LLMOrchestrationPlanner, PlannerError, PlannerPlan, PlannedAgentStep
 from .lifecycle import LifecycleEvent, LifecycleStatus, TaskLifecycleStore
 from .meta import MetaAgent, MetaResolution
 from .negotiation import NegotiationEngine
@@ -42,6 +46,10 @@ from .state import OrchestratorEvent, OrchestratorRun, OrchestratorStatus
 from .store import OrchestratorStateStore
 
 logger = get_logger(name=__name__)
+
+
+# Confidence scores below this value trigger general_agent fallback.
+LOW_PLANNER_CONFIDENCE_THRESHOLD = 0.7
 
 
 @dataclass
@@ -61,9 +69,6 @@ class _RunTracker:
         self.started_at = time.perf_counter()
 
 
-OPTIONAL_TOOL_AGENTS: set[str] = {"general_agent"}
-
-
 class ToolFirstPolicyViolation(RuntimeError):
     """Raised when an agent completes without a successful tool invocation."""
 
@@ -76,7 +81,7 @@ class _ToolSession:
     fallback_tools: tuple[str, ...] = ()
     planner_reason: str | None = None
     invocations: list[tuple[str, Any]] | None = None
-    failures: list[tuple[str, str]] | None = None
+    failures: list[dict[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         self.invocations = [] if self.invocations is None else self.invocations
@@ -94,7 +99,22 @@ class _ToolSession:
 
     def record_failure(self, tool: str, error: Exception) -> None:
         self.attempts += 1
-        self.failures.append((tool, str(error)))
+        failure_type = type(error).__name__
+        canonical_error = isinstance(error, ToolError)
+        record_agent_tool_failure(
+            agent=self.agent_name,
+            tool=tool,
+            failure_type=failure_type,
+            canonical=canonical_error,
+        )
+        self.failures.append(
+            {
+                "tool": tool,
+                "error": str(error),
+                "type": failure_type,
+                "canonical": canonical_error,
+            }
+        )
         record_agent_tool_invocation(agent=self.agent_name, tool=tool, outcome="failure")
 
     @property
@@ -105,7 +125,7 @@ class _ToolSession:
         planned_set = set(self.planned_tools)
         fallback_set = set(self.fallback_tools)
         success_tools = [tool for tool, _ in self.invocations]
-        failure_tools = [tool for tool, _ in self.failures]
+        failure_tools = [entry["tool"] for entry in self.failures]
         primary_used = any(tool in planned_set for tool in success_tools)
         fallback_used = any(tool in fallback_set for tool in success_tools)
         unplanned_successes = [
@@ -185,7 +205,98 @@ class Orchestrator:
         self._graph = self._build_graph(agents)
         self._current_context: AgentContext | None = None
         self._llm_planner = orchestration_planner
-        self._active_plan_steps: dict[str, PlannedAgentStep] | None = None
+        self._active_plan_steps: list[PlannedAgentStep] | None
+        self._active_plan_step_lookup: dict[str, PlannedAgentStep] | None
+        self._roster_index: dict[str, BaseAgent]
+        self._active_plan_steps = None
+        self._active_plan_step_lookup = None
+        self._roster_index = {}
+
+    def _reset_plan_state(self) -> None:
+        self._active_plan_steps = None
+        self._active_plan_step_lookup = None
+        self._roster_index = {}
+
+    def _lookup_plan_step_for_agent(self, agent_name: str) -> PlannedAgentStep | None:
+        if self._active_plan_step_lookup is not None:
+            candidate = self._active_plan_step_lookup.get(agent_name)
+            if candidate is not None:
+                return candidate
+        if not self._active_plan_steps:
+            return None
+        for step in self._active_plan_steps:
+            if step.agent == agent_name:
+                return step
+        return None
+
+    def _build_planner_step_metadata(
+        self,
+        *,
+        index: int,
+        planned_step: PlannedAgentStep | None,
+        resolved_step: PlannedAgentStep | None,
+        executed_agent: BaseAgent,
+        fallback_agent: BaseAgent | None,
+        fallback_reason: str | None,
+    ) -> dict[str, Any]:
+        capability = executed_agent.capability
+        executed_capability = capability.value if hasattr(capability, "value") else str(capability)
+        metadata: dict[str, Any] = {
+            "index": index,
+            "executed_agent": executed_agent.name,
+            "executed_agent_capability": executed_capability,
+            "fallback_applied": fallback_agent is not None,
+        }
+        if planned_step is not None:
+            metadata.update(
+                {
+                    "planned_agent": planned_step.agent,
+                    "planned_reason": planned_step.reason,
+                    "planned_tools": list(planned_step.tools),
+                    "planned_fallback_tools": list(planned_step.fallback_tools),
+                    "planned_confidence": self._coerce_plan_confidence(getattr(planned_step, "confidence", 1.0)),
+                }
+            )
+        if resolved_step is not None:
+            metadata.update(
+                {
+                    "executed_reason": resolved_step.reason,
+                    "executed_tools": list(resolved_step.tools),
+                    "executed_fallback_tools": list(resolved_step.fallback_tools),
+                    "executed_confidence": self._coerce_plan_confidence(getattr(resolved_step, "confidence", 1.0)),
+                }
+            )
+        if fallback_agent is not None:
+            fallback_capability = fallback_agent.capability
+            metadata["fallback_agent"] = fallback_agent.name
+            metadata["fallback_agent_capability"] = (
+                fallback_capability.value if hasattr(fallback_capability, "value") else str(fallback_capability)
+            )
+            metadata["fallback_reason"] = fallback_reason
+            metadata["confidence_threshold"] = LOW_PLANNER_CONFIDENCE_THRESHOLD
+        return metadata
+
+    def _record_step_override(self, state: dict[str, Any], step_metadata: Mapping[str, Any]) -> None:
+        routing = state.get("routing")
+        if not isinstance(routing, dict):
+            return
+        metadata = routing.get("metadata")
+        if not isinstance(metadata, dict):
+            return
+        planner_section = metadata.get("planner")
+        if not isinstance(planner_section, dict):
+            return
+        overrides = planner_section.setdefault("step_overrides", [])
+        if isinstance(overrides, list):
+            overrides.append(dict(step_metadata))
+
+    def _append_step_metadata(self, state: dict[str, Any], step_metadata: Mapping[str, Any]) -> None:
+        shared_context = state.setdefault("shared_context", {"provenance": []})
+        executed_steps = shared_context.setdefault("planner_steps", [])
+        if isinstance(executed_steps, list):
+            executed_steps.append(copy.deepcopy(dict(step_metadata)))
+            if len(executed_steps) > 20:
+                del executed_steps[:-20]
 
     def _build_graph(self, agents: list[BaseAgent]) -> Any:
         if StateGraph is None:
@@ -196,18 +307,21 @@ class Orchestrator:
             async def _node(state: dict[str, Any], *, agent=agent) -> dict[str, Any]:
                 if self._current_context is None:
                     raise RuntimeError("Agent context not set for orchestration")
-                plan_step = None
-                if self._active_plan_steps is not None:
-                    plan_step = self._active_plan_steps.get(agent.name)
+                plan_step = self._lookup_plan_step_for_agent(agent.name)
                 tool_session = self._start_tool_session(
                     agent=agent,
                     base_context=self._current_context,
                     plan_step=plan_step,
                 )
-                agent_context = self._clone_context(self._current_context, tool_session, plan_step)
+                agent_context = self._clone_context(
+                    self._current_context,
+                    tool_session,
+                    plan_step,
+                    agent_name=agent.name,
+                )
                 request = await self._prepare_agent_input(state, agent=agent, context=agent_context)
                 output = await agent.handle(request, context=agent_context)
-                updated_state = self._record_output(state, agent=agent, result=output)
+                updated_state = self._record_output(state, agent=agent, result=output, planner_step=None)
                 await self._enforce_tool_first_policy(tool_session, agent=agent, state=updated_state)
                 return updated_state
 
@@ -228,6 +342,8 @@ class Orchestrator:
     ) -> _ToolSession | None:
         if base_context.tools is None:
             return None
+        if plan_step is None:
+            plan_step = self._lookup_plan_step_for_agent(agent.name)
         planned = tuple(plan_step.tools) if plan_step and plan_step.tools else ()
         fallback = tuple(plan_step.fallback_tools) if plan_step and plan_step.fallback_tools else ()
         reason = plan_step.reason if plan_step and plan_step.reason else None
@@ -239,14 +355,18 @@ class Orchestrator:
             planner_reason=reason,
         )
 
-    @staticmethod
     def _clone_context(
+        self,
         base_context: AgentContext,
         tool_session: _ToolSession | None,
         plan_step: PlannedAgentStep | None,
+        *,
+        agent_name: str,
     ) -> AgentContext:
         planned_list = None
         fallback_list = None
+        if plan_step is None:
+            plan_step = self._lookup_plan_step_for_agent(agent_name)
         if plan_step is not None:
             if plan_step.tools:
                 planned_list = list(plan_step.tools)
@@ -256,6 +376,7 @@ class Orchestrator:
             planned_list = list(base_context.planned_tools)
             fallback_list = list(base_context.fallback_tools or []) if base_context.fallback_tools else None
         tools_proxy = tool_session.proxy if tool_session is not None else base_context.tools
+        planner_reason = plan_step.reason if plan_step and plan_step.reason else base_context.planner_reason
         return AgentContext(
             memory=base_context.memory,
             llm=base_context.llm,
@@ -264,7 +385,7 @@ class Orchestrator:
             scorer=base_context.scorer,
             planned_tools=planned_list,
             fallback_tools=fallback_list,
-            planner_reason=(plan_step.reason if plan_step and plan_step.reason else base_context.planner_reason),
+            planner_reason=planner_reason,
         )
 
     async def _enforce_tool_first_policy(
@@ -279,6 +400,8 @@ class Orchestrator:
         if tool_session is None:
             return
         summary = tool_session.adherence_summary()
+        enforcement_required = TOOL_ENFORCEMENT_POLICY.get(agent.name, False)
+        policy_mode = "enforced" if enforcement_required else "optional"
 
         outputs = state.get("outputs", [])
         latest_output = outputs[-1] if outputs else None
@@ -315,24 +438,52 @@ class Orchestrator:
                     "reason": summary["planner_reason"],
                 }
             )
+            policy_meta = metadata.get("tool_policy")
+            if not isinstance(policy_meta, dict):
+                policy_meta = {}
+                metadata["tool_policy"] = policy_meta
+            policy_meta.update(
+                {
+                    "mode": policy_mode,
+                    "planner_expected": bool(summary["planned_tools"] or summary["fallback_tools"]),
+                }
+            )
 
         if not tool_session.successful:
-            allow_optional = (
-                agent.name in OPTIONAL_TOOL_AGENTS
-                and not summary["planned_tools"]
-                and not summary["fallback_tools"]
-                and tool_session.attempts == 0
-            )
-            if allow_optional:
-                record_agent_tool_policy(agent=agent.name, outcome="optional_skipped")
-                return
-
-            if (
-                agent.name in OPTIONAL_TOOL_AGENTS
-                and tool_session.attempts == 0
-                and self._should_allow_optional_tool_skip(summary=summary, state=state)
-            ):
-                record_agent_tool_policy(agent=agent.name, outcome="optional_skipped_planned")
+            if not enforcement_required:
+                if tool_session.attempts == 0:
+                    if not summary["planned_tools"] and not summary["fallback_tools"]:
+                        record_agent_tool_policy(agent=agent.name, outcome="optional_skipped")
+                        return
+                    if self._should_allow_optional_tool_skip(summary=summary, state=state):
+                        record_agent_tool_policy(agent=agent.name, outcome="optional_skipped_planned")
+                        return
+                outcome = "optional_failed" if tool_session.attempts else "optional_missing"
+                record_agent_tool_policy(agent=agent.name, outcome=outcome)
+                payload = {
+                    "attempts": tool_session.attempts,
+                    "errors": tool_session.failures,
+                    "reason": "no_successful_invocation" if tool_session.attempts else "no_invocation",
+                    "planner": summary,
+                }
+                await self._record_event(run_tracker, "tool_policy_violation", agent=agent.name, payload=payload)
+                if progress_cb is not None:
+                    event_payload = self._ensure_run_id(
+                        run_tracker,
+                        {
+                            "event": "tool_policy_violation",
+                            "agent": agent.name,
+                            "task_id": self._task_id_from_state(state),
+                            **payload,
+                        },
+                    )
+                    await self._notify(progress_cb, event_payload)
+                logger.warning(
+                    "tool_policy_optional_violation",
+                    agent=agent.name,
+                    task=self._task_id_from_state(state),
+                    reason=payload["reason"],
+                )
                 return
             outcome = "violation_failed" if tool_session.attempts else "violation_missing"
             record_agent_tool_policy(agent=agent.name, outcome=outcome)
@@ -380,6 +531,15 @@ class Orchestrator:
                     },
                 )
                 await self._notify(progress_cb, event_payload)
+            if not enforcement_required:
+                logger.warning(
+                    "planner_tools_optional_violation",
+                    agent=agent.name,
+                    task=self._task_id_from_state(state),
+                    planned=summary["planned_tools"],
+                    fallback=summary["fallback_tools"],
+                )
+                return
             planned_list = summary["planned_tools"] or summary["fallback_tools"]
             raise ToolFirstPolicyViolation(
                 f"Agent '{agent.name}' must successfully invoke planned tools or fallbacks {planned_list} before completing."
@@ -424,7 +584,7 @@ class Orchestrator:
         task_id = str(task.get("id") or task.get("task_id") or uuid.uuid4())
         task["id"] = task_id
         task.setdefault("outputs", [])
-        self._active_plan_steps = None
+        self._reset_plan_state()
         run_tracker = _RunTracker(run=None, entry_point=entry_point)
         mark_orchestrator_run_started(entry_point=entry_point, task_id=task_id)
         if not self.agents:
@@ -509,7 +669,7 @@ class Orchestrator:
                 skipped_agents=skipped_agents,
             )
         finally:
-            self._active_plan_steps = None
+            self._reset_plan_state()
 
     async def _run_sequential(
         self,
@@ -521,12 +681,33 @@ class Orchestrator:
         agent_sequence: Sequence[BaseAgent] | None = None,
         skipped_agents: Sequence[BaseAgent] | None = None,
     ) -> dict[str, Any]:
-        agents = list(agent_sequence or self.agents)
         state = task
         state.setdefault("outputs", [])
         state.setdefault("shared_context", {"provenance": []})
         task_id = str(state.get("id") or state.get("task_id") or "")
         failure: Exception | None = None
+        plan_steps = list(self._active_plan_steps or [])
+        using_plan_steps = bool(plan_steps)
+        roster_index = self._roster_index if self._roster_index else {agent.name: agent for agent in self.agents}
+        execution_plan: list[tuple[int, PlannedAgentStep | None, BaseAgent]] = []
+        if using_plan_steps:
+            for idx, plan_step in enumerate(plan_steps):
+                candidate = roster_index.get(plan_step.agent)
+                if candidate is None:
+                    logger.error(
+                        "planner_step_agent_missing",
+                        task=task.get("id"),
+                        step_index=idx,
+                        planned_agent=plan_step.agent,
+                    )
+                    continue
+                execution_plan.append((idx, plan_step, candidate))
+            if not execution_plan:
+                using_plan_steps = False
+        if not execution_plan:
+            derived_agents = list(agent_sequence or self.agents)
+            execution_plan = [(idx, None, agent) for idx, agent in enumerate(derived_agents)]
+        agents = [agent for _, _, agent in execution_plan]
         if skipped_agents:
             routing_state = state.get("routing") if isinstance(state.get("routing"), dict) else {}
             scores = routing_state.get("scores") if isinstance(routing_state.get("scores"), dict) else {}
@@ -555,12 +736,90 @@ class Orchestrator:
                 agents=[agent.name for agent in skipped_agents],
             )
 
-        for agent in agents:
+        for step_index, plan_step, planned_agent in execution_plan:
+            executed_agent = planned_agent
+            resolved_step = plan_step
+            fallback_agent: BaseAgent | None = None
+            fallback_reason: str | None = None
+            step_confidence = 1.0
+            if plan_step is not None:
+                step_confidence = self._coerce_plan_confidence(getattr(plan_step, "confidence", 1.0))
+                plan_step.confidence = step_confidence
+                if step_confidence < LOW_PLANNER_CONFIDENCE_THRESHOLD:
+                    candidate = roster_index.get("general_agent")
+                    if candidate is not None and candidate.name != planned_agent.name:
+                        fallback_agent = candidate
+                        fallback_reason = (
+                            f"Planner confidence {step_confidence:.2f} below threshold "
+                            f"{LOW_PLANNER_CONFIDENCE_THRESHOLD:.2f}; rerouting to general_agent."
+                        )
+                        executed_agent = candidate
+                        resolved_step = PlannedAgentStep(
+                            agent=candidate.name,
+                            tools=[],
+                            fallback_tools=list(plan_step.fallback_tools),
+                            reason=f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}".strip(),
+                            confidence=step_confidence,
+                        )
+                        logger.warning(
+                            "planner_step_low_confidence_fallback",
+                            task=task.get("id"),
+                            step_index=step_index,
+                            planned_agent=plan_step.agent,
+                            fallback_agent=candidate.name,
+                            confidence=step_confidence,
+                            threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
+                        )
+                    else:
+                        resolved_step = replace(
+                            plan_step,
+                            confidence=step_confidence,
+                            tools=list(plan_step.tools),
+                            fallback_tools=list(plan_step.fallback_tools),
+                        )
+                else:
+                    resolved_step = replace(
+                        plan_step,
+                        confidence=step_confidence,
+                        tools=list(plan_step.tools),
+                        fallback_tools=list(plan_step.fallback_tools),
+                    )
+            step_context = resolved_step or plan_step
+            step_id = f"agent::{executed_agent.name}"
+            if using_plan_steps:
+                step_id = f"{step_id}::{step_index}"
+            step_metadata: dict[str, Any] | None = None
+            if plan_step is not None or step_context is not None:
+                step_metadata = self._build_planner_step_metadata(
+                    index=step_index,
+                    planned_step=plan_step,
+                    resolved_step=step_context,
+                    executed_agent=executed_agent,
+                    fallback_agent=fallback_agent,
+                    fallback_reason=fallback_reason,
+                )
+                step_metadata.setdefault("step_id", step_id)
+                self._append_step_metadata(state, step_metadata)
+                if fallback_agent is not None:
+                    self._record_step_override(state, step_metadata)
+                logger.info(
+                    "planner_step_started",
+                    task=task.get("id"),
+                    step_index=step_index,
+                    planned_agent=step_metadata.get("planned_agent"),
+                    executed_agent=step_metadata.get("executed_agent"),
+                    reason=step_metadata.get("executed_reason") or step_metadata.get("planned_reason"),
+                    tools=step_metadata.get("executed_tools") or step_metadata.get("planned_tools"),
+                    fallback_applied=step_metadata.get("fallback_applied"),
+                )
+            event_step_metadata = dict(step_metadata) if step_metadata is not None else None
+            if event_step_metadata is not None:
+                event_step_metadata["status"] = "started"
             await self._record_event(
                 run_tracker,
                 "agent_started",
-                agent=agent.name,
-                payload={"task_id": task.get("id")},
+                agent=executed_agent.name,
+                payload={"task_id": task.get("id"), "planner_step": event_step_metadata},
             )
             await self._notify(
                 progress_cb,
@@ -568,62 +827,68 @@ class Orchestrator:
                     run_tracker,
                     {
                         "event": "agent_started",
-                        "agent": agent.name,
+                        "agent": executed_agent.name,
                         "task_id": task.get("id"),
-                        "step_id": f"agent::{agent.name}",
+                        "step_id": step_id,
+                        "planner_step": event_step_metadata,
                     },
                 ),
             )
-            increment_agent_event(agent=agent.name, event="started")
-            logger.info("agent_started", agent=agent.name, task=task.get("id"))
+            increment_agent_event(agent=executed_agent.name, event="started")
+            logger.info("agent_started", agent=executed_agent.name, task=task.get("id"))
             start_time = time.perf_counter()
             await self._record_lifecycle(
                 run_tracker,
                 task_id=task_id,
-                step_id=f"agent::{agent.name}",
+                step_id=step_id,
                 event_type="agent_started",
                 status=LifecycleStatus.IN_PROGRESS,
-                agent=agent.name,
+                agent=executed_agent.name,
             )
             await self._capture_snapshot(
                 run_tracker,
                 ContextStage.EXECUTION,
                 state,
-                agent=agent.name,
-                extra={"event": "agent_started"},
+                agent=executed_agent.name,
+                extra={"event": "agent_started", "planner_step": event_step_metadata},
             )
             try:
-                plan_step = None
-                if self._active_plan_steps is not None:
-                    plan_step = self._active_plan_steps.get(agent.name)
                 tool_session = self._start_tool_session(
-                    agent=agent,
+                    agent=executed_agent,
                     base_context=context,
-                    plan_step=plan_step,
+                    plan_step=step_context,
                 )
-                agent_context = self._clone_context(context, tool_session, plan_step)
-                agent_input = await self._prepare_agent_input(state, agent=agent, context=agent_context)
-                result = await agent.handle(agent_input, context=agent_context)
-                self._record_output(state, agent=agent, result=result)
+                agent_context = self._clone_context(
+                    context,
+                    tool_session,
+                    step_context,
+                    agent_name=executed_agent.name,
+                )
+                agent_input = await self._prepare_agent_input(state, agent=executed_agent, context=agent_context)
+                result = await executed_agent.handle(agent_input, context=agent_context)
+                self._record_output(state, agent=executed_agent, result=result, planner_step=step_metadata)
                 await self._enforce_tool_first_policy(
                     tool_session,
-                    agent=agent,
+                    agent=executed_agent,
                     state=state,
                     run_tracker=run_tracker,
                     progress_cb=progress_cb,
                 )
             except Exception as exc:
                 duration = time.perf_counter() - start_time
-                observe_agent_latency(agent=agent.name, latency=duration)
-                increment_agent_event(agent=agent.name, event="failed")
+                observe_agent_latency(agent=executed_agent.name, latency=duration)
+                increment_agent_event(agent=executed_agent.name, event="failed")
                 failure = exc
+                failed_step_metadata = dict(step_metadata) if step_metadata is not None else None
+                if failed_step_metadata is not None:
+                    failed_step_metadata["status"] = "failed"
                 await self._record_lifecycle(
                     run_tracker,
                     task_id=task_id,
-                    step_id=f"agent::{agent.name}",
+                    step_id=step_id,
                     event_type="agent_failed",
                     status=LifecycleStatus.FAILED,
-                    agent=agent.name,
+                    agent=executed_agent.name,
                     latency_ms=duration * 1000,
                 )
                 await self._notify(
@@ -632,83 +897,105 @@ class Orchestrator:
                         run_tracker,
                         {
                             "event": "agent_failed",
-                            "agent": agent.name,
+                            "agent": executed_agent.name,
                             "task_id": task.get("id"),
                             "error": str(exc),
                             "latency": duration,
-                            "step_id": f"agent::{agent.name}",
+                            "step_id": step_id,
+                            "planner_step": failed_step_metadata,
                         },
                     ),
                 )
                 logger.exception(
                     "agent_failed",
-                    agent=agent.name,
+                    agent=executed_agent.name,
                     task=task.get("id"),
                     duration=duration,
                 )
+                if step_metadata is not None:
+                    logger.error(
+                        "planner_step_failed",
+                        task=task.get("id"),
+                        step_index=step_index,
+                        executed_agent=executed_agent.name,
+                        error=str(exc),
+                    )
                 state["status"] = "failed"
                 state["error"] = str(exc)
                 await self._record_event(
                     run_tracker,
                     "agent_failed",
-                    agent=agent.name,
-                    payload={"error": str(exc), "latency": duration},
+                    agent=executed_agent.name,
+                    payload={"error": str(exc), "latency": duration, "planner_step": failed_step_metadata},
                 )
                 await self._capture_snapshot(
                     run_tracker,
                     ContextStage.EXECUTION,
                     state,
-                    agent=agent.name,
-                    extra={"event": "agent_failed", "error": str(exc)},
+                    agent=executed_agent.name,
+                    extra={"event": "agent_failed", "error": str(exc), "planner_step": failed_step_metadata},
                 )
                 await self._finalize_run(run_tracker, state, status=OrchestratorStatus.FAILED, error=str(exc))
                 raise
             duration = time.perf_counter() - start_time
-            observe_agent_latency(agent=agent.name, latency=duration)
-            increment_agent_event(agent=agent.name, event="completed")
+            observe_agent_latency(agent=executed_agent.name, latency=duration)
+            increment_agent_event(agent=executed_agent.name, event="completed")
             logger.info(
                 "agent_completed",
-                agent=agent.name,
+                agent=executed_agent.name,
                 task=task.get("id"),
                 duration=duration,
                 outputs=len(state.get("outputs", [])),
             )
+            if step_metadata is not None:
+                logger.info(
+                    "planner_step_completed",
+                    task=task.get("id"),
+                    step_index=step_index,
+                    executed_agent=step_metadata.get("executed_agent"),
+                    latency=duration,
+                    fallback_applied=step_metadata.get("fallback_applied"),
+                )
             latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
+            completed_step_metadata = dict(step_metadata) if step_metadata is not None else None
+            if completed_step_metadata is not None:
+                completed_step_metadata["status"] = "completed"
             await self._notify(
                 progress_cb,
                 self._ensure_run_id(
                     run_tracker,
                     {
                         "event": "agent_completed",
-                        "agent": agent.name,
+                        "agent": executed_agent.name,
                         "task_id": task.get("id"),
                         "latency": duration,
                         "output": latest_output,
-                        "step_id": f"agent::{agent.name}",
+                        "step_id": step_id,
+                        "planner_step": completed_step_metadata,
                     },
                 ),
             )
             await self._record_event(
                 run_tracker,
                 "agent_completed",
-                agent=agent.name,
-                payload={"latency": duration, "output": latest_output},
+                agent=executed_agent.name,
+                payload={"latency": duration, "output": latest_output, "planner_step": completed_step_metadata},
             )
             await self._record_lifecycle(
                 run_tracker,
                 task_id=task_id,
-                step_id=f"agent::{agent.name}",
+                step_id=step_id,
                 event_type="agent_completed",
                 status=LifecycleStatus.COMPLETED,
-                agent=agent.name,
+                agent=executed_agent.name,
                 latency_ms=duration * 1000,
             )
             await self._capture_snapshot(
                 run_tracker,
                 ContextStage.EXECUTION,
                 state,
-                agent=agent.name,
-                extra={"event": "agent_completed", "output": latest_output},
+                agent=executed_agent.name,
+                extra={"event": "agent_completed", "output": latest_output, "planner_step": completed_step_metadata},
             )
             await self._update_state(run_tracker, state)
 
@@ -750,6 +1037,8 @@ class Orchestrator:
     async def _determine_agent_sequence(self, task: dict[str, Any]) -> tuple[list[BaseAgent], dict[str, Any], list[BaseAgent]]:
         roster = list(self.agents)
         self._active_plan_steps = None
+        self._active_plan_step_lookup = None
+        self._roster_index = {agent.name: agent for agent in roster}
 
         if not roster:
             planner_payload = {
@@ -810,7 +1099,75 @@ class Orchestrator:
             record_plan_metrics(strategy="llm_orchestration", status="failed", steps=len(planner_plan.steps))
             raise PlannerError(empty_reason)
 
-        selection = self._resolve_planner_agents(planner_plan.steps, roster)
+        base_confidence = getattr(planner_plan, "confidence", None)
+        metadata_confidence = planner_plan.metadata.get("confidence", base_confidence or 1.0)
+        confidence = self._coerce_plan_confidence(metadata_confidence)
+        planner_plan.confidence = confidence
+        planner_plan.metadata["confidence"] = confidence
+        if confidence < LOW_PLANNER_CONFIDENCE_THRESHOLD:
+            fallback_agent = next((agent for agent in roster if agent.name == "general_agent"), None)
+            if fallback_agent is not None:
+                planner_plan.metadata.setdefault("fallback_reason", "low_confidence")
+                planner_plan.metadata.setdefault("confidence_threshold", LOW_PLANNER_CONFIDENCE_THRESHOLD)
+                planner_plan.metadata.setdefault("fallback_selected_agents", [fallback_agent.name])
+                logger.warning(
+                    "planner_low_confidence_fallback",
+                    task=task.get("id"),
+                    confidence=confidence,
+                    threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
+                    fallback_agent=fallback_agent.name,
+                )
+                selection = [fallback_agent]
+                routing_payload = self._build_planner_routing_payload(
+                    planner_plan,
+                    roster,
+                    selection,
+                    status="fallback",
+                    reason="planner.low_confidence",
+                )
+                self._annotate_task_with_plan(task, planner_plan, selection, status="fallback")
+                record_plan_metrics(
+                    strategy="llm_orchestration",
+                    status="fallback",
+                    steps=len(planner_plan.steps),
+                )
+                skipped_agents = [agent for agent in roster if agent not in selection]
+                return selection, routing_payload, skipped_agents
+            logger.warning(
+                "planner_low_confidence_no_general_agent",
+                task=task.get("id"),
+                confidence=confidence,
+                threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
+                roster=[agent.name for agent in roster],
+            )
+
+        self._active_plan_steps = list(planner_plan.steps)
+        lookup: dict[str, PlannedAgentStep] = {}
+        for step in planner_plan.steps:
+            lookup.setdefault(step.agent, step)
+        self._active_plan_step_lookup = lookup
+
+        selection, missing_agents = self._resolve_planner_agents(planner_plan.steps, roster)
+        if missing_agents:
+            logger.error(
+                "planner_unknown_agents",
+                task=task.get("id"),
+                agents=sorted({name for name in missing_agents}),
+            )
+            invalid_reason = "Planner referenced unknown agents"
+            routing_payload = self._build_planner_routing_payload(
+                planner_plan,
+                roster,
+                [],
+                status="failed",
+                reason="planner.unknown_agents",
+                error=invalid_reason,
+            )
+            task.setdefault("routing", {}).update(routing_payload)
+            self._annotate_task_with_plan(task, planner_plan, [], status="failed", error=invalid_reason)
+            record_plan_metrics(strategy="llm_orchestration", status="failed", steps=len(planner_plan.steps))
+            self._reset_plan_state()
+            raise PlannerError(invalid_reason)
         if not selection:
             invalid_reason = "Planner referenced unknown agents"
             routing_payload = self._build_planner_routing_payload(
@@ -824,6 +1181,7 @@ class Orchestrator:
             task.setdefault("routing", {}).update(routing_payload)
             self._annotate_task_with_plan(task, planner_plan, [], status="failed", error=invalid_reason)
             record_plan_metrics(strategy="llm_orchestration", status="failed", steps=len(planner_plan.steps))
+            self._reset_plan_state()
             raise PlannerError(invalid_reason)
 
         metadata = self._build_planner_routing_payload(
@@ -833,7 +1191,6 @@ class Orchestrator:
             status="planned",
         )
         skipped_agents = [agent for agent in roster if agent not in selection]
-        self._active_plan_steps = {step.agent: step for step in planner_plan.steps}
         self._annotate_task_with_plan(task, planner_plan, selection, status="planned")
         record_plan_metrics(strategy="llm_orchestration", status="planned", steps=len(planner_plan.steps))
         return selection, metadata, skipped_agents
@@ -843,6 +1200,16 @@ class Orchestrator:
         if not isinstance(outputs, Sequence):
             return []
         return [item for item in outputs if isinstance(item, Mapping)]
+
+    @staticmethod
+    def _coerce_plan_confidence(raw_value: Any) -> float:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(value):
+            return 1.0
+        return max(0.0, min(1.0, value))
 
     def _collect_tool_aliases(self, task: Mapping[str, Any]) -> dict[str, str] | None:
         metadata = task.get("metadata")
@@ -861,21 +1228,21 @@ class Orchestrator:
         self,
         steps: Sequence[PlannedAgentStep],
         roster: Sequence[BaseAgent],
-    ) -> list[BaseAgent]:
+    ) -> tuple[list[BaseAgent], list[str]]:
         index = {agent.name: agent for agent in roster}
         resolved: list[BaseAgent] = []
-        seen: set[str] = set()
+        missing: list[str] = []
         for step in steps:
             candidate = index.get(step.agent)
-            if candidate is None or candidate.name in seen:
+            if candidate is None:
+                missing.append(step.agent)
                 continue
             resolved.append(candidate)
-            seen.add(candidate.name)
-        return resolved
+        return resolved, missing
 
     def _build_planner_routing_payload(
         self,
-        plan: PlannerExecutionPlan,
+    plan: PlannerPlan,
         roster: Sequence[BaseAgent],
         selection: Sequence[BaseAgent],
         *,
@@ -894,6 +1261,7 @@ class Orchestrator:
                 "tools": step.tools,
                 "fallback_tools": step.fallback_tools,
                 "reason": step.reason,
+                "confidence": getattr(step, "confidence", None),
             }
             for step in plan.steps
         ]
@@ -919,7 +1287,7 @@ class Orchestrator:
     def _annotate_task_with_plan(
         self,
         task: dict[str, Any],
-        plan: PlannerExecutionPlan,
+    plan: PlannerPlan,
         selection: Sequence[BaseAgent],
         *,
         status: str = "planned",
@@ -931,6 +1299,7 @@ class Orchestrator:
                 "tools": step.tools,
                 "fallback_tools": step.fallback_tools,
                 "reason": step.reason,
+                "confidence": getattr(step, "confidence", None),
             }
             for step in plan.steps
         ]
@@ -1006,7 +1375,8 @@ class Orchestrator:
         if not isinstance(outputs, Sequence) or not outputs:
             return False, "no_outputs"
         if len(outputs) <= 1:
-            return False, "single_output"
+            if self._meta_agent is None:
+                return False, "single_output"
         planner_status = self._extract_planner_status(state)
         if planner_status and planner_status not in {"planned", "scheduled"}:
             return False, f"planner_status_{planner_status}"
@@ -1050,7 +1420,14 @@ class Orchestrator:
             metadata.setdefault("_shared_context", copy.deepcopy(shared_context))
         return metadata
 
-    def _record_output(self, state: dict[str, Any], *, agent: BaseAgent, result: AgentOutput | dict[str, Any]) -> dict[str, Any]:
+    def _record_output(
+        self,
+        state: dict[str, Any],
+        *,
+        agent: BaseAgent,
+        result: AgentOutput | dict[str, Any],
+        planner_step: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         if isinstance(result, AgentOutput):
             validated = validate_agent_response(agent.capability, result.model_dump())
         else:
@@ -1058,9 +1435,13 @@ class Orchestrator:
         output_dict = validated.model_dump()
         output_dict.setdefault("content", validated.summary)
         output_dict.setdefault("agent", agent.name)
+        metadata_section = output_dict.setdefault("metadata", {})
+        if planner_step is not None:
+            metadata_section.setdefault("planner_step", copy.deepcopy(dict(planner_step)))
         state.setdefault("outputs", []).append(output_dict)
         shared = state.setdefault("shared_context", {"provenance": []})
         provenance: list[dict[str, Any]] = shared.setdefault("provenance", [])
+        planner_step_entry = copy.deepcopy(dict(planner_step)) if planner_step is not None else None
         provenance.append(
             {
                 "agent": agent.name,
@@ -1068,6 +1449,7 @@ class Orchestrator:
                 "summary": output_dict.get("summary"),
                 "confidence": output_dict.get("confidence"),
                 "metadata": output_dict.get("metadata", {}),
+                "planner_step": planner_step_entry,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         )

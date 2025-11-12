@@ -4,6 +4,7 @@ import pytest
 
 from app.agents.base import AgentContext
 from app.orchestration.graph import Orchestrator, ToolFirstPolicyViolation
+from app.orchestration.llm_planner import PlannerPlan, PlannedAgentStep
 from app.schemas.agents import AgentCapability, AgentOutput
 from app.services.tools import ToolInvocationResult
 
@@ -43,6 +44,10 @@ class _StubAgent:
         self.capability = AgentCapability.RESEARCH
         self._use_tool = use_tool
         self._attach_metadata = attach_metadata
+        self.description = "Stub research agent"
+        self.tool_preference = ["research.search"] if use_tool else []
+        self.fallback_agent = None
+        self.confidence_bias = 0.6
 
     async def handle(self, task, *, context: AgentContext) -> AgentOutput:
         metadata: dict[str, object] = {}
@@ -63,9 +68,20 @@ class _StubAgent:
         )
 
 
+class _PlannerStub:
+    async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):  # noqa: D401
+        step = PlannedAgentStep(
+            agent=agents[0].name,
+            tools=["research.search"],
+            fallback_tools=[],
+            reason="tool policy test",
+        )
+        return PlannerPlan(steps=[step], raw_response="{}", metadata={})
+
+
 @pytest.mark.asyncio
 async def test_tool_first_policy_raises_for_missing_invocation() -> None:
-    orchestrator = Orchestrator(agents=[_StubAgent(use_tool=False)])
+    orchestrator = Orchestrator(agents=[_StubAgent(use_tool=False)], orchestration_planner=_PlannerStub())
     context = AgentContext(memory=_StubMemory(), llm=_StubLLM(), tools=_StubToolService())
     task = {"id": "policy-missing", "prompt": "Collect data"}
 
@@ -75,7 +91,7 @@ async def test_tool_first_policy_raises_for_missing_invocation() -> None:
 
 @pytest.mark.asyncio
 async def test_tool_first_policy_allows_when_tools_disabled() -> None:
-    orchestrator = Orchestrator(agents=[_StubAgent(use_tool=False)])
+    orchestrator = Orchestrator(agents=[_StubAgent(use_tool=False)], orchestration_planner=_PlannerStub())
     context = AgentContext(memory=_StubMemory(), llm=_StubLLM(), tools=None)
     task = {"id": "policy-disabled", "prompt": "Collect data"}
 
@@ -88,7 +104,7 @@ async def test_tool_first_policy_allows_when_tools_disabled() -> None:
 @pytest.mark.asyncio
 async def test_tool_first_policy_enriches_metadata() -> None:
     tool_service = _StubToolService()
-    orchestrator = Orchestrator(agents=[_StubAgent(use_tool=True)])
+    orchestrator = Orchestrator(agents=[_StubAgent(use_tool=True)], orchestration_planner=_PlannerStub())
     context = AgentContext(memory=_StubMemory(), llm=_StubLLM(), tools=tool_service)
     task = {"id": "policy-metadata", "prompt": "Collect data"}
 

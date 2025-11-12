@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import json
+import math
 import string
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from pydantic import BaseModel, Field, ValidationError
 
-from ..agents.base import BaseAgent
+from ..agents.base import BaseAgent, get_agent_schema
 from ..core.config import Settings
 from ..core.logging import get_logger
 from ..schemas.agents import AgentCapability
 from ..services.llm import LLMService
-from ..services.tools import DEFAULT_TOOL_ALIASES
+from ..tools.registry import tool_registry
 
 logger = get_logger(name=__name__)
 
@@ -21,17 +22,18 @@ class PlannerError(RuntimeError):
     """Raised when the orchestration planner cannot produce a valid plan."""
 
 
-class PlannerAgentSpec(BaseModel):
-    agent: str = Field(..., min_length=1, description="Agent identifier to execute.")
-    tools: list[str] = Field(default_factory=list, description="Ordered list of tool aliases to attempt.")
-    reason: str = Field(..., min_length=3, description="Rationale for selecting the agent.")
-    fallback_tools: list[str] = Field(default_factory=list, description="Fallback tool aliases if primary list fails.")
+class PlannerStepPayload(BaseModel):
+    agent: str = Field(..., min_length=1)
+    reason: str = Field(default="", description="Why this agent was selected.")
+    tools: list[str] = Field(default_factory=list)
+    fallback_tools: list[str] = Field(default_factory=list)
+    confidence: float = Field(default=1.0)
 
 
-class PlannerPlanModel(BaseModel):
-    agents: list[PlannerAgentSpec] = Field(default_factory=list, description="Ordered agent execution plan.")
-    handoff_strategy: str | None = Field(default="sequential", description="How agents exchange context.")
-    notes: str | None = Field(default=None, description="Additional planner comments.")
+class PlannerPlanPayload(BaseModel):
+    steps: list[PlannerStepPayload] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    confidence: float = Field(default=1.0)
 
 
 @dataclass(slots=True)
@@ -40,13 +42,15 @@ class PlannedAgentStep:
     tools: list[str] = field(default_factory=list)
     fallback_tools: list[str] = field(default_factory=list)
     reason: str = ""
+    confidence: float = 1.0
 
 
 @dataclass(slots=True)
-class PlannerExecutionPlan:
+class PlannerPlan:
     steps: list[PlannedAgentStep]
     raw_response: str
     metadata: dict[str, Any] = field(default_factory=dict)
+    confidence: float = 1.0
 
 
 class LLMOrchestrationPlanner:
@@ -70,7 +74,7 @@ class LLMOrchestrationPlanner:
         prior_outputs: Sequence[Mapping[str, Any]],
         agents: Sequence[BaseAgent],
         tool_aliases: Mapping[str, str] | None = None,
-    ) -> PlannerExecutionPlan:
+    ) -> PlannerPlan:
         original_prompt = str(task.get("prompt") or "")
         prompt = self._build_prompt(task=task, prior_outputs=prior_outputs, agents=agents, tool_aliases=tool_aliases)
         logger.debug("planner_prompt", prompt=prompt)
@@ -80,10 +84,10 @@ class LLMOrchestrationPlanner:
             temperature=self._temperature,
         )
         trimmed = response.strip()
+
         try:
             payload = self._parse_json(trimmed)
-            normalized_payload = self._normalize_plan_payload(payload)
-            plan_model = PlannerPlanModel.model_validate(normalized_payload)
+            plan_payload = self._parse_steps_payload(payload)
         except (PlannerError, ValidationError) as exc:
             logger.exception("planner_output_invalid", error=str(exc), response=trimmed)
             fallback_plan = self._build_fallback_plan(
@@ -95,13 +99,13 @@ class LLMOrchestrationPlanner:
                 return fallback_plan
             raise PlannerError("Planner produced invalid plan") from exc
 
-        raw_steps = [self._to_step(spec) for spec in plan_model.agents if spec.agent]
+        raw_steps = [self._to_step_payload(step) for step in plan_payload.steps if step.agent]
         if not raw_steps:
             logger.warning("planner_empty_plan", response=trimmed)
             fallback_plan = self._build_fallback_plan(
                 agents=agents,
                 raw_response=trimmed,
-                reason="Planner returned empty agent list",
+                reason="Planner returned empty step list",
             )
             if fallback_plan is not None:
                 return fallback_plan
@@ -116,23 +120,50 @@ class LLMOrchestrationPlanner:
             fallback_plan = self._build_fallback_plan(
                 agents=agents,
                 raw_response=trimmed,
-                reason="Planner post-processing removed all agents",
+                reason="Planner post-processing removed all steps",
             )
             if fallback_plan is not None:
                 return fallback_plan
 
-        metadata = {
-            "handoff_strategy": plan_model.handoff_strategy or "sequential",
-            "notes": plan_model.notes,
-        }
+        metadata = dict(plan_payload.metadata)
         if adjustments:
             metadata["post_processing"] = adjustments
-        return PlannerExecutionPlan(steps=steps, raw_response=trimmed, metadata=metadata)
 
-    def _to_step(self, spec: PlannerAgentSpec) -> PlannedAgentStep:
+        confidence = self._coerce_plan_confidence(
+            metadata.get("confidence", plan_payload.confidence)
+        )
+        metadata["confidence"] = confidence
+        metadata.setdefault("handoff_strategy", "sequential")
+        metadata.setdefault("schema_version", "v2")
+
+        logger.info(
+            "planner_plan_ready",
+            steps=len(steps),
+            confidence=confidence,
+            adjustments=bool(adjustments),
+        )
+        return PlannerPlan(steps=steps, raw_response=trimmed, metadata=metadata, confidence=confidence)
+
+    def _to_step_payload(self, spec: PlannerStepPayload) -> PlannedAgentStep:
         tools = [alias.strip() for alias in spec.tools if alias.strip()]
         fallback = [alias.strip() for alias in spec.fallback_tools if alias.strip()]
-        return PlannedAgentStep(agent=spec.agent.strip(), tools=tools, fallback_tools=fallback, reason=spec.reason.strip())
+        return PlannedAgentStep(
+            agent=spec.agent.strip(),
+            tools=tools,
+            fallback_tools=fallback,
+            reason=spec.reason.strip() or "Planner selected agent",
+            confidence=self._coerce_plan_confidence(spec.confidence),
+        )
+
+    @staticmethod
+    def _coerce_plan_confidence(raw_value: Any) -> float:
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(value):
+            return 1.0
+        return max(0.0, min(1.0, value))
 
     def _parse_json(self, text: str) -> dict[str, Any]:
         try:
@@ -157,98 +188,50 @@ class LLMOrchestrationPlanner:
         metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
         prior_summary = self._summarize_prior_outputs(prior_outputs)
         agent_catalog = self._summarize_agents(agents)
+        agent_metadata = self._summarize_agent_metadata(agents)
         alias_catalog = self._summarize_aliases(tool_aliases)
         meta_section = json.dumps(metadata, indent=2, sort_keys=True) if metadata else "{}"
         instructions = (
             "Respond with a single JSON object matching this structure (do not include any text before or after it):\n"
             "{\n"
-            "  \"agents\": [\n"
-            "    {\"agent\": \"general_agent\", \"tools\": [], \"fallback_tools\": [], \"reason\": \"triage request\"}\n"
+            "  \"steps\": [\n"
+            "    {\"agent\": \"general_agent\", \"reason\": \"triage request\", \"tools\": [], \"fallback_tools\": [], \"confidence\": 0.85}\n"
             "  ],\n"
-            "  \"handoff_strategy\": \"sequential\",\n"
-            "  \"notes\": \"short planner note\"\n"
+            "  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"short planner note\"},\n"
+            "  \"confidence\": 0.85\n"
             "}\n"
-            "Rules: Use only agents and tools listed. Specialist agents must include at least one tool. "
-            "general_agent may omit tools when it is only greeting or triaging; only assign tools it can reasonably invoke. "
-            "Limit to at most 4 agents total. When requests are broad or introductory, begin with general_agent before adding specialists. "
+            "Rules: Use only agents and tools listed. Respect the per-agent tool policy: finance_agent and research_agent must "
+            "include at least one tool when selected. enterprise_agent, creative_agent, and general_agent may omit tools when they "
+            "are only greeting, triaging, or when no tool would materially improve the answer. Only assign tools each agent can "
+            "reasonably invoke. Limit to at most 4 agents total. When requests are broad or introductory, begin with general_agent before adding specialists. "
             "If the prompt asks for financial performance, earnings, revenue, ratios, guidance, a ticker symbol, or contains finance-focused keywords (e.g., \"financial report\", \"earnings\", \"revenue\", \"profit\", \"loss\", \"forecast\", \"Netflix\", \"NFLX\"), include finance_agent with finance tools. "
             "If the task calls for external research, comparisons, citations, or fact-finding, include research_agent with research tools. "
             "If the user asks for storytelling, copywriting, slogans, creative briefs, or tone adjustments, include creative_agent with creative tools. "
             "If the user needs business strategy, GTM planning, operational guidance, or executive-ready recommendations, include enterprise_agent with enterprise tools. "
-            "Only add specialist agents when their domain expertise is clearly required. \"handoff_strategy\" must be a short string. "
-            "\"notes\" must be a concise string. Never return multiple JSON objects or extra commentary."
+            "Only add specialist agents when their domain expertise is clearly required. Do not output a legacy \"agents\" array — you must use the steps structure shown above. "
+            "\"metadata\" must be an object with short strings. Always include \"confidence\" as a float between 0.0 and 1.0 indicating how confident you are in the selected plan. "
+            "Never return multiple JSON objects or extra commentary."
         )
         sections = [
             "Task Prompt:\n" + (prompt or "(none)"),
             "Task Metadata (JSON):\n" + meta_section,
             "Available Agents:\n" + agent_catalog,
+            "Agent Metadata:\n" + agent_metadata,
             "Tool Aliases:\n" + alias_catalog,
             "Prior Outputs:\n" + prior_summary,
             "Planning Instructions:\n" + instructions,
         ]
         return "\n\n".join(sections)
 
-    def _normalize_plan_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        normalized = dict(payload)
-        handoff = normalized.get("handoff_strategy")
-        if handoff is not None and not isinstance(handoff, str):
-            normalized["handoff_strategy"] = self._stringify_field(handoff)
-
-        notes = normalized.get("notes")
-        if notes is not None and not isinstance(notes, str):
-            if isinstance(notes, Sequence) and not isinstance(notes, str):
-                joined = "; ".join(str(item).strip() for item in notes if str(item).strip())
-                normalized["notes"] = joined or self._stringify_field(notes)
-            else:
-                normalized["notes"] = self._stringify_field(notes)
-
-        agents = normalized.get("agents")
-        if isinstance(agents, Sequence):
-            normalized_agents: list[dict[str, Any]] = []
-            for spec in agents:
-                if isinstance(spec, Mapping):
-                    normalized_agents.append(self._normalize_agent_spec(spec))
-            normalized["agents"] = normalized_agents
-        else:
-            normalized["agents"] = []
-
-        return normalized
-
-    def _normalize_agent_spec(self, spec: Mapping[str, Any]) -> dict[str, Any]:
-        agent_dict = dict(spec)
-        agent_dict["agent"] = str(agent_dict.get("agent", "")).strip()
-        reason_value = agent_dict.get("reason", "")
-        agent_dict["reason"] = self._stringify_field(reason_value).strip()
-        agent_dict["tools"] = self._normalize_tool_list(agent_dict.get("tools"))
-        agent_dict["fallback_tools"] = self._normalize_tool_list(agent_dict.get("fallback_tools"))
-        return agent_dict
-
-    def _normalize_tool_list(self, value: Any) -> list[str]:
-        if isinstance(value, str):
-            candidates = [value]
-        elif isinstance(value, Sequence):
-            candidates = list(value)
-        else:
-            return []
-        normalized: list[str] = []
-        for item in candidates:
-            if not isinstance(item, str):
-                item = str(item)
-            cleaned = item.strip()
-            if cleaned:
-                normalized.append(cleaned)
-        return normalized
-
-    @staticmethod
-    def _stringify_field(value: Any) -> str:
-        if isinstance(value, str):
-            return value
-        if isinstance(value, Mapping) or isinstance(value, Sequence):
-            try:
-                return json.dumps(value, ensure_ascii=False)
-            except (TypeError, ValueError):
-                return str(value)
-        return str(value)
+    def _parse_steps_payload(self, payload: Mapping[str, Any]) -> PlannerPlanPayload:
+        if not isinstance(payload, Mapping):
+            raise PlannerError("Planner response must be a JSON object")
+        if "steps" not in payload:
+            raise PlannerError("Planner response did not include 'steps'")
+        try:
+            return PlannerPlanPayload.model_validate(payload)
+        except ValidationError as exc:
+            raise PlannerError("Planner response used an invalid steps schema") from exc
 
     def _summarize_prior_outputs(self, outputs: Sequence[Mapping[str, Any]]) -> str:
         if not outputs:
@@ -272,11 +255,29 @@ class LLMOrchestrationPlanner:
             lines.append(f"- {agent.name} (capability: {capability}) :: {description}")
         return "\n".join(lines)
 
+    def _summarize_agent_metadata(self, agents: Sequence[BaseAgent]) -> str:
+        schema = get_agent_schema(list(agents)) if agents else []
+        if not schema:
+            return "(no agent metadata)"
+        lines: list[str] = []
+        for entry in schema:
+            tools = entry.get("tools") or []
+            tool_summary = ", ".join(sorted({tool for tool in tools if tool})) or "none"
+            fallback = entry.get("fallback_agent") or "none"
+            confidence_bias = entry.get("confidence_bias")
+            bias_str = f"{float(confidence_bias):.2f}" if isinstance(confidence_bias, (int, float)) else "n/a"
+            description = str(entry.get("description") or "")
+            lines.append(
+                f"- {entry.get('name', 'agent')} :: {description} | tools: {tool_summary} | "
+                f"fallback: {fallback} | confidence_bias: {bias_str}"
+            )
+        return "\n".join(lines)
+
     def _summarize_aliases(self, aliases: Mapping[str, str] | None) -> str:
-        if not aliases:
-            resolved = DEFAULT_TOOL_ALIASES
-        else:
-            resolved = {**DEFAULT_TOOL_ALIASES, **dict(aliases)}
+        resolved = dict(tool_registry.aliases())
+        if aliases:
+            for key, value in aliases.items():
+                resolved[str(key)] = str(value)
         lines = [f"- {alias} -> {target}" for alias, target in sorted(resolved.items())]
         return "\n".join(lines) if lines else "(no tool aliases)"
 
@@ -311,6 +312,7 @@ class LLMOrchestrationPlanner:
                 tools=list(selected.tools),
                 fallback_tools=list(selected.fallback_tools),
                 reason=selected.reason,
+                confidence=selected.confidence,
             )
             return [clone], adjustments
 
@@ -321,6 +323,7 @@ class LLMOrchestrationPlanner:
                 tools=list(step.tools),
                 fallback_tools=list(step.fallback_tools),
                 reason=step.reason,
+                confidence=step.confidence,
             )
             for step in steps
         ]
@@ -382,6 +385,7 @@ class LLMOrchestrationPlanner:
                 tools=["finance.snapshot"],
                 fallback_tools=["finance.news"],
                 reason="financial report requested",
+                confidence=1.0,
             )
             updated_steps.append(finance_step)
             added_agents.append(finance_step.agent)
@@ -398,6 +402,7 @@ class LLMOrchestrationPlanner:
                 tools=["research.search", "research.summarizer"],
                 fallback_tools=["research.doc_loader"],
                 reason="research support requested",
+                confidence=1.0,
             )
             updated_steps.append(research_step)
             added_agents.append(research_step.agent)
@@ -414,6 +419,7 @@ class LLMOrchestrationPlanner:
                 tools=["creative.tonecheck"],
                 fallback_tools=["creative.image"],
                 reason="creative deliverable requested",
+                confidence=1.0,
             )
             updated_steps.append(creative_step)
             added_agents.append(creative_step.agent)
@@ -430,6 +436,7 @@ class LLMOrchestrationPlanner:
                 tools=["enterprise.playbook"],
                 fallback_tools=["enterprise.policy"],
                 reason="business strategy requested",
+                confidence=1.0,
             )
             updated_steps.append(enterprise_step)
             added_agents.append(enterprise_step.agent)
@@ -582,28 +589,46 @@ class LLMOrchestrationPlanner:
 
         enterprise_keywords = {
             "go-to-market",
+            "go to market",
             "gtm",
             "business plan",
             "strategy",
+            "strategic",
             "roadmap",
             "operations",
+            "operational",
             "executive",
             "board",
             "stakeholder",
             "market entry",
+            "org design",
+            "organizational",
             "pricing",
             "sales",
+            "change management",
+            "transformation",
         }
 
         return any(keyword in normalized for keyword in enterprise_keywords)
 
     def _allowed_tool_names(self, tool_aliases: Mapping[str, str] | None) -> set[str]:
-        combined = dict(DEFAULT_TOOL_ALIASES)
+        registry_aliases = dict(tool_registry.aliases())
+        combined: dict[str, str] = {str(key): str(value) for key, value in registry_aliases.items()}
         if tool_aliases:
             for key, value in tool_aliases.items():
                 combined[str(key)] = str(value)
-        allowed = set(combined.keys()) | set(combined.values())
-        allowed.update(alias.replace(".", "/") for alias in combined.keys())
+        allowed: set[str] = set()
+        for canonical in tool_registry.list():
+            allowed.add(canonical)
+            allowed.add(canonical.replace("/", "."))
+        for alias, target in combined.items():
+            allowed.add(alias)
+            if "." in alias:
+                allowed.add(alias.replace(".", "/"))
+            if "/" in alias:
+                allowed.add(alias.replace("/", "."))
+            allowed.add(target)
+            allowed.add(target.replace("/", "."))
         return allowed
 
     def _canonicalize_agent_tools(
@@ -655,7 +680,7 @@ class LLMOrchestrationPlanner:
         agents: Sequence[BaseAgent],
         raw_response: str,
         reason: str,
-    ) -> PlannerExecutionPlan | None:
+    ) -> PlannerPlan | None:
         fallback_agent = next((agent for agent in agents if agent.name == "general_agent"), None)
         if fallback_agent is None:
             fallback_agent = agents[0] if agents else None
@@ -667,15 +692,36 @@ class LLMOrchestrationPlanner:
             tools=[],
             fallback_tools=[],
             reason=reason if len(reason) >= 3 else "fallback triage",
+            confidence=0.5,
         )
         logger.warning(
             "planner_fallback_default",
             agent=fallback_agent.name,
             reason=reason,
+            confidence=0.0,
         )
         metadata = {
             "handoff_strategy": "sequential",
             "notes": "Fallback single-agent plan",
             "fallback_reason": reason,
+            "confidence": 0.0,
+            "schema_version": "v2",
         }
-        return PlannerExecutionPlan(steps=[fallback_step], raw_response=raw_response, metadata=metadata)
+        return PlannerPlan(
+            steps=[fallback_step],
+            raw_response=raw_response,
+            metadata=metadata,
+            confidence=0.0,
+        )
+
+    def _extract_confidence(self, payload: Mapping[str, Any] | None) -> float:
+        if not isinstance(payload, Mapping):
+            return 1.0
+        raw_value = payload.get("confidence", 1.0)
+        try:
+            value = float(raw_value)
+        except (TypeError, ValueError):
+            return 1.0
+        if not math.isfinite(value):
+            return 1.0
+        return max(0.0, min(1.0, value))

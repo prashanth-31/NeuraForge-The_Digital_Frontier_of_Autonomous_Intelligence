@@ -35,6 +35,24 @@ class AgentContext:
 class BaseAgent(Protocol):
     name: str
     capability: AgentCapability
+    system_prompt: str
+    description: str
+    tool_preference: list[str]
+    fallback_agent: str | None
+    confidence_bias: float
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         ...
+
+
+def get_agent_schema(agents: list[BaseAgent]) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": agent.name,
+            "description": agent.description,
+            "tools": list(agent.tool_preference),
+            "fallback_agent": agent.fallback_agent,
+            "confidence_bias": agent.confidence_bias,
+        }
+        for agent in agents
+    ]

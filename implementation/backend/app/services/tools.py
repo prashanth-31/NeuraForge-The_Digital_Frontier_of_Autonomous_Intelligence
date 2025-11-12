@@ -10,7 +10,7 @@ import contextvars
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Deque
+from typing import Any, AsyncIterator, Awaitable, Callable, Deque, Mapping
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
@@ -28,6 +28,7 @@ from app.services.enterprise_playbook import (
 )
 from app.services.mcp_client import CircuitOpenError, MCPClient, MCPClientConfig
 from app.services.tool_onboarding import all_planned_tools
+from app.tools.registry import tool_registry
 
 logger = get_logger(name=__name__)
 
@@ -76,7 +77,7 @@ DEFAULT_TOOL_ALIASES: dict[str, str] = {
     "research.doc_loader": "research/doc_loader",
     "research.qdrant": "research/qdrant",
     "research.summarizer": "research/summarizer",
-    "finance.snapshot": "finance/yfinance",
+    "finance.snapshot": "finance/alpha_vantage",
     "finance.analytics": "finance/pandas",
     "finance.plot": "finance/plot",
     "finance.news": "finance/coingecko_news",
@@ -160,7 +161,8 @@ class ToolService:
             max_calls=settings.rate_limit.max_calls,
             period_seconds=settings.rate_limit.period_seconds,
         )
-        self._aliases = {**DEFAULT_TOOL_ALIASES, **(settings.aliases or {})}
+        self._alias_mapping = {**DEFAULT_TOOL_ALIASES, **(settings.aliases or {})}
+        self._register_aliases(self._alias_mapping)
         self._catalog: dict[str, MCPToolDescriptor] = {}
         self._catalog_expiry: float = 0.0
         self._catalog_lock = asyncio.Lock()
@@ -192,6 +194,10 @@ class ToolService:
         self._last_invocation: dict[str, Any] | None = None
         self._last_catalog_refresh: float | None = None
         self._payload_string_limit = MAX_PAYLOAD_STRING_LENGTH
+
+    def _register_aliases(self, mapping: Mapping[str, str]) -> None:
+        for alias, target in mapping.items():
+            tool_registry.register_alias(alias, target)
 
     @asynccontextmanager
     async def instrument(
@@ -681,7 +687,7 @@ class ToolService:
             "enabled": self._settings.enabled,
             "endpoint": self._settings.endpoint,
             "catalog_size": len(self._catalog),
-            "aliases": self._aliases,
+            "aliases": tool_registry.aliases(),
             "last_health": {
                 "status": self._last_health_status,
                 "timestamp": self._iso_or_none(self._last_health_timestamp),
@@ -718,14 +724,16 @@ class ToolService:
         catalog_keys = set(self._catalog.keys())
         status: dict[str, list[dict[str, Any]]] = {}
         for planned in all_planned_tools():
-            resolved = self._aliases.get(planned.alias, planned.resolved)
-            catalog_key = self._resolve_tool_identifier(resolved)
+            alias_resolution = self._resolve_tool_identifier(planned.alias)
+            resolved = alias_resolution or self._resolve_tool_identifier(planned.resolved)
+            catalog_key = self._resolve_tool_identifier(planned.resolved)
+            alias_registered = tool_registry.get(planned.alias) is not None or alias_resolution is not None
             status.setdefault(planned.category, []).append(
                 {
                     "alias": planned.alias,
                     "resolved": resolved,
                     "expected_resolved": planned.resolved,
-                    "alias_registered": planned.alias in self._aliases,
+                    "alias_registered": alias_registered,
                     "catalog_present": catalog_key in catalog_keys,
                     "description": planned.description,
                 }
@@ -738,11 +746,27 @@ class ToolService:
         return f"{tool}:{serialized}"
 
     def _resolve_tool_identifier(self, tool: str) -> str:
+        adapter = tool_registry.get(tool)
+        if adapter is not None:
+            canonical_name = getattr(adapter, "name", None)
+            if isinstance(canonical_name, str) and canonical_name:
+                return canonical_name
+            return tool_registry.resolve(tool) or tool
+
+        alias_map = tool_registry.aliases()
         current = tool
         seen: set[str] = set()
-        while current in self._aliases and current not in seen:
+        while current in alias_map and current not in seen:
             seen.add(current)
-            current = self._aliases[current]
+            candidate = alias_map[current]
+            candidate_adapter = tool_registry.get(candidate)
+            if candidate_adapter is not None:
+                canonical_name = getattr(candidate_adapter, "name", None)
+                if isinstance(canonical_name, str) and canonical_name:
+                    return canonical_name
+                return tool_registry.resolve(candidate) or candidate
+            current = candidate
+
         if current.startswith("mcp://"):
             parsed = urlparse(current)
             segments = [parsed.netloc]

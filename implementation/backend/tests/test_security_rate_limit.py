@@ -154,7 +154,11 @@ def test_task_submission_rate_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     queue = ImmediateQueue()
 
     monkeypatch.setattr(routes_module.HybridMemoryService, "from_settings", lambda _: memory)
-    monkeypatch.setattr(routes_module.LLMService, "from_settings", lambda _: llm)
+    monkeypatch.setattr(
+        routes_module.LLMService,
+        "from_settings",
+        lambda settings, *, model=None, client=None: llm,
+    )
     monkeypatch.setattr(routes_module.EmbeddingService, "from_settings", lambda *_, **__: StubEmbeddingService())
 
     async def override_queue():

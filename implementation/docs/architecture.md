@@ -79,9 +79,9 @@ graph TD
 ## Planner-Led Orchestration
 - **Planner Entry Point**: `backend/app/orchestration/llm_planner.py` exports `LLMOrchestrationPlanner`, the sole orchestration selector invoked by `/submit_task` flows.
 - **Capability Catalog**: Agent descriptors and dependency graphs live in `backend/app/orchestration/capabilities.json`, and we load them into the planner prompt so the LLM reasons over consistent metadata.
-- **Plan Schema**: Planner outputs must conform to `PlannerPlanModel` (ordered agents, tool lists, rationale, handoff notes); validation failures raise `PlannerError` and surface a planner violation event back to the client stream.
+- **Plan Schema**: Planner outputs must conform to the steps-only `PlannerPlan` contract (ordered `PlannedAgentStep` entries with tools, fallback tools, per-step confidence, and planner metadata such as handoff strategy); validation failures raise `PlannerError` and surface a planner violation event back to the client stream. The planner fallback path now synthesizes a schema-v2 compliant single-step plan when validation fails—no legacy `"agents"` array is accepted.
 - **Execution Flow**: LangGraph executes each planned step sequentially, binding `AgentContext` with planner-specified tool aliases and persisting intermediate results between agents.
-- **Failure Handling**: Invalid planner output or plan enforcement errors emit a `planner_failed` stream event, stamp the task with `failure.type="planner_failed"`, and abort the run—there is no heuristic routing fallback.
+- **Failure Handling**: Invalid planner output or plan enforcement errors emit a `planner_failed` stream event, stamp the task with `failure.type="planner_failed"`, and either trigger the planner's schema-v2 fallback plan (single-step `general_agent`) or abort the run—there is no DynamicAgentRouter-based fallback.
 - **Operational Checklist**: When shipping a new agent or tool, update the capability catalog, refresh the planner prompt fixtures, and add regression tests under `backend/tests/test_orchestrator_simulation.py` to cover the new plan branch.
 ### Planner Enforcement & Telemetry
 - **Tool Contracts**: Planner-supplied primary/fallback tool lists are attached to each `AgentContext`, and `_ToolSession` verifies at least one of them succeeds before the agent can finish.
@@ -98,10 +98,10 @@ graph TD
 ### Tool-First Agent Loops
 - **Mandatory Tool Evidence**: Each agent must log at least one successful MCP tool invocation before returning an answer when tooling is enabled. The orchestrator enforces this policy and will fail the run with a `ToolFirstPolicyViolation` if an agent attempts to respond without validated tool output.
 - **Execution Wiring**: `Orchestrator` wraps the shared `ToolService` per agent invocation, records per-tool success/failure metrics, and propagates violation events to the task stream and state store for auditability.
-- **Local MCP Router**: `ToolService` talks to the in-process MCP router (`/mcp/tools/...`) so adapters run inside the FastAPI app; aliases such as `finance.snapshot` resolve to `finance/yfinance` and benefit from shared caching, retries, and circuit-breaker safeguards.
+- **Local MCP Router**: `ToolService` talks to the in-process MCP router (`/mcp/tools/...`) so adapters run inside the FastAPI app; aliases such as `finance.snapshot` resolve to `finance/alpha_vantage` and benefit from shared caching, retries, and circuit-breaker safeguards.
 - **Metadata Enrichment**: Agent outputs are automatically annotated with a `tools_used` list (alias, resolved identifier, cache status, latency) so downstream planners, reviewers, and telemetry dashboards can trace the provenance of every response.
 - **Failure Handling**: If a tool call errors, the orchestrator surfaces the failure details and aborts the run rather than allowing an LLM-only fallback, keeping the system aligned with the tool-first contract.
-- **Finance Snapshot Resilience**: The `finance/yfinance` adapter now falls back to on-demand historical bars when live quote APIs rate-limit, normalising metrics (price, change, volume, timestamps) before returning them to agents and ensuring follow-up analyses cite up-to-date figures.
+- **Finance Snapshot Resilience**: The new `finance/alpha_vantage` adapter pulls live quotes/fundamentals from Alpha Vantage with built-in throttling and caching, while the legacy Yahoo adapter remains available for fallback scenarios.
 
 ### Memory Strategy
 - **Working Memory (Redis)**: Recent conversation turns, agent state, cache entries for quick lookups.

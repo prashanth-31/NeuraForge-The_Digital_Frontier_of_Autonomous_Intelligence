@@ -29,7 +29,7 @@ Track progress with the checklists below.
 
 | Tool | Status | Checklist |
 | --- | --- | --- |
-| Yahoo Finance (`finance/yfinance`) | ☐ | Supply API credentials → Validate caching behavior → Update smoke test assertions. |
+| Alpha Vantage Snapshot (`finance/alpha_vantage`) | ☐ | Provision Alpha Vantage API key → Validate throttling/caching → Update smoke test assertions. |
 | Pandas Analytics (`finance/pandas`) | ☐ | Lock dependency versions → Limit dataframe size → Document accepted operations. |
 | Plotting (`finance/plot`) | ☐ | Define output MIME types (PNG/HTML) → Store artifacts in object storage → Add SSE telemetry for plot links. |
 | CoinGecko News (`finance/coingecko_news`) | ☐ | Configure OSS adapter (free API) → Map categories to agent intents → Provide fallback to cached news. |

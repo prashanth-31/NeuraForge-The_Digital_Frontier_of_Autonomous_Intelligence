@@ -1,13 +1,13 @@
 # LLM-Orchestrated Execution Plan
 
 ## Goal
-Enable the LLM to determine the complete orchestration plan (agents, order, and tool usage) using `llama3.2:1b` for planning while agents continue using `llama3.1:8b`.
+Enable the LLM to determine the complete orchestration plan (step ordering, per-agent tool usage, and rationale) using `llama3.2:1b` for planning while agents continue using `llama3.1:8b`.
 
 ---
 
 ## Status Snapshot (Oct 26, 2025)
 - ✅ Planner settings, prompt contract, and validation models are live (`LLMOrchestrationPlanner`).
-- ✅ Orchestrator now prefers planner output and falls back to legacy routing only on failure.
+- ✅ Orchestrator now prefers planner output and, on validation failure, uses the planner's schema-v2 fallback plan instead of the legacy router.
 - ✅ Planner metadata is stored on each task for downstream consumption.
 - ✅ Planner-directed tool usage is enforced with primary/fallback tracking.
 - ⏳ Observability pipeline (metrics/dossiers) still needs richer coverage.
@@ -23,7 +23,7 @@ Enable the LLM to determine the complete orchestration plan (agents, order, and 
 - [x] Enumerate available agents, capabilities, and tool aliases for planner prompt.
 
 ### 2. Design Planner Contract
-- [x] Define JSON schema for planner output (agents, tool list, reasoning, fallbacks).
+- [x] Define JSON schema for planner output (ordered steps with agent, tools, fallback tools, confidence, rationale).
 - [x] Draft planner prompt instructions covering capabilities, tool-first requirement, guardrails.
 - [x] Create Pydantic models to validate planner responses.
 
@@ -34,7 +34,7 @@ Enable the LLM to determine the complete orchestration plan (agents, order, and 
 
 ### 4. Integrate Planner
 - [x] Implement `LLMOrchestrationPlanner` in `app/orchestration/llm_planner.py`.
-- [x] Hook planner into `Orchestrator.route_task` ahead of legacy routing.
+- [x] Hook planner into `Orchestrator.route_task` as the primary path, with planner-driven fallback plans handling validation failures.
 - [x] Convert planner JSON into `PlannedAgentStep` sequence and annotate task state.
 - [ ] Purge remaining DynamicAgentRouter dependencies (API docs, unused wiring, tests) once enforcement is complete.
 
@@ -64,9 +64,9 @@ Enable the LLM to determine the complete orchestration plan (agents, order, and 
 ---
 
 ## Implementation Notes
-- Planner prompt describes available agents and tool aliases; constraints enforced (max 4 agents, at least one tool per agent).
-- Planner response includes explicit `agents` array with `agent`, `tools`, `reason`, optional `fallback_tools`.
+- Planner prompt describes available agents and tool aliases; constraints enforced (max 4 agents, at least one tool per applicable agent).
+- Planner response is a steps-only JSON object—`{"steps": [...] , "metadata": {...}, "confidence": 0.xx}`—that maps onto the `PlannerPlan` dataclass. Each `PlannedAgentStep` carries agent name, tools, fallback tools, reason, and step-level confidence.
 - Enforcement layer records planner-specified fallbacks (e.g., try `finance.snapshot`, then `finance.analytics`) and raises violations when neither primary nor fallback succeeds.
 - Keep existing tool-first policy but augment metrics for planned vs. achieved tool invocations.
 - Planner currently defaults to sequential handoff; revisit when parallelism or advanced strategies are needed.
-- Provide fallback to legacy routing if planner output is invalid or planner call fails (already implemented).
+- When the planner response cannot be parsed, `_build_fallback_plan()` now synthesizes a schema-v2 compliant single-step plan targeting `general_agent`, avoiding any legacy router code paths.

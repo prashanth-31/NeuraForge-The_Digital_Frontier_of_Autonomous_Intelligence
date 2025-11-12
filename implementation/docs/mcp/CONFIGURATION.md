@@ -23,7 +23,7 @@ This guide outlines how to configure Model Context Protocol (MCP) tools within N
 | `TOOLS__MCP__CATALOG_REFRESH_SECONDS` | TTL before the tool catalog is refreshed. |
 | `TOOLS__MCP__VERIFY_SSL` | Validate HTTPS certificates (`true` by default). |
 | `TOOLS__MCP__EXTRA_HEADERS__<HEADER>` | Additional headers to forward to the MCP router. |
-| `TOOLS__MCP__ALIASES__<ALIAS>` | Map logical alias to catalog identifier, e.g. `finance.snapshot=finance/yfinance`. |
+| `TOOLS__MCP__ALIASES__<ALIAS>` | Map logical alias to catalog identifier, e.g. `finance.snapshot=finance/alpha_vantage`. |
 | `TOOLS__MCP__MAX_RETRIES` | Maximum retry attempts for a single MCP request. |
 | `TOOLS__MCP__RETRY_BACKOFF_SECONDS` | Base backoff window applied between retries. |
 | `TOOLS__MCP__RETRY_JITTER_SECONDS` | Maximum jitter added to each retry backoff. |

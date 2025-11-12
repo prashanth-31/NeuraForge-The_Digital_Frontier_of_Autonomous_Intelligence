@@ -6,6 +6,19 @@ from typing import Any, Literal, Mapping
 from pydantic import BaseModel, Field, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+TOOL_ENFORCEMENT_POLICY: dict[str, bool] = {
+    "finance_agent": False,
+    "research_agent": False,
+    "enterprise_agent": False,
+    "creative_agent": False,
+    "general_agent": False,
+}
+
+TOOL_INVOCATION_TIMEOUT: float = 8.0
+TOOL_INVOCATION_RETRIES: int = 2
+TOOL_CIRCUIT_BREAK_FAILS: int = 5
+TOOL_CIRCUIT_BREAK_SECONDS: float = 30.0
+
 
 class RedisSettings(BaseModel):
     url: RedisDsn = Field(
@@ -180,6 +193,29 @@ class ToolRateLimitSettings(BaseModel):
     period_seconds: int = Field(60, ge=1, description="Rolling window for rate limiting.")
 
 
+class ToolRuntimeSettings(BaseModel):
+    invocation_timeout_seconds: float = Field(
+        TOOL_INVOCATION_TIMEOUT,
+        ge=0.1,
+        description="Default timeout applied to tool adapter invocations.",
+    )
+    invocation_retries: int = Field(
+        TOOL_INVOCATION_RETRIES,
+        ge=0,
+        description="Default retry attempts for tool adapter invocations.",
+    )
+    circuit_break_failures: int = Field(
+        TOOL_CIRCUIT_BREAK_FAILS,
+        ge=1,
+        description="Number of consecutive failures before the tool circuit opens.",
+    )
+    circuit_break_reset_seconds: float = Field(
+        TOOL_CIRCUIT_BREAK_SECONDS,
+        ge=0.0,
+        description="Cooldown duration before a tripped tool circuit resets.",
+    )
+
+
 class MCPToolSettings(BaseModel):
     endpoint: str = Field("http://localhost:6111", description="Base URL for the MCP router.")
     api_key: str | None = Field(default=None, description="Optional MCP authentication token.")
@@ -202,13 +238,21 @@ class MCPToolSettings(BaseModel):
     extra_headers: dict[str, str] = Field(default_factory=dict, description="Additional HTTP headers to include for MCP calls.")
     aliases: dict[str, str] = Field(
         default_factory=dict,
-        description="Optional mapping of logical tool aliases to MCP tool identifiers (e.g. 'finance.snapshot' -> 'finance/yfinance').",
+    description="Optional mapping of logical tool aliases to MCP tool identifiers (e.g. 'finance.snapshot' -> 'finance/alpha_vantage').",
     )
     max_retries: int = Field(2, ge=0, description="Maximum retry attempts for MCP HTTP requests.")
     retry_backoff_seconds: float = Field(0.5, ge=0.0, description="Initial backoff delay between retries.")
     retry_jitter_seconds: float = Field(0.25, ge=0.0, description="Maximum jitter added to retry backoff.")
-    circuit_breaker_threshold: int = Field(5, ge=1, description="Failures before the MCP circuit breaker opens.")
-    circuit_breaker_reset_seconds: float = Field(30.0, ge=1.0, description="Cool-down period before circuit closes.")
+    circuit_breaker_threshold: int = Field(
+        TOOL_CIRCUIT_BREAK_FAILS,
+        ge=1,
+        description="Failures before the MCP circuit breaker opens.",
+    )
+    circuit_breaker_reset_seconds: float = Field(
+        TOOL_CIRCUIT_BREAK_SECONDS,
+        ge=1.0,
+        description="Cool-down period before circuit closes.",
+    )
     signing_secret: str | None = Field(default=None, description="Optional secret used to sign requests (HMAC).")
     signing_header: str = Field("X-MCP-Signature", description="Header name used to send the request signature.")
     signing_algorithm: Literal["hmac-sha256"] = Field(
@@ -222,6 +266,7 @@ class MCPToolSettings(BaseModel):
 
 class ToolSettings(BaseModel):
     mcp: MCPToolSettings = Field(default_factory=MCPToolSettings)  # type: ignore[arg-type]
+    runtime: ToolRuntimeSettings = Field(default_factory=ToolRuntimeSettings)  # type: ignore[arg-type]
 
 
 class ScoringSettings(BaseModel):
@@ -261,6 +306,10 @@ class Settings(BaseSettings):
     frontend_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"],
         description="Origins permitted to access the API via CORS.",
+    )
+    frontend_origin_regex: str | None = Field(
+        default=None,
+        description="Optional CORS origin regex; when provided it augments explicit origins.",
     )
 
     model_config = SettingsConfigDict(

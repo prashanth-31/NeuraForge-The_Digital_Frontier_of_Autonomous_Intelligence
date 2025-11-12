@@ -6,6 +6,7 @@ import pytest
 
 from app.agents.base import AgentContext
 from app.orchestration.graph import Orchestrator
+from app.orchestration.llm_planner import PlannerPlan, PlannedAgentStep
 from app.orchestration.meta import MetaAgent
 from app.schemas.agents import AgentCapability, AgentOutput
 from app.core.config import Settings
@@ -32,10 +33,16 @@ class _DemoAgent:
         )
 
 
+class _PlannerStub:
+    async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):  # noqa: D401 - simple stub
+        step = PlannedAgentStep(agent=agents[0].name, tools=[], fallback_tools=[], reason="meta test")
+        return PlannerPlan(steps=[step], raw_response="{}", metadata={})
+
+
 @pytest.mark.asyncio
 async def test_orchestrator_produces_meta_resolution_and_dossier() -> None:
     settings = Settings(environment="test")
-    llm_service = LLMService(settings=settings, _client=_FakeLLMClient())
+    llm_service = LLMService(settings=settings, model="stub-model", _client=_FakeLLMClient())
     meta_agent = MetaAgent(
         llm_service=llm_service,
         settings=settings.meta_agent,
@@ -45,7 +52,11 @@ async def test_orchestrator_produces_meta_resolution_and_dossier() -> None:
         ),
         confidence_scorer=MetaConfidenceScorer(),
     )
-    orchestrator = Orchestrator(agents=[_DemoAgent()], meta_agent=meta_agent)
+    orchestrator = Orchestrator(
+        agents=[_DemoAgent()],
+        meta_agent=meta_agent,
+        orchestration_planner=_PlannerStub(),
+    )
 
     context = AgentContext(memory=None, llm=llm_service)
     task = {"id": "task-meta", "prompt": "Evaluate revenue trends"}

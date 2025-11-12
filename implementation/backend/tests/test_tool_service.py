@@ -111,11 +111,11 @@ async def test_invoke_wraps_http_errors(monkeypatch: pytest.MonkeyPatch, tool_se
 
 @pytest.mark.asyncio
 async def test_invoke_resolves_alias(monkeypatch: pytest.MonkeyPatch, tool_settings: MCPToolSettings) -> None:
-    tool_settings.aliases = {"finance.snapshot": "finance/yfinance"}
+    tool_settings.aliases = {"finance.snapshot": "finance/alpha_vantage"}
     service = ToolService(tool_settings)
 
     async def fake_dispatch(self: ToolService, resolved_tool: str, payload: dict) -> dict:
-        assert resolved_tool == "finance/yfinance"
+        assert resolved_tool == "finance/alpha_vantage"
         return {"metrics": []}
 
     monkeypatch.setattr(ToolService, "_dispatch", fake_dispatch, raising=False)
@@ -126,7 +126,7 @@ async def test_invoke_resolves_alias(monkeypatch: pytest.MonkeyPatch, tool_setti
     result = await service.invoke("finance.snapshot", {"symbol": "NEURA"})
 
     assert result.tool == "finance.snapshot"
-    assert result.resolved_tool == "finance/yfinance"
+    assert result.resolved_tool == "finance/alpha_vantage"
     await service.aclose()
 
 
@@ -159,8 +159,8 @@ async def test_tool_service_request_signer(tool_settings: MCPToolSettings) -> No
 async def test_tool_service_onboarding_status(tool_settings: MCPToolSettings) -> None:
     service = ToolService(tool_settings)
     service._catalog = {
-        "search/duckduckgo": MCPToolDescriptor(name="search/duckduckgo"),
-        "finance/yfinance": MCPToolDescriptor(name="finance/yfinance"),
+    "search/duckduckgo": MCPToolDescriptor(name="search/duckduckgo"),
+    "finance/alpha_vantage": MCPToolDescriptor(name="finance/alpha_vantage"),
         "creative/stylizer": MCPToolDescriptor(name="creative/stylizer"),
     }
     diagnostics = service.get_diagnostics()

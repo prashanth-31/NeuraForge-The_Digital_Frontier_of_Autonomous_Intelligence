@@ -47,7 +47,11 @@ def test_submit_task_stream_contract(monkeypatch):
     llm = StubLLMService()
 
     monkeypatch.setattr(routes_module.HybridMemoryService, "from_settings", lambda settings: memory)
-    monkeypatch.setattr(routes_module.LLMService, "from_settings", lambda settings: llm)
+    monkeypatch.setattr(
+        routes_module.LLMService,
+        "from_settings",
+        lambda settings, *, model=None, client=None: llm,
+    )
 
     async def _build_stub_pipeline(**kwargs):  # noqa: ANN003 - signature mirrors original helper
         return _StubOrchestrator(), None, None

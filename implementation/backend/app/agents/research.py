@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..agents.base import AgentContext
@@ -21,6 +21,10 @@ class ResearchAgent:
         "You are NeuraForge's Research Agent. Derive concise, well-sourced insights from the task "
         "description and prior agent outputs. Highlight 2-3 key findings and note missing context."
     )
+    description: str = "Finds factual, evidence-backed information and compiles concise briefings."
+    tool_preference: list[str] = field(default_factory=lambda: ["research.search", "research.summarizer"])
+    fallback_agent: str | None = "enterprise_agent"
+    confidence_bias: float = 0.9
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("research_agent_task", task=task.model_dump())

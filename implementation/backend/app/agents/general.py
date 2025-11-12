@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..agents.base import AgentContext
@@ -21,6 +21,10 @@ class GeneralistAgent:
         "You are NeuraForge's Generalist Agent. Offer clear, well-structured answers, collect clarifying"
         " details, and flag when specialist agents should assist. Keep outputs actionable and concise."
     )
+    description: str = "Handles greetings, casual queries, or triage before escalating as needed."
+    tool_preference: list[str] = field(default_factory=list)
+    fallback_agent: str | None = None
+    confidence_bias: float = 0.6
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("general_agent_task", task=task.model_dump())

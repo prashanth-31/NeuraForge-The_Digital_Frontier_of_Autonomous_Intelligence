@@ -34,6 +34,7 @@ class StubMemoryService:
 class StubLLMService:
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
+        self.plan_calls: list[dict[str, Any]] = []
 
     async def generate(
         self,
@@ -42,8 +43,49 @@ class StubLLMService:
         system_prompt: str | None = None,
         temperature: float | None = None,  # noqa: ARG002
     ) -> str:
-        response = f"stubbed-response-{len(self.calls) + 1}"
-        self.calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        if "Planning Instructions:" in prompt:
+            plan = {
+                "steps": [
+                    {
+                        "agent": "general_agent",
+                        "tools": [],
+                        "fallback_tools": [],
+                        "reason": "initial triage",
+                        "confidence": 0.9,
+                    },
+                    {
+                        "agent": "research_agent",
+                        "tools": ["research.search", "research.summarizer"],
+                        "fallback_tools": ["research.doc_loader"],
+                        "reason": "gather supporting insights",
+                        "confidence": 0.85,
+                    },
+                    {
+                        "agent": "finance_agent",
+                        "tools": ["finance.snapshot"],
+                        "fallback_tools": ["finance.news"],
+                        "reason": "cover financial considerations",
+                        "confidence": 0.82,
+                    },
+                    {
+                        "agent": "creative_agent",
+                        "tools": ["creative.tonecheck"],
+                        "fallback_tools": ["creative.image"],
+                        "reason": "shape messaging and narrative",
+                        "confidence": 0.8,
+                    },
+                ],
+                "metadata": {
+                    "handoff_strategy": "sequential",
+                    "notes": "Planner stub returning deterministic multi-agent plan",
+                },
+                "confidence": 0.84,
+            }
+            response = json.dumps(plan)
+            self.plan_calls.append({"prompt": prompt, "system_prompt": system_prompt})
+        else:
+            response = f"stubbed-response-{len(self.calls) + 1}"
+            self.calls.append({"prompt": prompt, "system_prompt": system_prompt})
         return response
 
 
@@ -56,14 +98,57 @@ class ImmediateQueue:
         await job()
 
 
+class StubToolInvocationResult:
+    def __init__(self, tool: str, payload: dict[str, Any]) -> None:
+        self.tool = tool
+        self.resolved_tool = tool
+        self.payload = payload
+        self.response = {"status": "ok", "tool": tool}
+        self.cached = False
+        self.latency = 0.0
+
+
+class StubToolService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+
+    async def invoke(self, tool: str, payload: dict[str, Any]) -> StubToolInvocationResult:
+        self.calls.append((tool, payload))
+        if self._callback is not None:
+            await self._callback({"tool": tool, "payload": payload})
+        return StubToolInvocationResult(tool, payload)
+
+    @asynccontextmanager
+    async def instrument(self, callback: Callable[[dict[str, Any]], Awaitable[None]]):
+        self._callback = callback
+        try:
+            yield self
+        finally:
+            self._callback = None
+
+    def get_diagnostics(self) -> dict[str, str]:
+        return {"status": "stubbed"}
+
+
 @pytest.fixture()
 def submit_client(monkeypatch: pytest.MonkeyPatch):
     memory = StubMemoryService()
     llm = StubLLMService()
     queue = ImmediateQueue()
+    tool_service = StubToolService()
 
     monkeypatch.setattr(routes_module.HybridMemoryService, "from_settings", lambda settings: memory)
-    monkeypatch.setattr(routes_module.LLMService, "from_settings", lambda settings: llm)
+    monkeypatch.setattr(
+        routes_module.LLMService,
+        "from_settings",
+        lambda settings, *, model=None, client=None: llm,
+    )
+
+    async def _mock_tool_service():
+        return tool_service
+
+    monkeypatch.setattr(routes_module, "get_tool_service", _mock_tool_service)
 
     async def override_queue():
         yield queue
@@ -114,12 +199,18 @@ def test_submit_task_executes_agents_and_persists_results(submit_client):
 def test_submit_task_records_failure_when_llm_unavailable(monkeypatch: pytest.MonkeyPatch):
     memory = StubMemoryService()
     queue = ImmediateQueue()
+    tool_service = StubToolService()
 
     monkeypatch.setattr(routes_module.HybridMemoryService, "from_settings", lambda settings: memory)
-    def _raise_llm(settings):  # noqa: ANN001, ARG001
+    def _raise_llm(settings, *, model=None, client=None):  # noqa: ANN001, ARG001
         raise RuntimeError("llm missing")
 
     monkeypatch.setattr(routes_module.LLMService, "from_settings", _raise_llm)
+
+    async def _mock_tool_service():
+        return tool_service
+
+    monkeypatch.setattr(routes_module, "get_tool_service", _mock_tool_service)
 
     async def override_queue():
         yield queue
@@ -152,9 +243,19 @@ def test_submit_task_records_failure_when_llm_unavailable(monkeypatch: pytest.Mo
 def test_submit_task_stream_emits_agent_events(monkeypatch: pytest.MonkeyPatch):
     memory = StubMemoryService()
     llm = StubLLMService()
+    tool_service = StubToolService()
 
     monkeypatch.setattr(routes_module.HybridMemoryService, "from_settings", lambda settings: memory)
-    monkeypatch.setattr(routes_module.LLMService, "from_settings", lambda settings: llm)
+    monkeypatch.setattr(
+        routes_module.LLMService,
+        "from_settings",
+        lambda settings, *, model=None, client=None: llm,
+    )
+
+    async def _mock_tool_service():
+        return tool_service
+
+    monkeypatch.setattr(routes_module, "get_tool_service", _mock_tool_service)
 
     client = TestClient(app)
     events: list[tuple[str, dict[str, Any]]] = []
@@ -187,7 +288,7 @@ def test_submit_task_stream_emits_agent_events(monkeypatch: pytest.MonkeyPatch):
     final_payload = completed_envelope["payload"]
     assert "report" in final_payload
     assert final_payload["report"].get("headline")
-    task_id = final_payload.get("task_id")
+    task_id = completed_envelope.get("task_id")
     assert isinstance(task_id, str) and task_id in memory.ephemeral
     stored_result = memory.ephemeral[task_id]["result"]
     assert "report" in stored_result
