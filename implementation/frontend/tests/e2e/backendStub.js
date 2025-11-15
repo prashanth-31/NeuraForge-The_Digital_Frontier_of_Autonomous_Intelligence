@@ -1,4 +1,3 @@
-/* eslint-disable no-console */
 import http from "node:http";
 
 const port = Number(process.env.E2E_STUB_PORT || 8000);

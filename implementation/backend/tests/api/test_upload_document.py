@@ -88,3 +88,23 @@ async def test_upload_document_persist(monkeypatch: pytest.MonkeyPatch) -> None:
     assert payload["memory_task_id"]
     assert memory_stub.ephemeral
     assert memory_stub.working
+
+
+@pytest.mark.asyncio
+async def test_upload_document_fallback_when_llm_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*args, **kwargs):  # noqa: ANN001, ARG001
+        raise RuntimeError("llm unavailable")
+
+    monkeypatch.setattr(routes_module.LLMService, "from_settings", classmethod(_raise))
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        response = await client.post(
+            "/api/v1/upload_document",
+            files={"document": ("fallback.txt", b"LLM offline, fallback engaged.", "text/plain")},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["output"].startswith("> _Automated fallback summary")
+    assert payload["persisted"] is False

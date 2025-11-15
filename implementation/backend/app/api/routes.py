@@ -125,6 +125,49 @@ def _build_document_prompt(parsed: DocumentParseResult, *, truncated_text: str, 
     return f"{header}\n\nDocument Content:\n{truncated_text}"
 
 
+def _fallback_document_analysis(
+    parsed: DocumentParseResult,
+    *,
+    truncated_text: str,
+    truncated: bool,
+    reason: str | None = None,
+) -> str:
+    metadata = parsed.metadata
+    filename = metadata.get("filename") or "document"
+    summary_lines = [
+        f"Document `{filename}` parsed successfully ({metadata.get('character_count')} characters across {metadata.get('line_count')} lines).",
+        "LLM analysis unavailable; returning deterministic heuristic summary.",
+    ]
+    if truncated:
+        summary_lines.append("Content truncated before analysis; rerun via Knowledge API for full coverage.")
+
+    snippets = [line.strip() for line in truncated_text.splitlines() if line.strip()]
+    key_points = snippets[:4] or ["No textual snippets available for preview."]
+
+    recommendations = [
+        "Re-run this upload once the LLM service is reachable for richer insights.",
+        "Share the preview with downstream agents if immediate action is required.",
+    ]
+    if truncated:
+        recommendations.append("Ingest the document through the long-form Knowledge ingestion pipeline to avoid truncation.")
+
+    notice = "> _Automated fallback summary generated without LLM service._"
+    if reason:
+        notice = f"{notice}\n> _Reason: {reason}_"
+
+    def _format_section(title: str, lines: list[str]) -> str:
+        body = "\n".join(f"- {line}" for line in lines)
+        return f"## {title}\n{body}"
+
+    sections = [
+        notice,
+        _format_section("Summary", summary_lines),
+        _format_section("Key Points", key_points),
+        _format_section("Recommended Actions", recommendations),
+    ]
+    return "\n\n".join(sections)
+
+
 def _build_failure_result(
     base_state: Mapping[str, Any],
     *,
@@ -686,18 +729,29 @@ async def upload_document(
     except DocumentParseError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    llm_service: LLMService | None = None
+    llm_error: str | None = None
     try:
         llm_service = LLMService.from_settings(settings)
     except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM service unavailable") from exc
+        llm_error = str(exc)
+        logger.warning("document_llm_unavailable", error=llm_error)
 
     truncated_text, truncated = _prepare_document_excerpt(parsed.text, limit=MAX_ANALYSIS_CHARS)
-    prompt = _build_document_prompt(parsed, truncated_text=truncated_text, truncated=truncated)
-    analysis = await llm_service.generate(
-        prompt=prompt,
-        system_prompt=DOCUMENT_ANALYSIS_SYSTEM_PROMPT,
-        temperature=0.15,
-    )
+    if llm_service is not None:
+        prompt = _build_document_prompt(parsed, truncated_text=truncated_text, truncated=truncated)
+        analysis = await llm_service.generate(
+            prompt=prompt,
+            system_prompt=DOCUMENT_ANALYSIS_SYSTEM_PROMPT,
+            temperature=0.15,
+        )
+    else:
+        analysis = _fallback_document_analysis(
+            parsed,
+            truncated_text=truncated_text,
+            truncated=truncated,
+            reason=llm_error,
+        )
 
     persisted = False
     memory_task_id: str | None = None
