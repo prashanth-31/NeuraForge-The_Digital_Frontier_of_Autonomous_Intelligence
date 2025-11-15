@@ -4,6 +4,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from dataclasses import dataclass
 import inspect
 import json
+from time import perf_counter
 from typing import Any, AsyncIterator, Iterable, Literal, Sequence, TypeVar
 
 try:
@@ -28,6 +29,8 @@ from ..core.metrics import (
     increment_cache_miss,
     increment_memory_ingest,
     increment_retrieval_results,
+    observe_memory_store_latency,
+    set_memory_service_health,
 )
 from ..utils.asyncpg_helpers import ensure_pool_ready
 from ..utils.json_encoding import decode_jsonb, encode_jsonb
@@ -89,9 +92,19 @@ class RedisRepository:
     async def store_working_memory(self, key: str, value: str, ttl: int | None = None) -> None:
         client = self._client
         if client is None:
+            set_memory_service_health(store="redis", healthy=False)
             return
-        await client.set(self._key(key), value, ex=ttl or self._default_ttl)
-        increment_memory_ingest(store="redis", operation="set")
+        start = perf_counter()
+        try:
+            await client.set(self._key(key), value, ex=ttl or self._default_ttl)
+            increment_memory_ingest(store="redis", operation="set")
+            set_memory_service_health(store="redis", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("redis_operation_failed", operation="set", key=key, error=str(exc))
+            set_memory_service_health(store="redis", healthy=False)
+            return
+        finally:
+            observe_memory_store_latency(store="redis", operation="set", latency=perf_counter() - start)
 
     async def store_working_batch(self, items: Sequence[tuple[str, str]], ttl: int | None = None) -> None:
         if not self.enabled or not items:
@@ -106,12 +119,30 @@ class RedisRepository:
         cache_payload = record.payload.copy()
         if record.agent is not None:
             cache_payload.setdefault("agent", record.agent)
-        await client.set(
-            self._key(f"episode:{record.task_id}"),
-            json.dumps(cache_payload),
-            ex=ttl or self._default_ttl,
-        )
-        increment_memory_ingest(store="redis", operation="episode_cache")
+        start = perf_counter()
+        try:
+            await client.set(
+                self._key(f"episode:{record.task_id}"),
+                json.dumps(cache_payload),
+                ex=ttl or self._default_ttl,
+            )
+            increment_memory_ingest(store="redis", operation="episode_cache")
+            set_memory_service_health(store="redis", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning(
+                "redis_operation_failed",
+                operation="episode_cache",
+                task_id=record.task_id,
+                error=str(exc),
+            )
+            set_memory_service_health(store="redis", healthy=False)
+            return
+        finally:
+            observe_memory_store_latency(
+                store="redis",
+                operation="episode_cache",
+                latency=perf_counter() - start,
+            )
 
     async def cache_episode_batch(self, records: Sequence[EpisodeRecord], *, ttl: int | None = None) -> None:
         if not self.enabled or not records:
@@ -123,7 +154,17 @@ class RedisRepository:
         client = self._client
         if client is None:
             return None
-        value = await client.get(self._key(f"episode:{task_id}"))
+        start = perf_counter()
+        try:
+            value = await client.get(self._key(f"episode:{task_id}"))
+            set_memory_service_health(store="redis", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("redis_operation_failed", operation="get", task_id=task_id, error=str(exc))
+            increment_cache_miss(layer="redis")
+            set_memory_service_health(store="redis", healthy=False)
+            return None
+        finally:
+            observe_memory_store_latency(store="redis", operation="get", latency=perf_counter() - start)
         if value is None:
             increment_cache_miss(layer="redis")
             return None
@@ -141,8 +182,17 @@ class RedisRepository:
         client = self._client
         if client is None:
             return
-        await client.delete(self._key(f"episode:{task_id}"))
-        increment_memory_ingest(store="redis", operation="invalidate")
+        start = perf_counter()
+        try:
+            await client.delete(self._key(f"episode:{task_id}"))
+            increment_memory_ingest(store="redis", operation="invalidate")
+            set_memory_service_health(store="redis", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("redis_operation_failed", operation="delete", task_id=task_id, error=str(exc))
+            set_memory_service_health(store="redis", healthy=False)
+            return
+        finally:
+            observe_memory_store_latency(store="redis", operation="delete", latency=perf_counter() - start)
 
     async def close(self) -> None:
         client = self._client
@@ -218,35 +268,64 @@ class PostgresRepository:
     async def upsert_episode(self, record: EpisodeRecord) -> None:
         pool = await self._ensure_pool()
         if pool is None:
+            set_memory_service_health(store="postgres", healthy=False)
             return
-        async with pool.acquire() as connection:
-            agent = record.agent or record.payload.get("agent")
-            payload = encode_jsonb(record.payload)
-            await connection.execute(self._UPSERT_EPISODE, record.task_id, agent, payload)
-        increment_memory_ingest(store="postgres", operation="upsert")
+        start = perf_counter()
+        try:
+            async with pool.acquire() as connection:
+                agent = record.agent or record.payload.get("agent")
+                payload = encode_jsonb(record.payload)
+                await connection.execute(self._UPSERT_EPISODE, record.task_id, agent, payload)
+            increment_memory_ingest(store="postgres", operation="upsert")
+            set_memory_service_health(store="postgres", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("postgres_operation_failed", operation="upsert", task_id=record.task_id, error=str(exc))
+            set_memory_service_health(store="postgres", healthy=False)
+            return
+        finally:
+            observe_memory_store_latency(
+                store="postgres",
+                operation="upsert",
+                latency=perf_counter() - start,
+            )
 
     async def upsert_batch(self, records: Sequence[EpisodeRecord]) -> None:
         pool = await self._ensure_pool()
         if pool is None or not records:
+            if pool is None:
+                set_memory_service_health(store="postgres", healthy=False)
             return
-        async with pool.acquire() as connection:
-            args = [
-                (
-                    rec.task_id,
-                    rec.agent or rec.payload.get("agent"),
-                    encode_jsonb(rec.payload),
-                )
-                for rec in records
-            ]
-            executemany = getattr(connection, "executemany", None)
-            if callable(executemany):
-                result = executemany(self._UPSERT_EPISODE, args)
-                if inspect.isawaitable(result):
-                    await result
-            else:
-                for record_args in args:
-                    await connection.execute(self._UPSERT_EPISODE, *record_args)
-        increment_memory_ingest(store="postgres", operation="bulk_upsert")
+        start = perf_counter()
+        try:
+            async with pool.acquire() as connection:
+                args = [
+                    (
+                        rec.task_id,
+                        rec.agent or rec.payload.get("agent"),
+                        encode_jsonb(rec.payload),
+                    )
+                    for rec in records
+                ]
+                executemany = getattr(connection, "executemany", None)
+                if callable(executemany):
+                    result = executemany(self._UPSERT_EPISODE, args)
+                    if inspect.isawaitable(result):
+                        await result
+                else:
+                    for record_args in args:
+                        await connection.execute(self._UPSERT_EPISODE, *record_args)
+            increment_memory_ingest(store="postgres", operation="bulk_upsert")
+            set_memory_service_health(store="postgres", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("postgres_operation_failed", operation="bulk_upsert", error=str(exc))
+            set_memory_service_health(store="postgres", healthy=False)
+            return
+        finally:
+            observe_memory_store_latency(
+                store="postgres",
+                operation="bulk_upsert",
+                latency=perf_counter() - start,
+            )
 
     def _normalize_row(self, row: Any) -> EpisodeRecord:
         payload_raw = decode_jsonb(row["payload"])
@@ -262,20 +341,49 @@ class PostgresRepository:
     async def fetch_episode(self, task_id: str) -> EpisodeRecord | None:
         pool = await self._ensure_pool()
         if pool is None:
+            set_memory_service_health(store="postgres", healthy=False)
             return None
-        async with pool.acquire() as connection:
-            record = await connection.fetchrow(self._FETCH_EPISODE, task_id)
-            if record is None:
-                return None
-            return self._normalize_row(record)
+        start = perf_counter()
+        try:
+            async with pool.acquire() as connection:
+                record = await connection.fetchrow(self._FETCH_EPISODE, task_id)
+                if record is None:
+                    set_memory_service_health(store="postgres", healthy=True)
+                    return None
+                set_memory_service_health(store="postgres", healthy=True)
+                return self._normalize_row(record)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("postgres_operation_failed", operation="fetch", task_id=task_id, error=str(exc))
+            set_memory_service_health(store="postgres", healthy=False)
+            return None
+        finally:
+            observe_memory_store_latency(
+                store="postgres",
+                operation="fetch",
+                latency=perf_counter() - start,
+            )
 
     async def fetch_recent(self, *, agent: str | None = None, limit: int = 5) -> list[EpisodeRecord]:
         pool = await self._ensure_pool()
         if pool is None:
+            set_memory_service_health(store="postgres", healthy=False)
             return []
-        async with pool.acquire() as connection:
-            rows = await connection.fetch(self._FETCH_RECENT, agent, limit)
-        return [self._normalize_row(row) for row in rows]
+        start = perf_counter()
+        try:
+            async with pool.acquire() as connection:
+                rows = await connection.fetch(self._FETCH_RECENT, agent, limit)
+            set_memory_service_health(store="postgres", healthy=True)
+            return [self._normalize_row(row) for row in rows]
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("postgres_operation_failed", operation="fetch_recent", error=str(exc))
+            set_memory_service_health(store="postgres", healthy=False)
+            return []
+        finally:
+            observe_memory_store_latency(
+                store="postgres",
+                operation="fetch_recent",
+                latency=perf_counter() - start,
+            )
 
     async def close(self) -> None:
         pool = self._pool or self._pool_or_factory
@@ -300,53 +408,94 @@ class QdrantRepository:
         client = self._client
         if client is None:
             return
-        await client.upsert(
-            collection_name=vector.payload.get("collection")
-            or vector.payload.get("collection_name")
-            or self._collection_name,
-            wait=True,
-            points=[
-                {
-                    "id": vector.payload.get("id"),
-                    "vector": vector.vector,
-                    "payload": vector.payload,
-                    "score": vector.score,
-                }
-            ],
-        )
+        start = perf_counter()
+        try:
+            await client.upsert(
+                collection_name=vector.payload.get("collection")
+                or vector.payload.get("collection_name")
+                or self._collection_name,
+                wait=True,
+                points=[
+                    {
+                        "id": vector.payload.get("id"),
+                        "vector": vector.vector,
+                        "payload": vector.payload,
+                        "score": vector.score,
+                    }
+                ],
+            )
+            increment_memory_ingest(store="qdrant", operation="upsert")
+            set_memory_service_health(store="qdrant", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("qdrant_operation_failed", operation="upsert", error=str(exc))
+            set_memory_service_health(store="qdrant", healthy=False)
+            return
+        finally:
+            observe_memory_store_latency(
+                store="qdrant",
+                operation="upsert",
+                latency=perf_counter() - start,
+            )
 
     async def upsert_batch(self, vectors: Sequence[SemanticVector]) -> None:
         client = self._client
         if client is None or not vectors:
             return
-        collection_name = self._collection_name
-        points = [
-            {
-                "id": vec.payload.get("id"),
-                "vector": vec.vector,
-                "payload": vec.payload,
-                "score": vec.score,
-            }
-            for vec in vectors
-        ]
-        await client.upsert(collection_name=collection_name, wait=True, points=points)
+        start = perf_counter()
+        try:
+            collection_name = self._collection_name
+            points = [
+                {
+                    "id": vec.payload.get("id"),
+                    "vector": vec.vector,
+                    "payload": vec.payload,
+                    "score": vec.score,
+                }
+                for vec in vectors
+            ]
+            await client.upsert(collection_name=collection_name, wait=True, points=points)
+            increment_memory_ingest(store="qdrant", operation="bulk_upsert")
+            set_memory_service_health(store="qdrant", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("qdrant_operation_failed", operation="bulk_upsert", error=str(exc))
+            set_memory_service_health(store="qdrant", healthy=False)
+            return
+        finally:
+            observe_memory_store_latency(
+                store="qdrant",
+                operation="bulk_upsert",
+                latency=perf_counter() - start,
+            )
 
     async def search(self, *, query_vector: list[float], limit: int = 5) -> list[dict[str, Any]]:
         client = self._client
         if client is None:
             return []
-        response = await client.search(
-            collection_name=self._collection_name,
-            query_vector=query_vector,
-            limit=limit,
-        )
-        results: list[dict[str, Any]] = []
-        for hit in response:
-            payload = dict(getattr(hit, "payload", {}) or {})
-            if "_score" not in payload:
-                payload["_score"] = getattr(hit, "score", None)
-            results.append(payload)
-        return results
+        start = perf_counter()
+        try:
+            response = await client.search(
+                collection_name=self._collection_name,
+                query_vector=query_vector,
+                limit=limit,
+            )
+            results: list[dict[str, Any]] = []
+            for hit in response:
+                payload = dict(getattr(hit, "payload", {}) or {})
+                if "_score" not in payload:
+                    payload["_score"] = getattr(hit, "score", None)
+                results.append(payload)
+            set_memory_service_health(store="qdrant", healthy=True)
+            return results
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("qdrant_operation_failed", operation="search", error=str(exc))
+            set_memory_service_health(store="qdrant", healthy=False)
+            return []
+        finally:
+            observe_memory_store_latency(
+                store="qdrant",
+                operation="search",
+                latency=perf_counter() - start,
+            )
 
     async def close(self) -> None:
         client = self._client
@@ -416,9 +565,13 @@ class HybridMemoryService:
 
         qdrant_client = None
         if AsyncQdrantClient is not None:
+            api_key = settings.qdrant.api_key or None
             qdrant_client = AsyncQdrantClient(
                 url=settings.qdrant.url,
-                api_key=settings.qdrant.api_key,
+                api_key=api_key,
+                prefer_grpc=False,
+                timeout=5.0,
+                check_compatibility=False,
             )
         memory_settings = getattr(settings, "memory", None)
         config = MemoryServiceConfig(
@@ -445,11 +598,18 @@ class HybridMemoryService:
     @asynccontextmanager
     async def lifecycle(self) -> AsyncIterator["HybridMemoryService"]:
         try:
+            set_memory_service_health(store="redis", healthy=self._redis_repo is not None)
             if inspect.isawaitable(self._pg_pool):
-                resolved_pool = await self._pg_pool
+                try:
+                    resolved_pool = await self._pg_pool
+                except Exception as exc:  # pragma: no cover - connectivity guard
+                    logger.warning("memory_pg_pool_unavailable", error=str(exc))
+                    resolved_pool = None
                 self._pg_pool = resolved_pool
             if self._postgres_repo is None and self._pg_pool is not None:
                 self._postgres_repo = PostgresRepository(self._pg_pool)
+            set_memory_service_health(store="postgres", healthy=self._postgres_repo is not None)
+            set_memory_service_health(store="qdrant", healthy=self._qdrant_repo is not None)
             yield self
         finally:
             await self.close()

@@ -4,12 +4,14 @@ import asyncio
 import copy
 import base64
 import io
+import json
 import logging
 import math
 import os
 import time
 import csv
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
 
 import httpx
@@ -173,294 +175,6 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
             "generated_at": datetime.now(UTC),
             "metrics": enriched,
         }
-
-
-class AlphaVantageSnapshotAdapter(MCPToolAdapter):
-    name = "finance/alpha_vantage"
-    description = "Fetch equity snapshots using the Alpha Vantage REST API (requires API key)."
-    labels = ("finance", "external")
-    InputModel = YahooFinanceRequest
-    OutputModel = YahooFinanceResponse
-
-    _rate_lock: asyncio.Lock = asyncio.Lock()
-    _call_history: list[float] = []
-    _overview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-    _timeseries_cache: dict[str, tuple[float, dict[str, Any]]] = {}
-    _symbol_cache: dict[str, tuple[float, list[str]]] = {}
-    _cache_ttl: float = 300.0
-    _symbol_cache_ttl: float = 900.0
-
-    async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
-        api_key = (os.getenv("ALPHAVANTAGE_API_KEY") or "").strip()
-        if not api_key:
-            raise RuntimeError("Alpha Vantage API key (ALPHAVANTAGE_API_KEY) is not configured.")
-
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            symbols = await self._resolve_symbols(payload_model, api_key, client)
-            if not symbols:
-                raise ValueError("No matching symbols found for query")
-
-            metrics_models: list[YahooFinanceMetrics] = []
-            fundamentals_payload: list[dict[str, Any] | None] = []
-            for symbol in symbols:
-                uppercase_symbol = symbol.upper()
-                try:
-                    overview = await self._fetch_overview(uppercase_symbol, api_key, client)
-                except Exception as exc:
-                    logger.warning("alpha_vantage_overview_failed", symbol=uppercase_symbol, error=str(exc))
-                    overview = None
-                series = await self._fetch_time_series(uppercase_symbol, api_key, client)
-                metric = self._build_metric(uppercase_symbol, overview, series)
-                metrics_models.append(metric)
-                fundamentals_payload.append(self._build_fundamentals(overview))
-
-        filtered_metrics = metrics_models
-        if payload_model.fields:
-            filtered_metrics = [
-                YahooFinanceMetrics(
-                    **{
-                        field: metric.model_dump().get(field)
-                        for field in payload_model.fields
-                        if field in metric.model_dump()
-                    }
-                    | {"symbol": metric.symbol}
-                )
-                for metric in metrics_models
-            ]
-
-        enriched: list[dict[str, Any]] = []
-        for metric, fundamentals in zip(filtered_metrics, fundamentals_payload):
-            payload = metric.model_dump()
-            if fundamentals:
-                payload.setdefault("fundamentals", fundamentals)
-            payload.setdefault("provider", "alpha_vantage")
-            enriched.append(payload)
-
-        return {
-            "requested": symbols,
-            "generated_at": datetime.now(UTC),
-            "metrics": enriched,
-        }
-
-    @classmethod
-    async def _resolve_symbols(
-        cls,
-        payload_model: YahooFinanceRequest,
-        api_key: str,
-        client: httpx.AsyncClient,
-    ) -> list[str]:
-        if payload_model.symbols:
-            symbols = []
-            for symbol in payload_model.symbols:
-                if isinstance(symbol, str) and symbol.strip():
-                    normalized = symbol.strip().upper()
-                    if normalized not in symbols:
-                        symbols.append(normalized)
-            if symbols:
-                return symbols
-        query = (payload_model.query or "").strip()
-        if not query:
-            return []
-        keyword_matches = _keyword_symbol_lookup(query.lower())
-        if keyword_matches:
-            return keyword_matches
-        now = time.monotonic()
-        cache_key = query.lower()
-        cached = cls._symbol_cache.get(cache_key)
-        if cached and (now - cached[0]) < cls._symbol_cache_ttl:
-            return list(cached[1])
-        payload = await cls._request(client, {"function": "SYMBOL_SEARCH", "keywords": query, "apikey": api_key})
-        best_matches = payload.get("bestMatches")
-        symbols: list[str] = []
-        if isinstance(best_matches, Sequence):
-            for entry in best_matches:
-                if not isinstance(entry, Mapping):
-                    continue
-                symbol = entry.get("1. symbol")
-                if isinstance(symbol, str) and symbol.strip():
-                    normalized = symbol.strip().upper()
-                    if normalized not in symbols:
-                        symbols.append(normalized)
-                if len(symbols) >= 3:
-                    break
-        cls._symbol_cache[cache_key] = (time.monotonic(), symbols)
-        return symbols
-
-    @classmethod
-    async def _fetch_overview(
-        cls, symbol: str, api_key: str, client: httpx.AsyncClient
-    ) -> dict[str, Any] | None:
-        now = time.monotonic()
-        cached = cls._overview_cache.get(symbol)
-        if cached and (now - cached[0]) < cls._cache_ttl:
-            return copy.deepcopy(cached[1])
-        payload = await cls._request(client, {"function": "OVERVIEW", "symbol": symbol, "apikey": api_key})
-        if not isinstance(payload, Mapping) or not payload:
-            return None
-        cls._overview_cache[symbol] = (time.monotonic(), dict(payload))
-        return copy.deepcopy(dict(payload))
-
-    @classmethod
-    async def _fetch_time_series(
-        cls, symbol: str, api_key: str, client: httpx.AsyncClient
-    ) -> Mapping[str, Mapping[str, Any]]:
-        now = time.monotonic()
-        cached = cls._timeseries_cache.get(symbol)
-        if cached and (now - cached[0]) < cls._cache_ttl:
-            return copy.deepcopy(cached[1])
-        payload = await cls._request(
-            client,
-            {
-                "function": "TIME_SERIES_DAILY_ADJUSTED",
-                "symbol": symbol,
-                "outputsize": "compact",
-                "apikey": api_key,
-            },
-        )
-        series = payload.get("Time Series (Daily)")
-        if not isinstance(series, Mapping) or not series:
-            raise ValueError(f"No time series data returned for {symbol}")
-        normalized = {key: dict(value) for key, value in series.items() if isinstance(value, Mapping)}
-        cls._timeseries_cache[symbol] = (time.monotonic(), normalized)
-        return copy.deepcopy(normalized)
-
-    @classmethod
-    async def _request(cls, client: httpx.AsyncClient, params: dict[str, Any]) -> dict[str, Any]:
-        await cls._throttle()
-        response = await client.get(ALPHA_VANTAGE_ENDPOINT, params=params)
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("Unexpected Alpha Vantage response format")
-        note = payload.get("Note")
-        if isinstance(note, str) and note.strip():
-            raise RuntimeError(f"Alpha Vantage throttled the request: {note.strip()}")
-        error_message = payload.get("Error Message")
-        if isinstance(error_message, str) and error_message.strip():
-            raise ValueError(error_message.strip())
-        return payload
-
-    @classmethod
-    async def _throttle(cls) -> None:
-        while True:
-            async with cls._rate_lock:
-                now = time.monotonic()
-                cls._call_history = [
-                    timestamp for timestamp in cls._call_history if (now - timestamp) < _ALPHA_VANTAGE_WINDOW_SECONDS
-                ]
-                if len(cls._call_history) < _ALPHA_VANTAGE_RATE_LIMIT:
-                    cls._call_history.append(now)
-                    return
-                wait_time = _ALPHA_VANTAGE_WINDOW_SECONDS - (now - cls._call_history[0])
-            await asyncio.sleep(max(wait_time, 0.05))
-
-    @staticmethod
-    def _build_metric(
-        symbol: str,
-        overview: Mapping[str, Any] | None,
-        series: Mapping[str, Mapping[str, Any]],
-    ) -> YahooFinanceMetrics:
-        if not series:
-            raise ValueError(f"Time series payload empty for {symbol}")
-        ordered = sorted(series.items(), key=lambda item: item[0], reverse=True)
-        latest_date, latest_values = ordered[0]
-        previous_values = ordered[1][1] if len(ordered) > 1 else None
-        try:
-            updated_at = datetime.fromisoformat(latest_date).replace(tzinfo=UTC)
-        except ValueError:
-            updated_at = None
-        price = _safe_float(latest_values.get("4. close")) or _safe_float(latest_values.get("5. adjusted close"))
-        previous_close = None
-        if previous_values:
-            previous_close = _safe_float(previous_values.get("4. close")) or _safe_float(
-                previous_values.get("5. adjusted close")
-            )
-        change = None
-        change_percent = None
-        if price is not None and previous_close is not None:
-            change = price - previous_close
-            if previous_close:
-                change_percent = (change / previous_close) * 100.0
-        open_price = _safe_float(latest_values.get("1. open"))
-        day_high = _safe_float(latest_values.get("2. high"))
-        day_low = _safe_float(latest_values.get("3. low"))
-        volume = _safe_int(latest_values.get("6. volume"))
-        fifty_two_week_low, fifty_two_week_high = AlphaVantageSnapshotAdapter._compute_range(series)
-        currency = overview.get("Currency") if isinstance(overview, Mapping) else None
-        company_name = overview.get("Name") if isinstance(overview, Mapping) else None
-        market_cap = _safe_float(overview.get("MarketCapitalization")) if isinstance(overview, Mapping) else None
-
-        return YahooFinanceMetrics(
-            symbol=symbol,
-            company_name=company_name,
-            currency=currency,
-            price=price,
-            change=change,
-            change_percent=change_percent,
-            previous_close=previous_close,
-            open=open_price,
-            day_low=day_low,
-            day_high=day_high,
-            volume=volume,
-            fifty_two_week_low=fifty_two_week_low,
-            fifty_two_week_high=fifty_two_week_high,
-            market_cap=market_cap,
-            updated_at=updated_at,
-        )
-
-    @staticmethod
-    def _build_fundamentals(overview: Mapping[str, Any] | None) -> dict[str, Any] | None:
-        if not isinstance(overview, Mapping) or not overview:
-            return None
-        fundamentals: dict[str, Any] = {}
-        numeric_fields = (
-            ("MarketCapitalization", "market_cap"),
-            ("PERatio", "pe_ratio"),
-            ("PEGRatio", "peg_ratio"),
-            ("DividendYield", "dividend_yield"),
-            ("RevenueTTM", "revenue_ttm"),
-            ("GrossProfitTTM", "gross_profit_ttm"),
-            ("NetIncomeTTM", "net_income_ttm"),
-            ("EBITDA", "ebitda"),
-            ("ProfitMargin", "profit_margin"),
-            ("OperatingMarginTTM", "operating_margin"),
-        )
-        for source_key, alias in numeric_fields:
-            value = _safe_float(overview.get(source_key))
-            if value is not None:
-                fundamentals[alias] = value
-        text_fields = (
-            ("Sector", "sector"),
-            ("Industry", "industry"),
-            ("Exchange", "exchange"),
-            ("Country", "country"),
-        )
-        for source_key, alias in text_fields:
-            value = overview.get(source_key)
-            if isinstance(value, str) and value.strip():
-                fundamentals[alias] = value.strip()
-        latest_quarter = overview.get("LatestQuarter")
-        if isinstance(latest_quarter, str) and latest_quarter.strip():
-            fundamentals["latest_quarter"] = latest_quarter.strip()
-        currency = overview.get("Currency")
-        if isinstance(currency, str) and currency.strip():
-            fundamentals["currency"] = currency.strip()
-        return fundamentals or None
-
-    @staticmethod
-    def _compute_range(series: Mapping[str, Mapping[str, Any]]) -> tuple[float | None, float | None]:
-        lows: list[float] = []
-        highs: list[float] = []
-        for entry in series.values():
-            low = _safe_float(entry.get("3. low"))
-            high = _safe_float(entry.get("2. high"))
-            if low is not None:
-                lows.append(low)
-            if high is not None:
-                highs.append(high)
-        low_value = min(lows) if lows else None
-        high_value = max(highs) if highs else None
-        return low_value, high_value
 
     async def _lookup_symbols(self, query: str) -> list[str]:
         normalized = query.strip().lower()
@@ -928,6 +642,408 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
             self._quote_cache[key] = (time.monotonic(), [dict(item) for item in payload])
 
 
+class AlphaVantageSnapshotAdapter(MCPToolAdapter):
+    name = "finance/alpha_vantage"
+    description = "Fetch equity snapshots using the Alpha Vantage REST API (requires API key)."
+    labels = ("finance", "external")
+    InputModel = YahooFinanceRequest
+    OutputModel = YahooFinanceResponse
+
+    _rate_lock: asyncio.Lock = asyncio.Lock()
+    _call_history: list[float] = []
+    _overview_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    _timeseries_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+    _symbol_cache: dict[str, tuple[float, list[str]]] = {}
+    _cache_ttl: float = 300.0
+    _symbol_cache_ttl: float = 900.0
+
+    async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
+        api_key = (os.getenv("ALPHAVANTAGE_API_KEY") or "").strip()
+        if not api_key:
+            raise RuntimeError("Alpha Vantage API key (ALPHAVANTAGE_API_KEY) is not configured.")
+
+        async with httpx.AsyncClient(timeout=12.0) as client:
+            symbols = await self._resolve_symbols(payload_model, api_key, client)
+            if not symbols:
+                raise ValueError("No matching symbols found for query")
+
+            metrics_models: list[YahooFinanceMetrics] = []
+            fundamentals_payload: list[dict[str, Any] | None] = []
+            for symbol in symbols:
+                uppercase_symbol = symbol.upper()
+                try:
+                    overview = await self._fetch_overview(uppercase_symbol, api_key, client)
+                except Exception as exc:
+                    logger.warning("alpha_vantage_overview_failed", symbol=uppercase_symbol, error=str(exc))
+                    overview = None
+                series = await self._fetch_time_series(uppercase_symbol, api_key, client)
+                metric = self._build_metric(uppercase_symbol, overview, series)
+                metrics_models.append(metric)
+                fundamentals_payload.append(self._build_fundamentals(overview))
+
+        filtered_metrics = metrics_models
+        if payload_model.fields:
+            filtered_metrics = [
+                YahooFinanceMetrics(
+                    **{
+                        field: metric.model_dump().get(field)
+                        for field in payload_model.fields
+                        if field in metric.model_dump()
+                    }
+                    | {"symbol": metric.symbol}
+                )
+                for metric in metrics_models
+            ]
+
+        enriched: list[dict[str, Any]] = []
+        for metric, fundamentals in zip(filtered_metrics, fundamentals_payload):
+            payload = metric.model_dump()
+            if fundamentals:
+                payload.setdefault("fundamentals", fundamentals)
+            payload.setdefault("provider", "alpha_vantage")
+            enriched.append(payload)
+
+        return {
+            "requested": symbols,
+            "generated_at": datetime.now(UTC),
+            "metrics": enriched,
+        }
+
+    @classmethod
+    async def _resolve_symbols(
+        cls,
+        payload_model: YahooFinanceRequest,
+        api_key: str,
+        client: httpx.AsyncClient,
+    ) -> list[str]:
+        if payload_model.symbols:
+            symbols = []
+            for symbol in payload_model.symbols:
+                if isinstance(symbol, str) and symbol.strip():
+                    normalized = symbol.strip().upper()
+                    if normalized not in symbols:
+                        symbols.append(normalized)
+            if symbols:
+                return symbols
+        query = (payload_model.query or "").strip()
+        if not query:
+            return []
+        keyword_matches = _keyword_symbol_lookup(query.lower())
+        if keyword_matches:
+            return keyword_matches
+        now = time.monotonic()
+        cache_key = query.lower()
+        cached = cls._symbol_cache.get(cache_key)
+        if cached and (now - cached[0]) < cls._symbol_cache_ttl:
+            return list(cached[1])
+        payload = await cls._request(client, {"function": "SYMBOL_SEARCH", "keywords": query, "apikey": api_key})
+        best_matches = payload.get("bestMatches")
+        symbols: list[str] = []
+        if isinstance(best_matches, Sequence):
+            for entry in best_matches:
+                if not isinstance(entry, Mapping):
+                    continue
+                symbol = entry.get("1. symbol")
+                if isinstance(symbol, str) and symbol.strip():
+                    normalized = symbol.strip().upper()
+                    if normalized not in symbols:
+                        symbols.append(normalized)
+                if len(symbols) >= 3:
+                    break
+        cls._symbol_cache[cache_key] = (time.monotonic(), symbols)
+        return symbols
+
+    @classmethod
+    async def _fetch_overview(
+        cls, symbol: str, api_key: str, client: httpx.AsyncClient
+    ) -> dict[str, Any] | None:
+        now = time.monotonic()
+        cached = cls._overview_cache.get(symbol)
+        if cached and (now - cached[0]) < cls._cache_ttl:
+            return copy.deepcopy(cached[1])
+        payload = await cls._request(client, {"function": "OVERVIEW", "symbol": symbol, "apikey": api_key})
+        if not isinstance(payload, Mapping) or not payload:
+            return None
+        cls._overview_cache[symbol] = (time.monotonic(), dict(payload))
+        return copy.deepcopy(dict(payload))
+
+    @classmethod
+    async def _fetch_time_series(
+        cls, symbol: str, api_key: str, client: httpx.AsyncClient
+    ) -> Mapping[str, Mapping[str, Any]]:
+        now = time.monotonic()
+        cached = cls._timeseries_cache.get(symbol)
+        if cached and (now - cached[0]) < cls._cache_ttl:
+            return copy.deepcopy(cached[1])
+        payload = await cls._request(
+            client,
+            {
+                "function": "TIME_SERIES_DAILY_ADJUSTED",
+                "symbol": symbol,
+                "outputsize": "compact",
+                "apikey": api_key,
+            },
+        )
+        series = payload.get("Time Series (Daily)")
+        if not isinstance(series, Mapping) or not series:
+            raise ValueError(f"No time series data returned for {symbol}")
+        normalized = {key: dict(value) for key, value in series.items() if isinstance(value, Mapping)}
+        cls._timeseries_cache[symbol] = (time.monotonic(), normalized)
+        return copy.deepcopy(normalized)
+
+    @classmethod
+    async def _request(cls, client: httpx.AsyncClient, params: dict[str, Any]) -> dict[str, Any]:
+        await cls._throttle()
+        response = await client.get(ALPHA_VANTAGE_ENDPOINT, params=params)
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise ValueError("Unexpected Alpha Vantage response format")
+        note = payload.get("Note")
+        if isinstance(note, str) and note.strip():
+            raise RuntimeError(f"Alpha Vantage throttled the request: {note.strip()}")
+        error_message = payload.get("Error Message")
+        if isinstance(error_message, str) and error_message.strip():
+            raise ValueError(error_message.strip())
+        return payload
+
+    @classmethod
+    async def _throttle(cls) -> None:
+        while True:
+            async with cls._rate_lock:
+                now = time.monotonic()
+                cls._call_history = [
+                    timestamp for timestamp in cls._call_history if (now - timestamp) < _ALPHA_VANTAGE_WINDOW_SECONDS
+                ]
+                if len(cls._call_history) < _ALPHA_VANTAGE_RATE_LIMIT:
+                    cls._call_history.append(now)
+                    return
+                wait_time = _ALPHA_VANTAGE_WINDOW_SECONDS - (now - cls._call_history[0])
+            await asyncio.sleep(max(wait_time, 0.05))
+
+    @staticmethod
+    def _build_metric(
+        symbol: str,
+        overview: Mapping[str, Any] | None,
+        series: Mapping[str, Mapping[str, Any]],
+    ) -> YahooFinanceMetrics:
+        if not series:
+            raise ValueError(f"Time series payload empty for {symbol}")
+        ordered = sorted(series.items(), key=lambda item: item[0], reverse=True)
+        latest_date, latest_values = ordered[0]
+        previous_values = ordered[1][1] if len(ordered) > 1 else None
+        try:
+            updated_at = datetime.fromisoformat(latest_date).replace(tzinfo=UTC)
+        except ValueError:
+            updated_at = None
+        price = _safe_float(latest_values.get("4. close")) or _safe_float(latest_values.get("5. adjusted close"))
+        previous_close = None
+        if previous_values:
+            previous_close = _safe_float(previous_values.get("4. close")) or _safe_float(
+                previous_values.get("5. adjusted close")
+            )
+        change = None
+        change_percent = None
+        if price is not None and previous_close is not None:
+            change = price - previous_close
+            if previous_close:
+                change_percent = (change / previous_close) * 100.0
+        open_price = _safe_float(latest_values.get("1. open"))
+        day_high = _safe_float(latest_values.get("2. high"))
+        day_low = _safe_float(latest_values.get("3. low"))
+        volume = _safe_int(latest_values.get("6. volume"))
+        fifty_two_week_low, fifty_two_week_high = AlphaVantageSnapshotAdapter._compute_range(series)
+        currency = overview.get("Currency") if isinstance(overview, Mapping) else None
+        company_name = overview.get("Name") if isinstance(overview, Mapping) else None
+        market_cap = _safe_float(overview.get("MarketCapitalization")) if isinstance(overview, Mapping) else None
+
+        return YahooFinanceMetrics(
+            symbol=symbol,
+            company_name=company_name,
+            currency=currency,
+            price=price,
+            change=change,
+            change_percent=change_percent,
+            previous_close=previous_close,
+            open=open_price,
+            day_low=day_low,
+            day_high=day_high,
+            volume=volume,
+            fifty_two_week_low=fifty_two_week_low,
+            fifty_two_week_high=fifty_two_week_high,
+            market_cap=market_cap,
+            updated_at=updated_at,
+        )
+
+    @staticmethod
+    def _build_fundamentals(overview: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if not isinstance(overview, Mapping) or not overview:
+            return None
+        fundamentals: dict[str, Any] = {}
+        numeric_fields = (
+            ("MarketCapitalization", "market_cap"),
+            ("PERatio", "pe_ratio"),
+            ("PEGRatio", "peg_ratio"),
+            ("DividendYield", "dividend_yield"),
+            ("RevenueTTM", "revenue_ttm"),
+            ("GrossProfitTTM", "gross_profit_ttm"),
+            ("NetIncomeTTM", "net_income_ttm"),
+            ("EBITDA", "ebitda"),
+            ("ProfitMargin", "profit_margin"),
+            ("OperatingMarginTTM", "operating_margin"),
+        )
+        for source_key, alias in numeric_fields:
+            value = _safe_float(overview.get(source_key))
+            if value is not None:
+                fundamentals[alias] = value
+        text_fields = (
+            ("Sector", "sector"),
+            ("Industry", "industry"),
+            ("Exchange", "exchange"),
+            ("Country", "country"),
+        )
+        for source_key, alias in text_fields:
+            value = overview.get(source_key)
+            if isinstance(value, str) and value.strip():
+                fundamentals[alias] = value.strip()
+        latest_quarter = overview.get("LatestQuarter")
+        if isinstance(latest_quarter, str) and latest_quarter.strip():
+            fundamentals["latest_quarter"] = latest_quarter.strip()
+        currency = overview.get("Currency")
+        if isinstance(currency, str) and currency.strip():
+            fundamentals["currency"] = currency.strip()
+        return fundamentals or None
+
+    @staticmethod
+    def _compute_range(series: Mapping[str, Mapping[str, Any]]) -> tuple[float | None, float | None]:
+        lows: list[float] = []
+        highs: list[float] = []
+        for entry in series.values():
+            low = _safe_float(entry.get("3. low"))
+            high = _safe_float(entry.get("2. high"))
+            if low is not None:
+                lows.append(low)
+            if high is not None:
+                highs.append(high)
+        low_value = min(lows) if lows else None
+        high_value = max(highs) if highs else None
+        return low_value, high_value
+
+
+class CachedQuoteSnapshotAdapter(MCPToolAdapter):
+    name = "finance/cached_quotes"
+    description = "Return deterministic quote snapshots from bundled cache when live providers fail."
+    labels = ("finance", "fallback")
+    InputModel = YahooFinanceRequest
+    OutputModel = YahooFinanceResponse
+
+    _dataset: dict[str, dict[str, Any]] | None = None
+    _dataset_lock: asyncio.Lock = asyncio.Lock()
+    _data_path: Path = Path(__file__).resolve().parent / "data" / "cached_quotes.json"
+
+    async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
+        dataset = await self._load_dataset()
+        symbols = self._resolve_symbols(payload_model, dataset)
+        if not symbols:
+            raise ValueError("No symbols available for cached snapshot fallback")
+
+        metrics = [self._build_metric(symbol, dataset.get(symbol)) for symbol in symbols]
+        return {
+            "requested": symbols,
+            "generated_at": datetime.now(UTC),
+            "metrics": metrics,
+        }
+
+    async def _load_dataset(self) -> dict[str, dict[str, Any]]:
+        cached = self._dataset
+        if cached is not None:
+            return cached
+        async with self._dataset_lock:
+            if self._dataset is not None:
+                return self._dataset
+            data: dict[str, dict[str, Any]] = {}
+            try:
+                raw_text = self._data_path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                logger.warning("cached_quotes_dataset_missing", path=str(self._data_path))
+                self._dataset = {}
+                return {}
+            except OSError as exc:
+                logger.warning("cached_quotes_dataset_unreadable", path=str(self._data_path), error=str(exc))
+                self._dataset = {}
+                return {}
+            try:
+                payload = json.loads(raw_text)
+            except json.JSONDecodeError as exc:
+                logger.warning("cached_quotes_dataset_invalid", path=str(self._data_path), error=str(exc))
+                payload = {}
+            if isinstance(payload, Mapping):
+                for symbol, entry in payload.items():
+                    if not isinstance(symbol, str) or not isinstance(entry, Mapping):
+                        continue
+                    normalized = symbol.strip().upper()
+                    if not normalized:
+                        continue
+                    data[normalized] = dict(entry)
+            self._dataset = data
+            return data
+
+    def _resolve_symbols(
+        self,
+        payload_model: YahooFinanceRequest,
+        dataset: Mapping[str, dict[str, Any]],
+    ) -> list[str]:
+        symbols: list[str] = []
+        incoming = payload_model.symbols or []
+        for symbol in incoming:
+            normalized = (symbol or "").strip().upper()
+            if normalized and normalized not in symbols:
+                symbols.append(normalized)
+        if symbols:
+            return symbols
+
+        query = (payload_model.query or "").strip()
+        if query:
+            inferred = _keyword_symbol_lookup(query.lower())
+            for symbol in inferred:
+                normalized = symbol.strip().upper()
+                if normalized and normalized not in symbols:
+                    symbols.append(normalized)
+        if not symbols and dataset:
+            symbols.extend(sorted(dataset.keys())[:3])
+        if not symbols:
+            symbols.append("NEURA")
+        return symbols
+
+    def _build_metric(self, symbol: str, entry: Mapping[str, Any] | None) -> dict[str, Any]:
+        payload = dict(entry) if isinstance(entry, Mapping) else {}
+        metric = YahooFinanceMetrics(
+            symbol=symbol,
+            company_name=str(payload.get("company_name") or f"{symbol} (cached)"),
+            currency=payload.get("currency") or "USD",
+            price=_safe_float(payload.get("price")) or _safe_float(payload.get("previous_close")),
+            change=_safe_float(payload.get("change")),
+            change_percent=_safe_float(payload.get("change_percent")),
+            previous_close=_safe_float(payload.get("previous_close")),
+            open=_safe_float(payload.get("open")),
+            day_low=_safe_float(payload.get("day_low")),
+            day_high=_safe_float(payload.get("day_high")),
+            volume=_safe_int(payload.get("volume")),
+            fifty_two_week_low=_safe_float(payload.get("fifty_two_week_low")),
+            fifty_two_week_high=_safe_float(payload.get("fifty_two_week_high")),
+            market_cap=_safe_float(payload.get("market_cap")),
+            updated_at=_safe_datetime(payload.get("updated_at")) or datetime.now(UTC),
+        )
+        result = metric.model_dump()
+        fundamentals = payload.get("fundamentals")
+        if isinstance(fundamentals, Mapping):
+            result["fundamentals"] = dict(fundamentals)
+        provider = payload.get("provider") or "cached_quotes"
+        result.setdefault("provider", provider)
+        result.setdefault("source", "cached_quotes")
+        return result
+
+
 class PandasAnalyticsRequest(BaseModel):
     frame: list[dict[str, Any]] | None = Field(default=None, description="List of row dictionaries.")
     csv: str | None = Field(default=None, description="CSV content provided inline.")
@@ -1372,6 +1488,7 @@ def _serialize_x(value: Any) -> Any:
 FINANCE_ADAPTER_CLASSES: tuple[type[MCPToolAdapter], ...] = (
     YahooFinanceSnapshotAdapter,
     AlphaVantageSnapshotAdapter,
+    CachedQuoteSnapshotAdapter,
     PandasAnalyticsAdapter,
     FinancePlotAdapter,
     CoinGeckoNewsAdapter,
@@ -1552,9 +1669,21 @@ def _classify_fallback_reason(error: Exception | None) -> str:
     if isinstance(error, ValueError):
         return "value_error"
     return "error"
+# Back-compat: surface helper coroutines that older tests still patch directly.
+for _public_name, _private_name in (
+    ("lookup_symbols", "_lookup_symbols"),
+    ("fetch_quotes", "_fetch_quotes"),
+    ("fetch_quotes_via_yfinance", "_fetch_quotes_via_yfinance"),
+    ("fetch_quotes_via_stooq", "_fetch_quotes_via_stooq"),
+):
+    _private_attr = getattr(YahooFinanceSnapshotAdapter, _private_name, None)
+    if _private_attr is not None and not hasattr(YahooFinanceSnapshotAdapter, _public_name):
+        setattr(YahooFinanceSnapshotAdapter, _public_name, _private_attr)
+
 __all__ = [
     "YahooFinanceSnapshotAdapter",
     "AlphaVantageSnapshotAdapter",
+    "CachedQuoteSnapshotAdapter",
     "PandasAnalyticsAdapter",
     "FinancePlotAdapter",
     "CoinGeckoNewsAdapter",

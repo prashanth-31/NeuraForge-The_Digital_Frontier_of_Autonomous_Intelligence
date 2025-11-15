@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -27,6 +28,19 @@ class FinanceAgent:
     )
     description: str = "Performs financial analysis, forecasting, and headline metric synthesis."
     tool_preference: list[str] = field(default_factory=lambda: ["finance.snapshot"])
+    tool_candidates: tuple[str, ...] = (
+        "finance.snapshot",
+        "finance.snapshot.alpha",
+        "finance.snapshot.cached",
+    )
+    tool_retry_config: dict[str, tuple[int, float]] = field(
+        default_factory=lambda: {
+            "finance.snapshot": (3, 0.75),
+            "finance.snapshot.alpha": (2, 1.0),
+            "finance.snapshot.cached": (1, 0.0),
+            "finance.news": (1, 0.0),
+        }
+    )
     fallback_agent: str | None = "enterprise_agent"
     confidence_bias: float = 0.9
 
@@ -36,7 +50,7 @@ class FinanceAgent:
         if context_section is None and context.context is not None:
             bundle = await context.context.build(task=_serialize_agent_input(task), agent=self.name)
             context_section = bundle.as_prompt_section()
-        tool_result = await self._maybe_invoke_tool(task, context=context)
+        tool_result, tool_trace = await self._maybe_invoke_tool(task, context=context)
         prompt = self._build_prompt(task, context_section=context_section, tool_result=tool_result)
         forecast = await context.llm.generate(prompt=prompt, system_prompt=self.system_prompt, temperature=0.2)
 
@@ -63,8 +77,16 @@ class FinanceAgent:
         metadata: dict[str, Any] = {"type": "financial_forecast"}
         if tool_result is not None:
             metadata["tool"] = self._tool_metadata(tool_result)
+        if tool_trace:
+            metadata["tool_attempts"] = tool_trace
+            metadata["tool_fallback_used"] = any(
+                attempt.get("status") != "success" for attempt in tool_trace[:-1]
+            )
         if confidence_breakdown is not None:
             metadata["confidence_breakdown"] = confidence_breakdown
+        override_payload = self._tool_policy_override(tool_result=tool_result, tool_trace=tool_trace, tools=context.tools)
+        if override_payload is not None:
+            metadata["tool_policy_override"] = override_payload
 
         return AgentOutput(
             agent=self.name,
@@ -100,18 +122,117 @@ class FinanceAgent:
             "Estimate revenue or cost implications, surface 2-3 headline metrics, and outline immediate actions."
         )
 
-    async def _maybe_invoke_tool(self, task: AgentInput, *, context: AgentContext) -> ToolInvocationResult | None:
+    async def _maybe_invoke_tool(
+        self,
+        task: AgentInput,
+        *,
+        context: AgentContext,
+    ) -> tuple[ToolInvocationResult | None, list[dict[str, Any]]]:
+        attempts: list[dict[str, Any]] = []
         if context.tools is None:
-            return None
+            return None, attempts
+
         payload = self._build_snapshot_payload(task)
-        if payload is None:
-            logger.debug("finance_snapshot_payload_skipped", task_id=task.task_id)
+        news_payload = self._build_news_payload(task)
+
+        tool_queue: list[tuple[str, dict[str, Any]]] = []
+        if payload is not None:
+            tool_queue.extend((alias, payload) for alias in self.tool_candidates)
+        if news_payload is not None:
+            tool_queue.append(("finance.news", news_payload))
+
+        for alias, candidate_payload in tool_queue:
+            result = await self._invoke_finance_tool(context, alias, candidate_payload, attempts)
+            if result is not None:
+                return result, attempts
+
+        return None, attempts
+
+    async def _invoke_finance_tool(
+        self,
+        context: AgentContext,
+        alias: str,
+        payload: dict[str, Any],
+        attempts: list[dict[str, Any]],
+    ) -> ToolInvocationResult | None:
+        max_attempts, base_delay = self.tool_retry_config.get(alias, (1, 0.5))
+        delay = base_delay
+        for attempt in range(1, max_attempts + 1):
+            try:
+                result = await context.tools.invoke(alias, payload)
+            except ToolDisabledError as exc:
+                attempts.append({"tool": alias, "status": "disabled", "error": str(exc)})
+                return None
+            except ToolInvocationError as exc:
+                attempts.append(
+                    {
+                        "tool": alias,
+                        "status": "error",
+                        "error": str(exc),
+                        "attempt": attempt,
+                    }
+                )
+                should_retry = attempt < max_attempts and self._should_retry(alias, exc)
+                if should_retry:
+                    sleep_for = max(delay, 0.2)
+                    await asyncio.sleep(min(sleep_for, 6.0))
+                    delay = delay * 1.5 if delay else base_delay or 0.5
+                    continue
+                if delay:
+                    await asyncio.sleep(min(delay, 1.0))
+                return None
+            else:
+                attempts.append({"tool": alias, "status": "success", "attempt": attempt})
+                return result
+        return None
+
+    def _should_retry(self, alias: str, error: Exception) -> bool:
+        if alias not in {"finance.snapshot", "finance.snapshot.alpha"}:
+            return False
+        message = str(error).lower()
+        retry_keywords = (
+            "429",
+            "too many requests",
+            "timeout",
+            "circuit breaker",
+            "http failure",
+        )
+        return any(keyword in message for keyword in retry_keywords)
+
+    def _tool_policy_override(
+        self,
+        *,
+        tool_result: ToolInvocationResult | None,
+        tool_trace: list[dict[str, Any]],
+        tools: Any,
+    ) -> dict[str, Any] | None:
+        if tool_result is not None:
             return None
-        try:
-            return await context.tools.invoke("finance.snapshot", payload)
-        except (ToolDisabledError, ToolInvocationError) as exc:
-            logger.warning("finance_tool_failure", error=str(exc))
-            return None
+        payload: dict[str, Any] = {"allow_skip": True}
+        if tools is None:
+            payload["reason"] = "tool_service_unavailable"
+        elif tool_trace:
+            payload["reason"] = "tool_attempts_exhausted"
+        else:
+            payload["reason"] = "tool_payload_missing"
+        payload["attempts"] = len(tool_trace)
+        last_error = next((attempt.get("error") for attempt in reversed(tool_trace) if attempt.get("error")), None)
+        if last_error:
+            payload["last_error"] = last_error
+        return payload
+
+    def _build_news_payload(self, task: AgentInput) -> dict[str, Any] | None:
+        metadata: dict[str, Any] = task.metadata if isinstance(task.metadata, dict) else {}
+        limit = metadata.get("news_limit")
+        if not isinstance(limit, int) or limit <= 0:
+            limit = 5
+        payload: dict[str, Any] = {"limit": min(limit, 10)}
+        categories = metadata.get("news_categories")
+        if isinstance(categories, list):
+            cleaned = [str(category).strip() for category in categories if isinstance(category, str) and category.strip()]
+            if cleaned:
+                payload["categories"] = cleaned[:5]
+        return payload
 
     def _build_snapshot_payload(self, task: AgentInput) -> dict[str, Any] | None:
         metadata: dict[str, Any] = task.metadata if isinstance(task.metadata, dict) else {}

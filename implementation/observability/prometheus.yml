@@ -10,6 +10,7 @@ alerting:
 rule_files:
   - rules/orchestrator_rules.yml
   - rules/review_rules.yml
+  - rules/memory_rules.yml
 
 scrape_configs:
   - job_name: "backend"

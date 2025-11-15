@@ -5,7 +5,8 @@ from typing import Any
 import pytest
 
 from app.agents.base import AgentContext
-from app.orchestration.graph import Orchestrator, ToolFirstPolicyViolation
+from app.core.config import PlanningSettings
+from app.orchestration.graph import Orchestrator, SafetyLimitExceeded, ToolFirstPolicyViolation, _RunTracker
 from app.orchestration.llm_planner import PlannerPlan, PlannedAgentStep
 from app.orchestration.routing import DynamicAgentRouter
 from app.schemas.agents import AgentCapability, AgentOutput
@@ -355,3 +356,47 @@ async def test_orchestrator_respects_high_confidence_plan() -> None:
     planner_metadata = routing["metadata"]["planner"]
     assert planner_metadata["status"] == "planned"
     assert planner_metadata["attributes"]["confidence"] == 0.9
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_aborts_when_run_time_exceeds_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    general = _StubAgent("general_agent", AgentCapability.GENERAL)
+    planner = _SequentialPlannerStub()
+    planning_settings = PlanningSettings(max_run_seconds=1.0, max_planner_recursions=3, max_tool_calls_per_run=12)
+    orchestrator = Orchestrator(
+        agents=[general],
+        orchestration_planner=planner,
+        planning_settings=planning_settings,
+    )
+    context = AgentContext(memory=_StubMemory(), llm=_StubLLM())
+    times = iter([0.0, 0.0, 5.0, 5.0, 5.0, 5.0])
+
+    def _fake_perf_counter() -> float:
+        return next(times, 5.0)
+
+    monkeypatch.setattr("app.orchestration.graph.time.perf_counter", _fake_perf_counter)
+
+    with pytest.raises(SafetyLimitExceeded):
+        await orchestrator.route_task(
+            {"id": "task-time-limit", "prompt": "Hello", "metadata": {}},
+            context=context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_planner_recursion_limit_triggers() -> None:
+    general = _StubAgent("general_agent", AgentCapability.GENERAL)
+    planner = _SequentialPlannerStub()
+    planning_settings = PlanningSettings(max_planner_recursions=1, max_tool_calls_per_run=12, max_run_seconds=120.0)
+    orchestrator = Orchestrator(
+        agents=[general],
+        orchestration_planner=planner,
+        planning_settings=planning_settings,
+    )
+    run_tracker = _RunTracker(run=None, entry_point="test")
+    task = {"id": "task-recursion", "prompt": "Hello", "metadata": {}}
+
+    await orchestrator._determine_agent_sequence(task, run_tracker=run_tracker)
+
+    with pytest.raises(SafetyLimitExceeded):
+        await orchestrator._determine_agent_sequence(task, run_tracker=run_tracker)

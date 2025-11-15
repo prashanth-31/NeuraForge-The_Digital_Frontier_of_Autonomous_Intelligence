@@ -9,10 +9,15 @@ route:
   receiver: reviewers-warning
   routes:
     - matchers:
+        - team="ops-memory"
+      receiver: ops-memory
+      continue: true
+    - matchers:
         - severity="critical"
       receiver: reviewers-critical
     - matchers:
         - team!="reviewers"
+        - team!="ops-memory"
       receiver: default
 
 receivers:
@@ -29,4 +34,9 @@ receivers:
   - name: default
     webhook_configs:
       - url: http://pager-proxy:8080/alerts
+        send_resolved: true
+
+  - name: ops-memory
+    webhook_configs:
+      - url: http://pager-proxy:8080/ops-memory
         send_resolved: true

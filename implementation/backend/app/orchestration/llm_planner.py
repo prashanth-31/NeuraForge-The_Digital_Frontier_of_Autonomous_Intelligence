@@ -3,10 +3,7 @@ from __future__ import annotations
 import json
 import math
 import string
-from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
-
-from pydantic import BaseModel, Field, ValidationError
 
 from ..agents.base import BaseAgent, get_agent_schema
 from ..core.config import Settings
@@ -14,43 +11,34 @@ from ..core.logging import get_logger
 from ..schemas.agents import AgentCapability
 from ..services.llm import LLMService
 from ..tools.registry import tool_registry
+from .tool_policy import get_agent_tool_policy
+from .planner_contract import (
+    PlanGatekeeper,
+    PlannerContractViolation,
+    PlannerPlan,
+    PlannedAgentStep,
+)
 
 logger = get_logger(name=__name__)
+
+_DEFAULT_TOOL_ALIAS_CACHE: dict[str, str] | None = None
+
+
+def _load_default_tool_aliases() -> dict[str, str]:
+    global _DEFAULT_TOOL_ALIAS_CACHE
+    if _DEFAULT_TOOL_ALIAS_CACHE is not None:
+        return _DEFAULT_TOOL_ALIAS_CACHE
+    try:
+        from ..services.tools import DEFAULT_TOOL_ALIASES  # type: ignore circular-import
+    except Exception:  # pragma: no cover - fallback if tooling layer unavailable
+        _DEFAULT_TOOL_ALIAS_CACHE = {}
+    else:
+        _DEFAULT_TOOL_ALIAS_CACHE = {str(alias): str(target) for alias, target in DEFAULT_TOOL_ALIASES.items()}
+    return _DEFAULT_TOOL_ALIAS_CACHE
 
 
 class PlannerError(RuntimeError):
     """Raised when the orchestration planner cannot produce a valid plan."""
-
-
-class PlannerStepPayload(BaseModel):
-    agent: str = Field(..., min_length=1)
-    reason: str = Field(default="", description="Why this agent was selected.")
-    tools: list[str] = Field(default_factory=list)
-    fallback_tools: list[str] = Field(default_factory=list)
-    confidence: float = Field(default=1.0)
-
-
-class PlannerPlanPayload(BaseModel):
-    steps: list[PlannerStepPayload] = Field(default_factory=list)
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    confidence: float = Field(default=1.0)
-
-
-@dataclass(slots=True)
-class PlannedAgentStep:
-    agent: str
-    tools: list[str] = field(default_factory=list)
-    fallback_tools: list[str] = field(default_factory=list)
-    reason: str = ""
-    confidence: float = 1.0
-
-
-@dataclass(slots=True)
-class PlannerPlan:
-    steps: list[PlannedAgentStep]
-    raw_response: str
-    metadata: dict[str, Any] = field(default_factory=dict)
-    confidence: float = 1.0
 
 
 class LLMOrchestrationPlanner:
@@ -66,6 +54,7 @@ class LLMOrchestrationPlanner:
         self._llm = llm_service or LLMService.from_settings(settings, model=settings.planner_llm.model)
         self._system_prompt = settings.planner_llm.system_prompt
         self._temperature = settings.planner_llm.temperature
+        self._gatekeeper = PlanGatekeeper()
 
     async def plan(
         self,
@@ -87,9 +76,18 @@ class LLMOrchestrationPlanner:
 
         try:
             payload = self._parse_json(trimmed)
-            plan_payload = self._parse_steps_payload(payload)
-        except (PlannerError, ValidationError) as exc:
+            validated_plan = self._gatekeeper.enforce(payload, raw_response=trimmed)
+        except (PlannerError, PlannerContractViolation) as exc:
             logger.exception("planner_output_invalid", error=str(exc), response=trimmed)
+            heuristic_plan = self._build_keyword_plan(
+                prompt=original_prompt,
+                agents=agents,
+                raw_response=trimmed,
+                reason="planner_output_invalid",
+                tool_aliases=tool_aliases,
+            )
+            if heuristic_plan is not None:
+                return heuristic_plan
             fallback_plan = self._build_fallback_plan(
                 agents=agents,
                 raw_response=trimmed,
@@ -99,7 +97,16 @@ class LLMOrchestrationPlanner:
                 return fallback_plan
             raise PlannerError("Planner produced invalid plan") from exc
 
-        raw_steps = [self._to_step_payload(step) for step in plan_payload.steps if step.agent]
+        raw_steps = [
+            PlannedAgentStep(
+                agent=step.agent,
+                tools=list(step.tools),
+                fallback_tools=list(step.fallback_tools),
+                reason=step.reason or "Planner selected agent",
+                confidence=step.confidence,
+            )
+            for step in validated_plan.steps
+        ]
         if not raw_steps:
             logger.warning("planner_empty_plan", response=trimmed)
             fallback_plan = self._build_fallback_plan(
@@ -125,12 +132,12 @@ class LLMOrchestrationPlanner:
             if fallback_plan is not None:
                 return fallback_plan
 
-        metadata = dict(plan_payload.metadata)
+        metadata = dict(validated_plan.metadata)
         if adjustments:
             metadata["post_processing"] = adjustments
 
         confidence = self._coerce_plan_confidence(
-            metadata.get("confidence", plan_payload.confidence)
+            metadata.get("confidence", validated_plan.confidence)
         )
         metadata["confidence"] = confidence
         metadata.setdefault("handoff_strategy", "sequential")
@@ -143,17 +150,6 @@ class LLMOrchestrationPlanner:
             adjustments=bool(adjustments),
         )
         return PlannerPlan(steps=steps, raw_response=trimmed, metadata=metadata, confidence=confidence)
-
-    def _to_step_payload(self, spec: PlannerStepPayload) -> PlannedAgentStep:
-        tools = [alias.strip() for alias in spec.tools if alias.strip()]
-        fallback = [alias.strip() for alias in spec.fallback_tools if alias.strip()]
-        return PlannedAgentStep(
-            agent=spec.agent.strip(),
-            tools=tools,
-            fallback_tools=fallback,
-            reason=spec.reason.strip() or "Planner selected agent",
-            confidence=self._coerce_plan_confidence(spec.confidence),
-        )
 
     @staticmethod
     def _coerce_plan_confidence(raw_value: Any) -> float:
@@ -203,7 +199,7 @@ class LLMOrchestrationPlanner:
             "Rules: Use only agents and tools listed. Respect the per-agent tool policy: finance_agent and research_agent must "
             "include at least one tool when selected. enterprise_agent, creative_agent, and general_agent may omit tools when they "
             "are only greeting, triaging, or when no tool would materially improve the answer. Only assign tools each agent can "
-            "reasonably invoke. Limit to at most 4 agents total. When requests are broad or introductory, begin with general_agent before adding specialists. "
+            "reasonably invoke. Limit to at most 4 agents total. Use general_agent by itself only for greetings or vague prompts; when the user specifies concrete deliverables, assign the relevant specialists even if the request is multi-part. "
             "If the prompt asks for financial performance, earnings, revenue, ratios, guidance, a ticker symbol, or contains finance-focused keywords (e.g., \"financial report\", \"earnings\", \"revenue\", \"profit\", \"loss\", \"forecast\", \"Netflix\", \"NFLX\"), include finance_agent with finance tools. "
             "If the task calls for external research, comparisons, citations, or fact-finding, include research_agent with research tools. "
             "If the user asks for storytelling, copywriting, slogans, creative briefs, or tone adjustments, include creative_agent with creative tools. "
@@ -222,16 +218,6 @@ class LLMOrchestrationPlanner:
             "Planning Instructions:\n" + instructions,
         ]
         return "\n\n".join(sections)
-
-    def _parse_steps_payload(self, payload: Mapping[str, Any]) -> PlannerPlanPayload:
-        if not isinstance(payload, Mapping):
-            raise PlannerError("Planner response must be a JSON object")
-        if "steps" not in payload:
-            raise PlannerError("Planner response did not include 'steps'")
-        try:
-            return PlannerPlanPayload.model_validate(payload)
-        except ValidationError as exc:
-            raise PlannerError("Planner response used an invalid steps schema") from exc
 
     def _summarize_prior_outputs(self, outputs: Sequence[Mapping[str, Any]]) -> str:
         if not outputs:
@@ -344,6 +330,16 @@ class LLMOrchestrationPlanner:
             step.tools = [tool for tool in step.tools if tool in allowed_tools]
             step.fallback_tools = [tool for tool in step.fallback_tools if tool in allowed_tools]
 
+            policy_filtered = False
+            policy = get_agent_tool_policy(step.agent)
+            if policy is not None:
+                filtered_tools, removed_policy_tools = policy.filter_tools(step.tools)
+                filtered_fallbacks, removed_policy_fallbacks = policy.filter_tools(step.fallback_tools)
+                if removed_policy_tools or removed_policy_fallbacks:
+                    policy_filtered = True
+                step.tools = filtered_tools
+                step.fallback_tools = filtered_fallbacks
+
             if tool_replacements or fallback_replacements:
                 replacement_payload: list[dict[str, str]] = []
                 for original, updated in tool_replacements:
@@ -364,13 +360,14 @@ class LLMOrchestrationPlanner:
                     step.fallback_tools = []
 
             if removed_tools or removed_fallbacks:
-                sanitized_entries.append(
-                    {
-                        "agent": step.agent,
-                        "removed_tools": sorted(set(removed_tools)),
-                        "removed_fallbacks": sorted(set(removed_fallbacks)),
-                    }
-                )
+                entry = {
+                    "agent": step.agent,
+                    "removed_tools": sorted(set(removed_tools)),
+                    "removed_fallbacks": sorted(set(removed_fallbacks)),
+                }
+                if policy_filtered:
+                    entry["policy_filtered"] = True
+                sanitized_entries.append(entry)
 
         if sanitized_entries:
             adjustments["sanitized_tools"] = sanitized_entries
@@ -383,7 +380,7 @@ class LLMOrchestrationPlanner:
             finance_step = PlannedAgentStep(
                 agent="finance_agent",
                 tools=["finance.snapshot"],
-                fallback_tools=["finance.news"],
+                fallback_tools=["finance.snapshot.alpha", "finance.snapshot.cached", "finance.news"],
                 reason="financial report requested",
                 confidence=1.0,
             )
@@ -515,11 +512,26 @@ class LLMOrchestrationPlanner:
             "fy",
             "yearly",
             "annual",
+            "investment",
+            "invest",
+            "portfolio",
+            "allocation",
+            "treasury",
+            "var",
+            "value at risk",
+            "sharpe",
+            "nifty",
+            "banknifty",
             "netflix",
             "nflx",
         }
 
+        rupee_symbol = "\u20b9"
+
         if any(keyword in normalized for keyword in finance_keywords):
+            return True
+
+        if rupee_symbol in original:
             return True
 
         stripped_original = original.translate(str.maketrans("", "", string.punctuation))
@@ -551,9 +563,17 @@ class LLMOrchestrationPlanner:
             "market size",
             "industry",
             "whitepaper",
+            "search",
+            "web",
+            "news",
+            "trend",
+            "trends",
         }
 
-        return any(keyword in normalized for keyword in research_keywords)
+        if any(keyword in normalized for keyword in research_keywords):
+            return True
+
+        return "search the web" in normalized
 
     def _needs_creative_agent(self, prompt: str, steps: Sequence[PlannedAgentStep]) -> bool:
         if any(step.agent == "creative_agent" for step in steps):
@@ -597,6 +617,8 @@ class LLMOrchestrationPlanner:
             "roadmap",
             "operations",
             "operational",
+            "operational insight",
+            "operational insights",
             "executive",
             "board",
             "stakeholder",
@@ -607,9 +629,14 @@ class LLMOrchestrationPlanner:
             "sales",
             "change management",
             "transformation",
+            "expansion",
+            "action plan",
         }
 
-        return any(keyword in normalized for keyword in enterprise_keywords)
+        if any(keyword in normalized for keyword in enterprise_keywords):
+            return True
+
+        return "operational insight" in normalized or "operational insights" in normalized
 
     def _allowed_tool_names(self, tool_aliases: Mapping[str, str] | None) -> set[str]:
         registry_aliases = dict(tool_registry.aliases())
@@ -617,18 +644,33 @@ class LLMOrchestrationPlanner:
         if tool_aliases:
             for key, value in tool_aliases.items():
                 combined[str(key)] = str(value)
+
+        default_aliases = _load_default_tool_aliases()
+        for key, value in default_aliases.items():
+            combined.setdefault(str(key), str(value))
+
+        canonical_registry_tools = list(tool_registry.list())
+        canonical_defaults = [str(value) for value in default_aliases.values()]
+        canonical_pool = canonical_registry_tools or canonical_defaults
+
         allowed: set[str] = set()
-        for canonical in tool_registry.list():
-            allowed.add(canonical)
-            allowed.add(canonical.replace("/", "."))
+
+        def _add_variants(identifier: str) -> None:
+            if not identifier:
+                return
+            allowed.add(identifier)
+            if "." in identifier:
+                allowed.add(identifier.replace(".", "/"))
+            if "/" in identifier:
+                allowed.add(identifier.replace("/", "."))
+
+        for canonical in canonical_pool:
+            _add_variants(canonical)
+
         for alias, target in combined.items():
-            allowed.add(alias)
-            if "." in alias:
-                allowed.add(alias.replace(".", "/"))
-            if "/" in alias:
-                allowed.add(alias.replace("/", "."))
-            allowed.add(target)
-            allowed.add(target.replace("/", "."))
+            _add_variants(alias)
+            _add_variants(target)
+
         return allowed
 
     def _canonicalize_agent_tools(
@@ -712,6 +754,136 @@ class LLMOrchestrationPlanner:
             raw_response=raw_response,
             metadata=metadata,
             confidence=0.0,
+        )
+
+    def _build_keyword_plan(
+        self,
+        *,
+        prompt: str,
+        agents: Sequence[BaseAgent],
+        raw_response: str,
+        reason: str,
+        tool_aliases: Mapping[str, str] | None,
+    ) -> PlannerPlan | None:
+        if not agents:
+            return None
+
+        roster = {agent.name: agent for agent in agents}
+        if not roster:
+            return None
+
+        steps: list[PlannedAgentStep] = []
+
+        def agent_available(name: str) -> bool:
+            return name in roster
+
+        def add_step(name: str, *, tools: Sequence[str], fallback_tools: Sequence[str], step_reason: str, confidence: float = 0.85) -> None:
+            if agent_available(name):
+                steps.append(
+                    PlannedAgentStep(
+                        agent=name,
+                        tools=list(tools),
+                        fallback_tools=list(fallback_tools),
+                        reason=step_reason,
+                        confidence=confidence,
+                    )
+                )
+
+        # Prioritize specialist agents based on keyword heuristics so complex prompts don't fall back to general_agent only.
+        research_needed = self._needs_research_agent(prompt, steps)
+        finance_needed = self._needs_finance_agent(prompt, steps)
+        enterprise_needed = self._needs_enterprise_agent(prompt, steps)
+        creative_needed = self._needs_creative_agent(prompt, steps)
+
+        if research_needed:
+            add_step(
+                "research_agent",
+                tools=["research.search", "research.summarizer"],
+                fallback_tools=["research.doc_loader"],
+                step_reason="heuristic: prompt requests external research",
+            )
+
+        if finance_needed:
+            add_step(
+                "finance_agent",
+                tools=["finance.snapshot"],
+                fallback_tools=["finance.news"],
+                step_reason="heuristic: prompt contains financial analysis",
+            )
+
+        if enterprise_needed:
+            add_step(
+                "enterprise_agent",
+                tools=["enterprise.playbook"],
+                fallback_tools=["enterprise.policy"],
+                step_reason="heuristic: prompt focuses on operations/strategy",
+            )
+
+        if creative_needed:
+            add_step(
+                "creative_agent",
+                tools=["creative.tonecheck"],
+                fallback_tools=["creative.image"],
+                step_reason="heuristic: prompt requests creative deliverables",
+            )
+
+        if agent_available("general_agent"):
+            add_step(
+                "general_agent",
+                tools=[],
+                fallback_tools=[],
+                step_reason="heuristic: orchestration opener",
+                confidence=0.8,
+            )
+
+        if not steps:
+            logger.warning(
+                "planner_keyword_fallback_empty",
+                prompt_snippet=prompt[:240],
+                research_flag=research_needed,
+                finance_flag=finance_needed,
+                enterprise_flag=enterprise_needed,
+                creative_flag=creative_needed,
+            )
+
+        if not steps:
+            return None
+
+        processed_steps, adjustments = self._post_process_steps(
+            prompt,
+            steps,
+            tool_aliases=tool_aliases,
+        )
+
+        if not processed_steps:
+            logger.warning(
+                "planner_keyword_postprocess_empty",
+                prompt_snippet=prompt[:240],
+                initial_agents=[step.agent for step in steps],
+            )
+            return None
+
+        metadata: dict[str, Any] = {
+            "handoff_strategy": "sequential",
+            "notes": "Heuristic fallback plan",
+            "fallback_reason": reason,
+            "confidence": 0.85,
+            "schema_version": "v2",
+        }
+        if adjustments:
+            metadata["post_processing"] = adjustments
+
+        logger.warning(
+            "planner_keyword_fallback",
+            prompt=prompt[:256],
+            agents=[step.agent for step in processed_steps],
+        )
+
+        return PlannerPlan(
+            steps=processed_steps,
+            raw_response=raw_response,
+            metadata=metadata,
+            confidence=0.85,
         )
 
     def _extract_confidence(self, payload: Mapping[str, Any] | None) -> float:

@@ -51,6 +51,8 @@ class DuckDuckGoSearchAdapter(MCPToolAdapter):
     name = "search/duckduckgo"
     description = "Run anonymous DuckDuckGo web searches and return the top organic results."
     labels = ("research", "open")
+    aliases = ("research.search", "search/tavily")
+    capabilities = ("research", "web_search")
     InputModel = DuckDuckGoSearchInput
     OutputModel = DuckDuckGoSearchOutput
 
@@ -175,6 +177,8 @@ class ArxivFetchAdapter(MCPToolAdapter):
     name = "research/arxiv"
     description = "Query the arXiv API for scholarly articles."
     labels = ("research", "open")
+    aliases = ("research.arxiv",)
+    capabilities = ("research", "literature")
     InputModel = ArxivQueryInput
     OutputModel = ArxivQueryOutput
 
@@ -288,6 +292,8 @@ class WikipediaSummaryAdapter(MCPToolAdapter):
     name = "research/wikipedia"
     description = "Retrieve localized summaries from Wikipedia's REST API."
     labels = ("research", "open")
+    aliases = ("research.wikipedia",)
+    capabilities = ("research", "knowledge_base")
     InputModel = WikipediaSummaryInput
     OutputModel = WikipediaSummaryOutput
 

@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import Settings
 from app.core.logging import get_logger
+from app.services.tool_reconciliation import ToolReconciliationJob
 from app.services.tools import ToolConfigurationError, get_tool_service
 
 try:  # pragma: no cover - optional dependency for semantic store
@@ -141,6 +142,7 @@ async def _wait_for_mcp_readiness(settings: Settings) -> None:
         try:
             service = await get_tool_service()
             await service.initialize(validate=True)
+            await ToolReconciliationJob.run_once()
         except ToolConfigurationError as exc:
             last_error = str(exc)
         except Exception as exc:  # pragma: no cover - defensive catch

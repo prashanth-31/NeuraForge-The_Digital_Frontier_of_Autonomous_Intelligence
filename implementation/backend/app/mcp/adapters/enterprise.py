@@ -45,6 +45,8 @@ class NotionConnectorAdapter(MCPToolAdapter):
     name = "enterprise/notion"
     description = "Fetches workspace metadata from a Notion-like store (stubbed)."
     labels = ("enterprise", "knowledge")
+    aliases = ("enterprise.notion",)
+    capabilities = ("enterprise", "knowledge")
     InputModel = NotionConnectorInput
     OutputModel = NotionConnectorOutput
 
@@ -109,6 +111,8 @@ class CalendarSyncAdapter(MCPToolAdapter):
     name = "enterprise/calendar"
     description = "Validates and stages calendar events for synchronization."
     labels = ("enterprise", "scheduling")
+    aliases = ("enterprise.calendar",)
+    capabilities = ("enterprise", "scheduling")
     InputModel = CalendarSyncInput
     OutputModel = CalendarSyncOutput
 
@@ -151,6 +155,8 @@ class PolicyCheckerAdapter(MCPToolAdapter):
     name = "enterprise/policy_checker"
     description = "Performs lightweight policy compliance checks."
     labels = ("enterprise", "compliance")
+    aliases = ("enterprise.policy",)
+    capabilities = ("enterprise", "compliance")
     InputModel = PolicyCheckerInput
     OutputModel = PolicyCheckerOutput
 
@@ -193,6 +199,8 @@ class CRMAdapter(MCPToolAdapter):
     name = "enterprise/crm"
     description = "Provides CRM contact roll-ups from deterministic fixtures."
     labels = ("enterprise", "crm")
+    aliases = ("enterprise.crm",)
+    capabilities = ("enterprise", "crm_lookup")
     InputModel = CRMAdapterInput
     OutputModel = CRMAdapterOutput
 
@@ -238,6 +246,8 @@ class EnterprisePlaybookAdapter(MCPToolAdapter):
     name = "enterprise/playbook"
     description = "Synthesizes Notion playbooks and policy checks into actionable enterprise guidance."
     labels = ("enterprise", "strategy")
+    aliases = ("enterprise.playbook",)
+    capabilities = ("enterprise", "strategy", "playbook")
     InputModel = EnterprisePlaybookInput
     OutputModel = EnterprisePlaybookOutput
 

@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import traceback
 import uuid
-from contextlib import AsyncExitStack, suppress
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import Response, StreamingResponse
 from pydantic import ValidationError
 
@@ -50,6 +51,7 @@ from ..schemas.reviews import (
     ReviewMetricsResponse,
 )
 from ..schemas.tasks import TaskRequest, TaskResponse, TaskResult, TaskStatusMetrics, TaskStatusResponse
+from ..schemas.documents import DocumentAnalysisResponse, DocumentMetadata
 from ..schemas.orchestrator import OrchestratorEventModel, OrchestratorRunDetail
 from ..services.embedding import EmbeddingService
 from ..services.llm import LLMService
@@ -57,6 +59,7 @@ from ..services.memory import HybridMemoryService
 from ..services.retrieval import ContextAssembler, RetrievalService
 from ..services.scoring import ConfidenceScorer
 from ..services.disputes import DisputeDetector, MetaConfidenceScorer
+from ..services.document_parser import DocumentParseError, DocumentParseResult, parse_document
 from ..services.tools import get_tool_service
 
 logger = get_logger(name=__name__)
@@ -72,6 +75,14 @@ rate_limit_review_action = rate_limit_dependency("review_action")
 
 MAX_TASK_EVENTS = 250
 EVENT_ENVELOPE_VERSION = 1
+MAX_ANALYSIS_CHARS = 6_000
+DOCUMENT_PREVIEW_CHARS = 400
+
+DOCUMENT_ANALYSIS_SYSTEM_PROMPT = (
+    "You are NeuraForge's document analysis assistant. "
+    "Summarize the document, highlight critical insights, capture key data points, and recommend follow-up actions. "
+    "Return concise Markdown with headings for Summary, Key Points, and Recommended Actions."
+)
 
 
 async def _extract_json_body(request: Request) -> dict[str, Any]:
@@ -89,6 +100,53 @@ def _now_iso() -> str:
 
 def _format_sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _prepare_document_excerpt(text: str, *, limit: int = MAX_ANALYSIS_CHARS) -> tuple[str, bool]:
+    normalized = text.strip()
+    if len(normalized) <= limit:
+        return normalized, False
+    excerpt = normalized[:limit].rstrip()
+    note = f"\n\n[Truncated to first {limit} characters]"
+    return f"{excerpt}{note}", True
+
+
+def _build_document_prompt(parsed: DocumentParseResult, *, truncated_text: str, truncated: bool) -> str:
+    metadata = parsed.metadata
+    header_lines = [
+        f"Filename: {metadata.get('filename') or 'unknown'}",
+        f"Content-Type: {metadata.get('content_type') or 'application/octet-stream'}",
+        f"Characters: {metadata.get('character_count')}",
+        f"Line Count: {metadata.get('line_count')}",
+    ]
+    if truncated:
+        header_lines.append("Note: Document was truncated before analysis due to size limits.")
+    header = "\n".join(header_lines)
+    return f"{header}\n\nDocument Content:\n{truncated_text}"
+
+
+def _build_failure_result(
+    base_state: Mapping[str, Any],
+    *,
+    task_id: str,
+    continuation_id: str | None,
+    message: str,
+    exc: Exception | None = None,
+) -> dict[str, Any]:
+    failure_state = dict(base_state)
+    now_iso = _now_iso()
+    failure_state["status"] = "failed"
+    failure_state["error"] = message or "Task failed"
+    failure_state.setdefault("timestamp", now_iso)
+    failure_state["updated_at"] = now_iso
+    if exc is not None:
+        failure_state["traceback"] = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    _ensure_conversation_metadata(
+        failure_state,
+        current_task_id=task_id,
+        continuation_task_id=continuation_id,
+    )
+    return failure_state
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -465,9 +523,9 @@ def _task_status_response(
         plan=plan,
         negotiation=negotiation,
         guardrails=guardrails_payload,
-    meta=dict(meta_section) if meta_section is not None else None,
-    dossier=dict(dossier_section) if dossier_section is not None else None,
-    report=report_block,
+        meta=dict(meta_section) if meta_section is not None else None,
+        dossier=dict(dossier_section) if dossier_section is not None else None,
+        report=report_block,
         metrics=metrics,
         last_error=last_error,
         created_at=created_at,
@@ -617,6 +675,82 @@ async def mcp_diagnostics(settings: Settings = Depends(get_settings)) -> dict[st
     return service.get_diagnostics()
 
 
+@router.post("/upload_document", response_model=DocumentAnalysisResponse, tags=["documents"])
+async def upload_document(
+    document: UploadFile = File(...),
+    persist: bool = Query(False, description="Persist parsed output into the memory service."),
+    settings: Settings = Depends(get_settings),
+) -> DocumentAnalysisResponse:
+    try:
+        parsed = await parse_document(document)
+    except DocumentParseError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+    try:
+        llm_service = LLMService.from_settings(settings)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="LLM service unavailable") from exc
+
+    truncated_text, truncated = _prepare_document_excerpt(parsed.text, limit=MAX_ANALYSIS_CHARS)
+    prompt = _build_document_prompt(parsed, truncated_text=truncated_text, truncated=truncated)
+    analysis = await llm_service.generate(
+        prompt=prompt,
+        system_prompt=DOCUMENT_ANALYSIS_SYSTEM_PROMPT,
+        temperature=0.15,
+    )
+
+    persisted = False
+    memory_task_id: str | None = None
+    if persist:
+        try:
+            memory_service = HybridMemoryService.from_settings(settings)
+        except RuntimeError as exc:  # pragma: no cover - optional dependency missing
+            logger.warning("document_memory_service_unavailable", error=str(exc))
+        else:
+            try:
+                async with memory_service.lifecycle() as memory:
+                    memory_task_id = str(uuid.uuid4())
+                    payload = {
+                        "type": "document_analysis",
+                        "filename": parsed.metadata.get("filename"),
+                        "content_type": parsed.metadata.get("content_type"),
+                        "character_count": parsed.metadata.get("character_count"),
+                        "analysis": analysis,
+                    }
+                    await memory.store_ephemeral_memory(memory_task_id, payload)
+                    await memory.store_working_memory(
+                        f"document:{memory_task_id}",
+                        parsed.text,
+                        ttl=settings.memory.working_memory_ttl,
+                    )
+                    persisted = True
+            except Exception as exc:  # pragma: no cover - persistence best effort
+                logger.warning("document_memory_persist_failed", error=str(exc))
+                memory_task_id = None
+                persisted = False
+
+    metadata = DocumentMetadata(
+        filename=parsed.metadata["filename"],
+        content_type=parsed.metadata["content_type"],
+        extension=parsed.metadata["extension"],
+        line_count=parsed.metadata["line_count"],
+        character_count=parsed.metadata["character_count"],
+        filesize_bytes=parsed.metadata["filesize_bytes"],
+    )
+
+    preview = parsed.text[:DOCUMENT_PREVIEW_CHARS].strip()
+    cleaned_analysis = analysis.strip() or "Document processed, but no analysis was generated."
+
+    return DocumentAnalysisResponse(
+        output=cleaned_analysis,
+        document=metadata,
+        truncated=truncated,
+        persisted=persisted,
+        memory_task_id=memory_task_id,
+        preview=preview or None,
+    )
+
+
 @router.post("/submit_task", response_model=TaskResponse, tags=["tasks"])
 async def submit_task(
     request: Request,
@@ -680,15 +814,12 @@ async def submit_task(
                     llm_service = LLMService.from_settings(settings)
                 except RuntimeError as exc:
                     logger.exception("llm_initialization_failed", error=str(exc))
-                    failure = {
-                        **state,
-                        "status": "failed",
-                        "error": "LLM service unavailable",
-                    }
-                    _ensure_conversation_metadata(
-                        failure,
-                        current_task_id=task_id,
-                        continuation_task_id=continuation_id,
+                    failure = _build_failure_result(
+                        state,
+                        task_id=task_id,
+                        continuation_id=continuation_id,
+                        message="LLM service unavailable",
+                        exc=exc,
                     )
                     await memory.store_ephemeral_memory(task_id, {"result": failure})
                     return
@@ -728,7 +859,19 @@ async def submit_task(
                         tools=tool_service,
                         scorer=ConfidenceScorer(settings.scoring),
                     )
-                    result = await orchestrator.route_task(state, context=agent_context)
+                    try:
+                        result = await orchestrator.route_task(state, context=agent_context)
+                    except Exception as exc:  # pragma: no cover - orchestration failure surface
+                        logger.exception("task_execution_failed", task_id=task_id)
+                        failure = _build_failure_result(
+                            state,
+                            task_id=task_id,
+                            continuation_id=continuation_id,
+                            message=str(exc) or exc.__class__.__name__,
+                            exc=exc,
+                        )
+                        await memory.store_ephemeral_memory(task_id, {"result": failure})
+                        return
                     if isinstance(result, dict):
                         _ensure_conversation_metadata(
                             result,
@@ -896,16 +1039,12 @@ async def submit_task_stream(
                             llm_service = LLMService.from_settings(settings)
                         except RuntimeError as exc:
                             logger.exception("llm_initialization_failed", error=str(exc))
-                            failure = {
-                                **state,
-                                "status": "failed",
-                                "error": "LLM service unavailable",
-                                "timestamp": _now_iso(),
-                            }
-                            _ensure_conversation_metadata(
-                                failure,
-                                current_task_id=task_id,
-                                continuation_task_id=continuation_id,
+                            failure = _build_failure_result(
+                                state,
+                                task_id=task_id,
+                                continuation_id=continuation_id,
+                                message="LLM service unavailable",
+                                exc=exc,
                             )
                             await memory.store_ephemeral_memory(task_id, {"result": failure})
                             await emit(
@@ -976,16 +1115,12 @@ async def submit_task_stream(
                             else:
                                 result = await run_agents(None)
                         except Exception as exc:  # pragma: no cover - surfaced via SSE
-                            failure = {
-                                **state,
-                                "status": "failed",
-                                "error": str(exc),
-                                "timestamp": _now_iso(),
-                            }
-                            _ensure_conversation_metadata(
-                                failure,
-                                current_task_id=task_id,
-                                continuation_task_id=continuation_id,
+                            failure = _build_failure_result(
+                                state,
+                                task_id=task_id,
+                                continuation_id=continuation_id,
+                                message=str(exc) or exc.__class__.__name__,
+                                exc=exc,
                             )
                             await memory.store_ephemeral_memory(task_id, {"result": failure})
                             await emit(
@@ -1058,21 +1193,8 @@ async def submit_task_stream(
                 if event == "__END__":
                     break
                 yield _format_sse(event, data)
-        except asyncio.CancelledError:
-            runner_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await runner_task
-            raise
-        except Exception:
-            runner_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await runner_task
-            raise
         finally:
-            if not runner_task.done():
-                runner_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await runner_task
+            await runner_task
 
     headers = {
         "Cache-Control": "no-cache",

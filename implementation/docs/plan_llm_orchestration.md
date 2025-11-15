@@ -10,6 +10,7 @@ Enable the LLM to determine the complete orchestration plan (step ordering, per-
 - ✅ Orchestrator now prefers planner output and, on validation failure, uses the planner's schema-v2 fallback plan instead of the legacy router.
 - ✅ Planner metadata is stored on each task for downstream consumption.
 - ✅ Planner-directed tool usage is enforced with primary/fallback tracking.
+- ✅ Per-agent tool policies applied during planning (`llm_planner`) and runtime (`_ToolProxy`); 50-run policy soak completed (2025-11-13) using `docs/runbooks/tool_policy_soak.md`.
 - ⏳ Observability pipeline (metrics/dossiers) still needs richer coverage.
 - ⏳ Broader regression tests and documentation updates remain outstanding.
 
@@ -57,7 +58,7 @@ Enable the LLM to determine the complete orchestration plan (step ordering, per-
 - [ ] Execute end-to-end flows to ensure tool-first compliance remains intact.
 
 ### 8. Documentation
-- [ ] Document planner configuration and runtime behavior (README / architecture docs).
+- [ ] Document planner configuration and runtime behavior (README / architecture docs, include policy posture & soak cadence).
 - [ ] Update architecture diagrams to reflect LLM-driven orchestration.
 - [ ] Provide runbook for tuning planner prompt, temperature, and fallbacks.
 

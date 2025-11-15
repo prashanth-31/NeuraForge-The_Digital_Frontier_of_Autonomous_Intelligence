@@ -11,13 +11,20 @@ from pydantic import ValidationError
 
 from app.core.logging import get_logger
 from app.tools.base import CircuitBreakerOpenError, ToolInvocationError
+from app.tools.catalog_store import ToolCatalogEntry, tool_catalog_store
 from app.tools.registry import tool_registry
 
 from .adapters.base import MCPToolAdapter
+from .adapters.browser import BROWSER_ADAPTER_CLASSES
 from .adapters.creative import CREATIVE_ADAPTER_CLASSES
+from .adapters.dataframe import DATAFRAME_ADAPTER_CLASSES
 from .adapters.enterprise import ENTERPRISE_ADAPTER_CLASSES
 from .adapters.finance import FINANCE_ADAPTER_CLASSES
+from .adapters.memory import MEMORY_ADAPTER_CLASSES
+from .adapters.planning import PLANNING_ADAPTER_CLASSES
 from .adapters.research import RESEARCH_ADAPTER_CLASSES
+from .adapters.testing import TESTING_ADAPTER_CLASSES
+from .adapters.utils import UTILS_ADAPTER_CLASSES
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 logger = get_logger(name=__name__)
@@ -28,23 +35,49 @@ ALL_ADAPTER_CLASSES: tuple[type[MCPToolAdapter], ...] = (
     + FINANCE_ADAPTER_CLASSES
     + CREATIVE_ADAPTER_CLASSES
     + ENTERPRISE_ADAPTER_CLASSES
+    + BROWSER_ADAPTER_CLASSES
+    + DATAFRAME_ADAPTER_CLASSES
+    + MEMORY_ADAPTER_CLASSES
+    + UTILS_ADAPTER_CLASSES
+    + PLANNING_ADAPTER_CLASSES
+    + TESTING_ADAPTER_CLASSES
 )
 
 
 @lru_cache(maxsize=1)
 def bootstrap_tool_registry() -> bool:
+    tool_catalog_store.clear()
+    entries: list[ToolCatalogEntry] = []
+    alias_map: dict[str, str] = {}
     for adapter_cls in ALL_ADAPTER_CLASSES:
-        name = adapter_cls.name
-        if tool_registry.get(name) is not None:
-            continue
-        adapter = adapter_cls()
-        tool_registry.register(name, adapter)
+        descriptor = adapter_cls.descriptor()
+        entries.append(
+            ToolCatalogEntry(
+                name=descriptor.name,
+                description=descriptor.description,
+                labels=descriptor.labels,
+                aliases=descriptor.aliases,
+                capabilities=descriptor.capabilities,
+                input_schema=descriptor.input_schema,
+                output_schema=descriptor.output_schema,
+            )
+        )
+        if tool_registry.get(descriptor.name) is None:
+            adapter = adapter_cls()
+            tool_registry.register(descriptor.name, adapter, aliases=descriptor.aliases)
+        for alias in descriptor.aliases:
+            alias_map[alias] = descriptor.name
     try:
         from app.services.tools import DEFAULT_TOOL_ALIASES
     except Exception:  # pragma: no cover - defensive import guard
-        DEFAULT_TOOL_ALIASES = {}
-    for alias, target in DEFAULT_TOOL_ALIASES.items():
+        default_aliases: dict[str, str] = {}
+    else:
+        default_aliases = dict(DEFAULT_TOOL_ALIASES)
+    for alias, target in default_aliases.items():
         tool_registry.register_alias(alias, target)
+    alias_map.update({alias: target for alias, target in default_aliases.items()})
+    snapshot = tool_catalog_store.sync(entries, aliases=alias_map, source="mcp_router_bootstrap")
+    tool_catalog_store.persist(snapshot)
     return True
 
 
@@ -66,6 +99,8 @@ async def list_tools() -> dict[str, Any]:
                 "input_schema": descriptor.input_schema,
                 "output_schema": descriptor.output_schema,
                 "labels": descriptor.labels,
+                "aliases": descriptor.aliases,
+                "capabilities": descriptor.capabilities,
             }
         )
     descriptors.sort(key=lambda payload: payload["name"])

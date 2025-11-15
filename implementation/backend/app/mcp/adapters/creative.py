@@ -30,6 +30,8 @@ class PromptStylizerAdapter(MCPToolAdapter):
     name = "creative/stylizer"
     description = "Rewrites prompts with brand-aligned tone and actionable suggestions."
     labels = ("creative", "tone")
+    aliases = ("creative.tonecheck",)
+    capabilities = ("creative", "prompt_styling")
     InputModel = PromptStylizerInput
     OutputModel = PromptStylizerOutput
 
@@ -83,6 +85,8 @@ class ToneCheckerAdapter(MCPToolAdapter):
     name = "creative/tone_checker"
     description = "Evaluates copy tone and suggests improvements."
     labels = ("creative", "quality")
+    aliases = ("creative.tone_checker",)
+    capabilities = ("creative", "tone_analysis")
     InputModel = ToneCheckInput
     OutputModel = ToneCheckOutput
 
@@ -126,6 +130,8 @@ class WhisperTranscriptionAdapter(MCPToolAdapter):
     name = "creative/whisper_transcription"
     description = "Performs lightweight transcription using heuristic decoding."
     labels = ("creative", "audio")
+    aliases = ("creative.transcribe",)
+    capabilities = ("creative", "transcription")
     InputModel = WhisperTranscriptionInput
     OutputModel = WhisperTranscriptionOutput
 
@@ -165,6 +171,8 @@ class ImageGeneratorAdapter(MCPToolAdapter):
     name = "creative/image_generator"
     description = "Returns placeholder imagery metadata for downstream visualization flows."
     labels = ("creative", "visual")
+    aliases = ("creative.image",)
+    capabilities = ("creative", "image_generation")
     InputModel = ImageGeneratorInput
     OutputModel = ImageGeneratorOutput
 

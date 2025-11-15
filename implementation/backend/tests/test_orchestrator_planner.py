@@ -8,6 +8,7 @@ from app.agents.base import AgentContext
 from app.orchestration.graph import Orchestrator, ToolFirstPolicyViolation
 from app.orchestration.llm_planner import PlannerError, PlannerPlan, PlannedAgentStep
 from app.schemas.agents import AgentCapability, AgentOutput
+from app.tools.exceptions import ToolPolicyViolationError
 
 
 class _StubLLM:
@@ -121,6 +122,23 @@ class _LowConfidencePlannerStub:
                     fallback_tools=[],
                     reason="Attempt creative solution",
                     confidence=0.3,
+                )
+            ],
+            raw_response="{\"steps\": []}",
+            metadata={"handoff_strategy": "sequential"},
+        )
+
+
+class _FinancePolicyViolationPlannerStub:
+    async def plan(self, *, task, prior_outputs, agents, tool_aliases=None):
+        return PlannerPlan(
+            steps=[
+                PlannedAgentStep(
+                    agent="finance_agent",
+                    tools=["creative.text.rewrite"],
+                    fallback_tools=[],
+                    reason="Invalid tool assignment for finance agent",
+                    confidence=0.9,
                 )
             ],
             raw_response="{\"steps\": []}",
@@ -343,3 +361,20 @@ async def test_low_confidence_step_routes_to_general_agent() -> None:
     planner_meta = result["routing"]["metadata"]["planner"]
     overrides = planner_meta.get("step_overrides")
     assert overrides and overrides[0]["executed_agent"] == "general_agent"
+
+
+@pytest.mark.asyncio
+async def test_disallowed_tool_invocation_raises_policy_error() -> None:
+    tool_service = _ToolServiceStub()
+    agent = _ToolUsingAgent("finance_agent", AgentCapability.FINANCE, tool_to_use="creative.text.rewrite")
+    planner = _FinancePolicyViolationPlannerStub()
+    orchestrator = Orchestrator(agents=[agent], orchestration_planner=planner)
+    context = AgentContext(memory=_StubMemory(), llm=_StubLLM(), tools=tool_service)
+
+    with pytest.raises(ToolPolicyViolationError):
+        await orchestrator.route_task(
+            {"id": "task-policy", "prompt": "Review quarterly performance", "metadata": {}},
+            context=context,
+        )
+
+    assert tool_service.calls == []

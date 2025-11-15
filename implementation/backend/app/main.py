@@ -13,6 +13,7 @@ from .api.routes import router as api_router
 from .core.audit import AuditLoggingMiddleware
 from .core.config import get_settings
 from .core.logging import configure_logging, get_logger
+from .dependencies import shutdown_task_queue
 from .mcp.router import router as mcp_router
 from .tools.api import router as tools_router
 from .services.bootstrap import ensure_foundation_ready
@@ -48,6 +49,7 @@ async def app_lifespan(app: FastAPI):
             task.cancel()
             with suppress(asyncio.CancelledError):  # pragma: no cover - managed shutdown
                 await task
+        await shutdown_task_queue()
 
 
 app = FastAPI(title="NeuraForge Backend", version="0.1.0", lifespan=app_lifespan)

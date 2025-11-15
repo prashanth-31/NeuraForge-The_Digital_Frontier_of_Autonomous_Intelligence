@@ -10,7 +10,7 @@ import contextvars
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Awaitable, Callable, Deque, Mapping
+from typing import Any, AsyncIterator, Awaitable, Callable, Deque, Mapping, Sequence
 from urllib.parse import quote, urlencode, urlparse
 
 import httpx
@@ -28,7 +28,9 @@ from app.services.enterprise_playbook import (
 )
 from app.services.mcp_client import CircuitOpenError, MCPClient, MCPClientConfig
 from app.services.tool_onboarding import all_planned_tools
+from app.tools.catalog_store import ToolCatalogEntry, tool_catalog_store
 from app.tools.registry import tool_registry
+from app.tools.validation import ToolPayloadValidationError, tool_payload_validator
 
 logger = get_logger(name=__name__)
 
@@ -57,6 +59,8 @@ class MCPToolDescriptor:
     input_schema: dict[str, Any] | None = None
     output_schema: dict[str, Any] | None = None
     labels: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -77,7 +81,9 @@ DEFAULT_TOOL_ALIASES: dict[str, str] = {
     "research.doc_loader": "research/doc_loader",
     "research.qdrant": "research/qdrant",
     "research.summarizer": "research/summarizer",
-    "finance.snapshot": "finance/alpha_vantage",
+    "finance.snapshot": "finance/yfinance",
+    "finance.snapshot.alpha": "finance/alpha_vantage",
+    "finance.snapshot.cached": "finance/cached_quotes",
     "finance.analytics": "finance/pandas",
     "finance.plot": "finance/plot",
     "finance.news": "finance/coingecko_news",
@@ -247,6 +253,16 @@ class ToolService:
                 return self._catalog
             descriptors = await self._fetch_catalog()
             self._catalog = {descriptor.name: descriptor for descriptor in descriptors}
+            remote_aliases = {
+                alias: descriptor.name
+                for descriptor in descriptors
+                for alias in descriptor.aliases
+            }
+            combined_aliases = dict(remote_aliases)
+            combined_aliases.update(self._alias_mapping)
+            if combined_aliases:
+                self._register_aliases(combined_aliases)
+            self._materialize_catalog_snapshot(descriptors, combined_aliases)
             if self._settings.catalog_refresh_seconds > 0:
                 self._catalog_expiry = now + self._settings.catalog_refresh_seconds
             return self._catalog
@@ -302,6 +318,7 @@ class ToolService:
             response = await self._dispatch(resolved_tool=resolved_tool, payload=payload)
         except ToolInvocationError as exc:  # pragma: no cover - passthrough for metrics
             metrics.increment_tool_error(tool=tool)
+            metrics.increment_tool_call_failure(tool=tool, reason=type(exc).__name__)
             self._last_error = str(exc)
             await self._emit_tool_event(
                 {
@@ -316,6 +333,7 @@ class ToolService:
             raise
         except httpx.HTTPError as exc:  # pragma: no cover - defensive guard
             metrics.increment_tool_error(tool=tool)
+            metrics.increment_tool_call_failure(tool=tool, reason=type(exc).__name__)
             error_message = str(exc)
             self._last_error = error_message
             await self._emit_tool_event(
@@ -356,45 +374,17 @@ class ToolService:
 
     def _validate_payload(self, resolved_tool: str, payload: dict[str, Any]) -> None:
         descriptor = self._catalog.get(resolved_tool)
-        if descriptor is not None and descriptor.input_schema is not None:
-            schema = descriptor.input_schema
-            if isinstance(schema, dict) and schema.get("type") == "object":
-                properties = schema.get("properties") or {}
-                required_fields = schema.get("required") or []
-                additional_properties = schema.get("additionalProperties", True)
-                if isinstance(required_fields, list):
-                    missing = [field for field in required_fields if field not in payload]
-                    if missing:
-                        raise ToolInvocationError(
-                            f"Payload for '{resolved_tool}' missing required fields: {', '.join(missing)}"
-                        )
-                if not additional_properties and isinstance(properties, dict):
-                    extraneous = [field for field in payload if field not in properties]
-                    if extraneous:
-                        raise ToolInvocationError(
-                            f"Payload for '{resolved_tool}' includes unsupported fields: {', '.join(extraneous)}"
-                        )
-        self._guard_payload_shape(payload)
+        catalog_entry = tool_catalog_store.entry_for(resolved_tool)
         try:
-            json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        except (TypeError, ValueError) as exc:
-            raise ToolInvocationError(f"Payload for '{resolved_tool}' is not JSON-serializable") from exc
-
-    def _guard_payload_shape(self, value: Any, *, key_path: str = "") -> None:
-        if isinstance(value, dict):
-            for key, item in value.items():
-                path = f"{key_path}.{key}" if key_path else str(key)
-                self._guard_payload_shape(item, key_path=path)
-            return
-        if isinstance(value, list):
-            for index, item in enumerate(value):
-                path = f"{key_path}[{index}]" if key_path else f"[{index}]"
-                self._guard_payload_shape(item, key_path=path)
-            return
-        if isinstance(value, str) and len(value) > self._payload_string_limit:
-            raise ToolInvocationError(
-                f"Payload field '{key_path or '<root>'}' exceeds maximum length of {self._payload_string_limit} characters"
+            tool_payload_validator.validate(
+                resolved_tool=resolved_tool,
+                payload=payload,
+                descriptor=descriptor,
+                catalog_entry=catalog_entry,
+                max_string_length=self._payload_string_limit,
             )
+        except ToolPayloadValidationError as exc:
+            raise ToolInvocationError(str(exc)) from exc
 
     async def _invoke_enterprise_playbook(self, payload: dict[str, Any]) -> ToolInvocationResult:
         resolved_tool = "enterprise/playbook"
@@ -585,11 +575,33 @@ class ToolService:
                         input_schema=raw.get("input_schema") if isinstance(raw.get("input_schema"), dict) else None,
                         output_schema=raw.get("output_schema") if isinstance(raw.get("output_schema"), dict) else None,
                         labels=tuple(label for label in raw.get("labels", []) if isinstance(label, str)),
+                        aliases=tuple(alias for alias in raw.get("aliases", []) if isinstance(alias, str)),
+                        capabilities=tuple(cap for cap in raw.get("capabilities", []) if isinstance(cap, str)),
                     )
                 )
         else:
             logger.debug("mcp_catalog_unexpected_payload", payload=payload)
         return descriptors
+
+    def _materialize_catalog_snapshot(
+        self,
+        descriptors: Sequence[MCPToolDescriptor],
+        alias_map: Mapping[str, str],
+    ) -> None:
+        entries = [
+            ToolCatalogEntry(
+                name=descriptor.name,
+                description=descriptor.description,
+                labels=descriptor.labels,
+                aliases=descriptor.aliases,
+                capabilities=descriptor.capabilities,
+                input_schema=descriptor.input_schema or {},
+                output_schema=descriptor.output_schema or {},
+            )
+            for descriptor in descriptors
+        ]
+        snapshot = tool_catalog_store.sync(entries, aliases=alias_map, source="mcp_catalog_refresh")
+        tool_catalog_store.persist(snapshot)
 
     async def _ensure_tool_known(self, resolved_tool: str) -> None:
         await self.refresh_catalog(force=False)

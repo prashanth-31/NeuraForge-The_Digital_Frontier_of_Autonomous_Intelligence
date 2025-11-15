@@ -18,8 +18,10 @@ class GeneralistAgent:
     name: str = "general_agent"
     capability: AgentCapability = AgentCapability.GENERAL
     system_prompt: str = (
-        "You are NeuraForge's Generalist Agent. Offer clear, well-structured answers, collect clarifying"
-        " details, and flag when specialist agents should assist. Keep outputs actionable and concise."
+        "You are NeuraForge's Generalist Agent. Deliver decisive, well-structured answers without seeking"
+        " additional confirmation from the user. When specialist agents or tools are appropriate, outline"
+        " the hand-off plan and proceed; do not ask follow-up questions unless critical information is"
+        " truly missing. Keep outputs actionable and concise."
     )
     description: str = "Handles greetings, casual queries, or triage before escalating as needed."
     tool_preference: list[str] = field(default_factory=list)
@@ -99,7 +101,8 @@ class GeneralistAgent:
             f"Prior agent exchanges:\n{history}\n\n"
             f"Retrieved context:\n{retrieved}\n\n"
             f"Tool insights:\n{tool_section}\n\n"
-            "Provide a direct answer. Note any follow-up questions or specialist hand-offs that may be useful."
+            "Provide a direct answer. If specialist agents or tools are needed, describe the plan and continue"
+            " autonomously—do not ask the user for confirmation."
         )
 
     async def _maybe_invoke_tool(self, task: AgentInput, *, context: AgentContext) -> ToolInvocationResult | None:

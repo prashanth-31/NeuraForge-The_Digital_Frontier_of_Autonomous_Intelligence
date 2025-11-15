@@ -1,0 +1,151 @@
+{
+  "NIFTY": {
+    "symbol": "NIFTY",
+    "company_name": "NIFTY 50 Index",
+    "currency": "INR",
+    "price": 22841.75,
+    "change": 112.4,
+    "change_percent": 0.49,
+    "previous_close": 22729.35,
+    "open": 22780.15,
+    "day_low": 22720.4,
+    "day_high": 22892.6,
+    "volume": 0,
+    "fifty_two_week_low": 19050.85,
+    "fifty_two_week_high": 23112.25,
+    "market_cap": null,
+    "updated_at": "2025-11-14T10:30:00Z",
+    "fundamentals": {
+      "latest_quarter": "2025-Q2",
+      "currency": "INR",
+      "sector": "Index",
+      "revenue_ttm": 0,
+      "net_income_ttm": 0
+    }
+  },
+  "BANKNIFTY": {
+    "symbol": "BANKNIFTY",
+    "company_name": "NIFTY Bank Index",
+    "currency": "INR",
+    "price": 49215.1,
+    "change": -85.25,
+    "change_percent": -0.17,
+    "previous_close": 49300.35,
+    "open": 49318.4,
+    "day_low": 49012.5,
+    "day_high": 49510.9,
+    "volume": 0,
+    "fifty_two_week_low": 42020.4,
+    "fifty_two_week_high": 49987.1,
+    "market_cap": null,
+    "updated_at": "2025-11-14T10:30:00Z",
+    "fundamentals": {
+      "latest_quarter": "2025-Q2",
+      "currency": "INR",
+      "sector": "Index"
+    }
+  },
+  "AI": {
+    "symbol": "AI",
+    "company_name": "C3.ai Inc.",
+    "currency": "USD",
+    "price": 31.42,
+    "change": 0.82,
+    "change_percent": 2.68,
+    "previous_close": 30.6,
+    "open": 30.85,
+    "day_low": 30.35,
+    "day_high": 31.97,
+    "volume": 4312000,
+    "fifty_two_week_low": 22.68,
+    "fifty_two_week_high": 48.87,
+    "market_cap": 3730000000,
+    "updated_at": "2025-11-14T21:00:00Z",
+    "fundamentals": {
+      "currency": "USD",
+      "sector": "Technology",
+      "industry": "Software",
+      "market_cap": 3730000000,
+      "revenue_ttm": 392000000,
+      "net_income_ttm": -192000000,
+      "latest_quarter": "2025-Q1"
+    }
+  },
+  "CFO": {
+    "symbol": "CFO",
+    "company_name": "VictoryShares US 500 Enhanced Volatility Wtd ETF",
+    "currency": "USD",
+    "price": 67.18,
+    "change": -0.22,
+    "change_percent": -0.33,
+    "previous_close": 67.4,
+    "open": 67.25,
+    "day_low": 66.9,
+    "day_high": 67.6,
+    "volume": 15400,
+    "fifty_two_week_low": 56.02,
+    "fifty_two_week_high": 68.21,
+    "market_cap": null,
+    "updated_at": "2025-11-14T21:00:00Z",
+    "fundamentals": {
+      "currency": "USD",
+      "sector": "ETF",
+      "latest_quarter": "2025-Q1"
+    }
+  },
+  "CSV": {
+    "symbol": "CSV",
+    "company_name": "Carriage Services Inc.",
+    "currency": "USD",
+    "price": 32.58,
+    "change": 0.12,
+    "change_percent": 0.37,
+    "previous_close": 32.46,
+    "open": 32.5,
+    "day_low": 32.1,
+    "day_high": 32.8,
+    "volume": 186000,
+    "fifty_two_week_low": 22.86,
+    "fifty_two_week_high": 34.2,
+    "market_cap": 450000000,
+    "updated_at": "2025-11-14T21:00:00Z",
+    "fundamentals": {
+      "currency": "USD",
+      "sector": "Consumer Services",
+      "industry": "Personal Services",
+      "latest_quarter": "2025-Q1",
+      "revenue_ttm": 380000000,
+      "net_income_ttm": 28000000
+    }
+  },
+  "NEURA": {
+    "symbol": "NEURA",
+    "company_name": "Orion Technologies (Synthetic)",
+    "currency": "USD",
+    "price": 84.12,
+    "change": 1.35,
+    "change_percent": 1.63,
+    "previous_close": 82.77,
+    "open": 83.01,
+    "day_low": 82.6,
+    "day_high": 84.8,
+    "volume": 1250000,
+    "fifty_two_week_low": 58.45,
+    "fifty_two_week_high": 88.12,
+    "market_cap": 12800000000,
+    "updated_at": "2025-11-14T21:00:00Z",
+    "fundamentals": {
+      "currency": "USD",
+      "sector": "Industrial Automation",
+      "industry": "Robotics",
+      "latest_quarter": "2025-Q1",
+      "revenue_ttm": 2450000000,
+      "net_income_ttm": 365000000,
+      "guidance": {
+        "target_mean_price": 96.5,
+        "revenue_growth": 0.17,
+        "earnings_growth": 0.21
+      }
+    }
+  }
+}

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -11,124 +10,7 @@ from app.api import routes as routes_module
 from app.dependencies import get_hybrid_memory, get_task_queue
 from app.main import app
 
-
-class StubMemoryService:
-    def __init__(self) -> None:
-        self.ephemeral: dict[str, dict[str, Any]] = {}
-        self.working: dict[str, list[str]] = {}
-
-    @asynccontextmanager
-    async def lifecycle(self) -> Any:
-        yield self
-
-    async def store_working_memory(self, key: str, value: str, *, ttl: int = 600) -> None:  # noqa: ARG002
-        self.working.setdefault(key, []).append(value)
-
-    async def store_ephemeral_memory(self, task_id: str, payload: dict[str, Any]) -> None:
-        self.ephemeral[task_id] = payload
-
-    async def fetch_ephemeral_memory(self, task_id: str) -> dict[str, Any] | None:
-        return self.ephemeral.get(task_id)
-
-
-class StubLLMService:
-    def __init__(self) -> None:
-        self.calls: list[dict[str, Any]] = []
-        self.plan_calls: list[dict[str, Any]] = []
-
-    async def generate(
-        self,
-        prompt: str,
-        *,
-        system_prompt: str | None = None,
-        temperature: float | None = None,  # noqa: ARG002
-    ) -> str:
-        if "Planning Instructions:" in prompt:
-            plan = {
-                "steps": [
-                    {
-                        "agent": "general_agent",
-                        "tools": [],
-                        "fallback_tools": [],
-                        "reason": "initial triage",
-                        "confidence": 0.9,
-                    },
-                    {
-                        "agent": "research_agent",
-                        "tools": ["research.search", "research.summarizer"],
-                        "fallback_tools": ["research.doc_loader"],
-                        "reason": "gather supporting insights",
-                        "confidence": 0.85,
-                    },
-                    {
-                        "agent": "finance_agent",
-                        "tools": ["finance.snapshot"],
-                        "fallback_tools": ["finance.news"],
-                        "reason": "cover financial considerations",
-                        "confidence": 0.82,
-                    },
-                    {
-                        "agent": "creative_agent",
-                        "tools": ["creative.tonecheck"],
-                        "fallback_tools": ["creative.image"],
-                        "reason": "shape messaging and narrative",
-                        "confidence": 0.8,
-                    },
-                ],
-                "metadata": {
-                    "handoff_strategy": "sequential",
-                    "notes": "Planner stub returning deterministic multi-agent plan",
-                },
-                "confidence": 0.84,
-            }
-            response = json.dumps(plan)
-            self.plan_calls.append({"prompt": prompt, "system_prompt": system_prompt})
-        else:
-            response = f"stubbed-response-{len(self.calls) + 1}"
-            self.calls.append({"prompt": prompt, "system_prompt": system_prompt})
-        return response
-
-
-class ImmediateQueue:
-    def __init__(self) -> None:
-        self.enqueued = 0
-
-    async def enqueue(self, job: Callable[[], Awaitable[Any]]) -> None:
-        self.enqueued += 1
-        await job()
-
-
-class StubToolInvocationResult:
-    def __init__(self, tool: str, payload: dict[str, Any]) -> None:
-        self.tool = tool
-        self.resolved_tool = tool
-        self.payload = payload
-        self.response = {"status": "ok", "tool": tool}
-        self.cached = False
-        self.latency = 0.0
-
-
-class StubToolService:
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, dict[str, Any]]] = []
-        self._callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None
-
-    async def invoke(self, tool: str, payload: dict[str, Any]) -> StubToolInvocationResult:
-        self.calls.append((tool, payload))
-        if self._callback is not None:
-            await self._callback({"tool": tool, "payload": payload})
-        return StubToolInvocationResult(tool, payload)
-
-    @asynccontextmanager
-    async def instrument(self, callback: Callable[[dict[str, Any]], Awaitable[None]]):
-        self._callback = callback
-        try:
-            yield self
-        finally:
-            self._callback = None
-
-    def get_diagnostics(self) -> dict[str, str]:
-        return {"status": "stubbed"}
+from tests.helpers.stubs import ImmediateQueue, StubLLMService, StubMemoryService, StubToolService
 
 
 @pytest.fixture()

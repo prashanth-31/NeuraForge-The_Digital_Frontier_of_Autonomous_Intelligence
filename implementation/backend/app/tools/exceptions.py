@@ -19,3 +19,7 @@ class ToolNotFoundError(ToolError):
 
 class CircuitBreakerOpenError(ToolInvocationError):
     """Raised when the circuit breaker prevents tool execution."""
+
+
+class ToolPolicyViolationError(ToolError):
+    """Raised when an agent attempts to invoke a tool outside of its allowlist."""

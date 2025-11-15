@@ -25,9 +25,9 @@ RESEARCH_TOOLS: List[PlannedTool] = [
 FINANCE_TOOLS: List[PlannedTool] = [
     PlannedTool(
         alias="finance.snapshot",
-        resolved="finance/alpha_vantage",
+        resolved="finance/yfinance",
         category="finance",
-        description="Alpha Vantage equity snapshot",
+        description="Yahoo Finance equity snapshot",
     ),
     PlannedTool(alias="finance.analytics", resolved="finance/pandas", category="finance", description="Pandas analytics sandbox"),
     PlannedTool(alias="finance.plot", resolved="finance/plot", category="finance", description="Plotting utility"),

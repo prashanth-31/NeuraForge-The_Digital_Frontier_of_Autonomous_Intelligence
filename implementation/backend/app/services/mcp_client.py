@@ -154,6 +154,11 @@ class MCPClient:
                         success=False,
                         latency=latency,
                     )
+                    metrics.increment_mcp_retry(
+                        method=method,
+                        endpoint=endpoint_label,
+                        reason=f"status_{response.status_code}",
+                    )
                     retry_context = {
                         **attempt_context,
                         "status": response.status_code,
@@ -198,6 +203,7 @@ class MCPClient:
                 }
                 should_retry = attempt <= self._config.max_retries
                 if should_retry:
+                    metrics.increment_mcp_retry(method=method, endpoint=endpoint_label, reason="exception")
                     error_context["retry_in"] = backoff
                     self._emit_instrumentation("request.error", error_context)
                 else:

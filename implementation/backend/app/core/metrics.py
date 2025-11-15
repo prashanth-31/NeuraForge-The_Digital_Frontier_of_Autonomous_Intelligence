@@ -83,6 +83,12 @@ PLANNER_OUTCOMES_TOTAL = Counter(
     labelnames=("strategy", "status"),
 )
 
+PLANNER_CONTRACT_INVALID_TOTAL = Counter(
+    "neuraforge_planner_contract_invalid_total",
+    "Count of planner payloads rejected by the contract gatekeeper",
+    labelnames=("reason",),
+)
+
 NEGOTIATION_CONSENSUS = Histogram(
     "neuraforge_negotiation_consensus",
     "Consensus score distribution",
@@ -178,6 +184,19 @@ MEMORY_INGEST_TOTAL = Counter(
     labelnames=("store", "operation"),
 )
 
+MEMORY_STORE_LATENCY_SECONDS = Histogram(
+    "neuraforge_memory_store_latency_seconds",
+    "Latency of memory store operations",
+    labelnames=("store", "operation"),
+    buckets=(0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, float("inf")),
+)
+
+MEMORY_SERVICE_HEALTH = Gauge(
+    "neuraforge_memory_service_health",
+    "Health indicator for memory backing services (1=healthy, 0=unavailable)",
+    labelnames=("store",),
+)
+
 MEMORY_CONSOLIDATION_DURATION_SECONDS = Histogram(
     "neuraforge_memory_consolidation_duration_seconds",
     "Duration of consolidation runs",
@@ -226,6 +245,23 @@ TOOL_LATENCY_SECONDS = Histogram(
     labelnames=("tool",),
 )
 
+TOOL_CALL_FAILED_TOTAL = Counter(
+    "neuraforge_tool_call_failed_total",
+    "Guardrail-adjusted count of failed tool invocations by reason.",
+    labelnames=("tool", "reason"),
+)
+
+TOOL_CATALOG_ENTRIES = Gauge(
+    "neuraforge_tool_catalog_entries",
+    "Current number of entries in the local tool catalog snapshot.",
+)
+
+TOOL_CATALOG_RECONCILIATION_MISMATCHES = Gauge(
+    "neuraforge_tool_catalog_reconciliation_mismatches",
+    "Count of mismatches detected during tool catalog reconciliation runs.",
+    labelnames=("category",),
+)
+
 MCP_REQUEST_TOTAL = Counter(
     "neuraforge_mcp_request_total",
     "Total MCP HTTP requests by endpoint and outcome",
@@ -238,6 +274,12 @@ MCP_REQUEST_LATENCY_SECONDS = Histogram(
     labelnames=("method", "endpoint", "status"),
 )
 
+MCP_RETRY_TOTAL = Counter(
+    "neuraforge_mcp_retry_total",
+    "Count of MCP client retries by endpoint and reason.",
+    labelnames=("method", "endpoint", "reason"),
+)
+
 MCP_CIRCUIT_OPEN_TOTAL = Counter(
     "neuraforge_mcp_circuit_open_total",
     "Count of MCP circuit breaker blocks",
@@ -248,6 +290,12 @@ MCP_CIRCUIT_TRIP_TOTAL = Counter(
     "neuraforge_mcp_circuit_trip_total",
     "Count of MCP circuit breaker trips",
     labelnames=("endpoint",),
+)
+
+LOOP_ABORT_TOTAL = Counter(
+    "neuraforge_loop_abort_total",
+    "Count of orchestrator runs aborted by safety guardrails.",
+    labelnames=("reason",),
 )
 
 CONFIDENCE_COMPONENT_VALUE = Histogram(
@@ -321,6 +369,10 @@ def record_plan_metrics(*, strategy: str, status: str, steps: int | None = None)
         PLANNER_STEPS.labels(strategy=strategy).observe(max(0, steps))
 
 
+def increment_plan_contract_failure(*, reason: str) -> None:
+    PLANNER_CONTRACT_INVALID_TOTAL.labels(reason=reason or "unknown").inc()
+
+
 def increment_guardrail_decision(*, decision: str, policy_id: str | None) -> None:
     labels = {"decision": decision, "policy_id": policy_id or "none"}
     GUARDRAIL_DECISIONS_TOTAL.labels(**labels).inc()
@@ -343,6 +395,14 @@ def increment_cache_miss(*, layer: str) -> None:
 
 def increment_memory_ingest(*, store: str, operation: str) -> None:
     MEMORY_INGEST_TOTAL.labels(store=store, operation=operation).inc()
+
+
+def observe_memory_store_latency(*, store: str, operation: str, latency: float) -> None:
+    MEMORY_STORE_LATENCY_SECONDS.labels(store=store, operation=operation).observe(max(latency, 0.0))
+
+
+def set_memory_service_health(*, store: str, healthy: bool) -> None:
+    MEMORY_SERVICE_HEALTH.labels(store=store).set(1.0 if healthy else 0.0)
 
 
 def observe_consolidation_run(*, status: str, duration: float, processed: int, embedded: int, skipped: int) -> None:
@@ -374,6 +434,10 @@ def increment_meta_dispute(*, severity: str) -> None:
 
 def increment_meta_override(*, action: str) -> None:
     META_AGENT_OVERRIDES_TOTAL.labels(action=action).inc()
+
+
+def increment_loop_abort(*, reason: str) -> None:
+    LOOP_ABORT_TOTAL.labels(reason=reason).inc()
 
 
 def record_review_ticket_counts(
@@ -411,6 +475,18 @@ def increment_tool_error(*, tool: str) -> None:
     TOOL_ERRORS_TOTAL.labels(tool=tool).inc()
 
 
+def increment_tool_call_failure(*, tool: str, reason: str) -> None:
+    TOOL_CALL_FAILED_TOTAL.labels(tool=tool, reason=reason).inc()
+
+
+def observe_tool_catalog_entries(count: int) -> None:
+    TOOL_CATALOG_ENTRIES.set(max(0, int(count)))
+
+
+def observe_tool_catalog_reconciliation(*, category: str, count: int) -> None:
+    TOOL_CATALOG_RECONCILIATION_MISMATCHES.labels(category=category).set(max(0, int(count)))
+
+
 def increment_finance_quote_fallback(*, provider: str, reason: str) -> None:
     FINANCE_QUOTE_FALLBACK_TOTAL.labels(provider=provider, reason=reason).inc()
 
@@ -424,6 +500,10 @@ def observe_mcp_request(*, method: str, endpoint: str, status: int | None, succe
     outcome = "success" if success else "failure"
     MCP_REQUEST_TOTAL.labels(method=method.upper(), endpoint=endpoint, outcome=outcome).inc()
     MCP_REQUEST_LATENCY_SECONDS.labels(method=method.upper(), endpoint=endpoint, status=status_label).observe(latency)
+
+
+def increment_mcp_retry(*, method: str, endpoint: str, reason: str) -> None:
+    MCP_RETRY_TOTAL.labels(method=method.upper(), endpoint=endpoint, reason=reason).inc()
 
 
 def increment_mcp_circuit_open(*, endpoint: str) -> None:

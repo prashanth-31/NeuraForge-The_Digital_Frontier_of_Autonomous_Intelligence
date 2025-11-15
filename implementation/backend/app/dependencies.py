@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from fastapi import Depends
@@ -15,6 +16,8 @@ from .orchestration.store import OrchestratorStateStore
 
 _review_manager_singleton: ReviewManager | None = None
 _review_notification_service: ReviewNotificationService | None = None
+_task_queue_manager: TaskQueueManager | None = None
+_task_queue_lock = asyncio.Lock()
 
 
 def get_review_manager_singleton(settings: Settings) -> ReviewManager:
@@ -39,10 +42,26 @@ async def get_app_settings() -> AsyncIterator[Settings]:
 
 async def get_task_queue(
     settings: Settings = Depends(get_settings),
-) -> AsyncIterator[TaskQueueManager]:
-    queue = TaskQueueManager.from_settings(settings)
-    async with queue.lifecycle():
-        yield queue
+) -> TaskQueueManager:
+    global _task_queue_manager
+    if _task_queue_manager is None:
+        async with _task_queue_lock:
+            if _task_queue_manager is None:
+                queue = TaskQueueManager.from_settings(settings)
+                await queue.start()
+                _task_queue_manager = queue
+    return _task_queue_manager
+
+
+async def shutdown_task_queue() -> None:
+    global _task_queue_manager
+    if _task_queue_manager is None:
+        return
+    async with _task_queue_lock:
+        if _task_queue_manager is None:
+            return
+        await _task_queue_manager.stop()
+        _task_queue_manager = None
 
 
 async def get_hybrid_memory(

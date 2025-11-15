@@ -72,7 +72,7 @@ async def test_metrics_exposed(monkeypatch: pytest.MonkeyPatch) -> None:
 
         metric_found = False
         for family in text_string_to_metric_families(metrics_response.text):
-            if family.name != "mcp_tool_invocations_total":
+            if family.name not in {"mcp_tool_invocations_total", "mcp_tool_invocations"}:
                 continue
             for sample in family.samples:
                 if sample.labels.get("tool") == "tests/prometheus" and sample.labels.get("outcome") == "success":

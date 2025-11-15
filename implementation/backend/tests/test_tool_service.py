@@ -131,6 +131,23 @@ async def test_invoke_resolves_alias(monkeypatch: pytest.MonkeyPatch, tool_setti
 
 
 @pytest.mark.asyncio
+async def test_refresh_catalog_preserves_local_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_settings: MCPToolSettings,
+) -> None:
+    service = ToolService(tool_settings)
+
+    remote_descriptor = MCPToolDescriptor(name="finance/alpha_vantage", aliases=("finance.snapshot",))
+    monkeypatch.setattr(service, "_fetch_catalog", AsyncMock(return_value=[remote_descriptor]))
+
+    await service.refresh_catalog(force=True)
+
+    resolved = service._resolve_tool_identifier("finance.snapshot")
+    assert resolved == "finance/yfinance"
+    await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_tool_service_auth_header_provider(tool_settings: MCPToolSettings) -> None:
     tool_settings.api_key = "token-123"
     service = ToolService(tool_settings)
@@ -159,8 +176,9 @@ async def test_tool_service_request_signer(tool_settings: MCPToolSettings) -> No
 async def test_tool_service_onboarding_status(tool_settings: MCPToolSettings) -> None:
     service = ToolService(tool_settings)
     service._catalog = {
-    "search/duckduckgo": MCPToolDescriptor(name="search/duckduckgo"),
-    "finance/alpha_vantage": MCPToolDescriptor(name="finance/alpha_vantage"),
+        "search/duckduckgo": MCPToolDescriptor(name="search/duckduckgo"),
+        "finance/alpha_vantage": MCPToolDescriptor(name="finance/alpha_vantage"),
+        "finance/yfinance": MCPToolDescriptor(name="finance/yfinance"),
         "creative/stylizer": MCPToolDescriptor(name="creative/stylizer"),
     }
     diagnostics = service.get_diagnostics()

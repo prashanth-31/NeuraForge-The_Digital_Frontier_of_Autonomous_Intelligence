@@ -15,6 +15,8 @@ class ToolDescriptor:
     input_schema: Mapping[str, Any]
     output_schema: Mapping[str, Any]
     labels: tuple[str, ...] = ()
+    aliases: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] = ()
 
 
 class MCPToolAdapter(InstrumentedMCPToolAdapter, ABC):
@@ -23,6 +25,8 @@ class MCPToolAdapter(InstrumentedMCPToolAdapter, ABC):
     name: ClassVar[str]
     description: ClassVar[str]
     labels: ClassVar[tuple[str, ...]] = ()
+    aliases: ClassVar[tuple[str, ...]] = ()
+    capabilities: ClassVar[tuple[str, ...]] = ()
     InputModel: ClassVar[type[BaseModel]]
     OutputModel: ClassVar[type[BaseModel]]
 
@@ -34,6 +38,8 @@ class MCPToolAdapter(InstrumentedMCPToolAdapter, ABC):
             input_schema=cls.InputModel.model_json_schema(),
             output_schema=cls.OutputModel.model_json_schema(),
             labels=tuple(cls.labels) if cls.labels else (),
+            aliases=tuple(cls.aliases) if cls.aliases else (),
+            capabilities=tuple(cls.capabilities) if cls.capabilities else (),
         )
 
     @classmethod

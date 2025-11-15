@@ -124,6 +124,16 @@ class FakeRedis:
         self._store.clear()
 
 
+@pytest.fixture
+def fake_pool() -> FakePool:
+    return FakePool()
+
+
+@pytest.fixture
+def fake_redis() -> FakeRedis:
+    return FakeRedis()
+
+
 def _make_service(
     *,
     pool: FakePool | None = None,
@@ -135,8 +145,8 @@ def _make_service(
 
 
 @pytest.mark.asyncio
-async def test_ephemeral_memory_persists_across_instances() -> None:
-    pool = FakePool()
+async def test_ephemeral_memory_persists_across_instances(fake_pool: FakePool) -> None:
+    pool = fake_pool
     memory = _make_service(pool=pool)
 
     payload = {"result": {"status": "completed", "outputs": ["ok"]}, "agent": "planner"}
@@ -149,8 +159,8 @@ async def test_ephemeral_memory_persists_across_instances() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cache_first_prefers_redis_when_available() -> None:
-    redis = FakeRedis()
+async def test_cache_first_prefers_redis_when_available(fake_redis: FakeRedis) -> None:
+    redis = fake_redis
     memory = _make_service(redis=redis, read_pref="cache-first")
 
     await memory.store_ephemeral_memory("task-cache", {"value": 1, "agent": "planner"})
@@ -177,3 +187,36 @@ async def test_fetch_recent_context_merges_store_and_cache() -> None:
 
     values = {entry["value"] for entry in recent}
     assert values == {"alpha", "beta", "cached"}
+
+
+class FlakyRedis(FakeRedis):
+    async def set(self, key: str, value: str, ex: int | None = None) -> None:  # noqa: ARG002
+        raise ConnectionError("redis write failed")
+
+
+class BrokenPool(FakePool):
+    def acquire(self) -> _FakeAcquireContext:  # type: ignore[override]
+        raise ConnectionError("postgres unavailable")
+
+
+@pytest.mark.asyncio
+async def test_store_ephemeral_memory_handles_redis_failure(fake_pool: FakePool) -> None:
+    memory = _make_service(pool=fake_pool, redis=FlakyRedis())
+    payload = {"value": "resilient", "agent": "planner"}
+
+    await memory.store_ephemeral_memory("task-redis-flaky", payload)
+
+    fetched = await memory.fetch_ephemeral_memory("task-redis-flaky")
+    assert fetched == payload
+
+
+@pytest.mark.asyncio
+async def test_store_ephemeral_memory_handles_postgres_failure(fake_redis: FakeRedis) -> None:
+    memory = _make_service(pool=BrokenPool(), redis=fake_redis)
+    payload = {"value": "fallback", "agent": "planner"}
+
+    await memory.store_ephemeral_memory("task-postgres-flaky", payload)
+
+    # Should be present via redis/local cache despite Postgres failure
+    fetched = await memory.fetch_ephemeral_memory("task-postgres-flaky")
+    assert fetched == payload

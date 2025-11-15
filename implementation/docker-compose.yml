@@ -19,6 +19,7 @@ services:
       - neuraforge-net
     volumes:
       - ./backend/app:/app/app
+      - ./backend/scripts:/app/scripts
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
       interval: 30s
@@ -33,7 +34,7 @@ services:
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: neuraforge
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     networks:
@@ -48,7 +49,7 @@ services:
     image: redis:7.4-alpine
     container_name: neuraforge-redis
     ports:
-      - "6379:6379"
+      - "16379:6379"
     networks:
       - neuraforge-net
     volumes:
@@ -63,8 +64,8 @@ services:
     image: qdrant/qdrant:v1.12.3
     container_name: neuraforge-qdrant
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "16333:6333"
+      - "16334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     networks:

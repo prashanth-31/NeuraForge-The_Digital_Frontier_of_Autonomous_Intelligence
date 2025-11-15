@@ -16,10 +16,11 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency
 
 from ..agents.base import AgentContext, BaseAgent
 from ..agents.contracts import validate_agent_request, validate_agent_response
-from ..core.config import TOOL_ENFORCEMENT_POLICY
+from ..core.config import PlanningSettings, TOOL_ENFORCEMENT_POLICY, get_settings
 from ..core.logging import get_logger
 from ..core.metrics import (
     increment_agent_event,
+    increment_loop_abort,
     mark_orchestrator_run_completed,
     mark_orchestrator_run_started,
     observe_agent_latency,
@@ -31,7 +32,7 @@ from ..core.metrics import (
     record_sla_event,
 )
 from ..schemas.agents import AgentInput, AgentOutput
-from ..tools.exceptions import ToolError
+from ..tools.exceptions import ToolError, ToolPolicyViolationError
 from .context import ContextAssemblyContract, ContextSnapshot, ContextSnapshotStore, ContextStage
 from .dossier import build_decision_dossier
 from .guardrails import GuardrailDecisionType, GuardrailManager
@@ -44,6 +45,7 @@ from .review import ReviewManager
 from .scheduler import TaskScheduler
 from .state import OrchestratorEvent, OrchestratorRun, OrchestratorStatus
 from .store import OrchestratorStateStore
+from .tool_policy import AgentToolPolicy, get_agent_tool_policy
 
 logger = get_logger(name=__name__)
 
@@ -64,6 +66,9 @@ class _RunTracker:
     negotiation_consensus: float | None = None
     guardrail_decisions: int = 0
     escalations: int = 0
+    tool_calls: int = 0
+    planner_invocations: int = 0
+    abort_reason: str | None = None
 
     def __post_init__(self) -> None:
         self.started_at = time.perf_counter()
@@ -71,6 +76,14 @@ class _RunTracker:
 
 class ToolFirstPolicyViolation(RuntimeError):
     """Raised when an agent completes without a successful tool invocation."""
+
+
+class SafetyLimitExceeded(RuntimeError):
+    """Raised when orchestration guardrails exceed configured limits."""
+
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 @dataclass
@@ -82,11 +95,25 @@ class _ToolSession:
     planner_reason: str | None = None
     invocations: list[tuple[str, Any]] | None = None
     failures: list[dict[str, Any]] | None = None
+    run_tracker: "_RunTracker" | None = None
+    max_tool_calls: int | None = None
+    policy: AgentToolPolicy | None = None
 
     def __post_init__(self) -> None:
         self.invocations = [] if self.invocations is None else self.invocations
         self.failures = [] if self.failures is None else self.failures
         self.attempts = 0
+
+    def register_attempt(self, tool: str) -> None:
+        if self.max_tool_calls is None or self.max_tool_calls <= 0 or self.run_tracker is None:
+            return
+        next_count = self.run_tracker.tool_calls + 1
+        if next_count > self.max_tool_calls:
+            raise SafetyLimitExceeded(
+                "tool_call_limit",
+                f"Exceeded maximum of {self.max_tool_calls} tool calls while invoking '{tool}'",
+            )
+        self.run_tracker.tool_calls = next_count
 
     @property
     def proxy(self) -> Any:
@@ -162,6 +189,14 @@ class _ToolProxy:
         self._session = session
 
     async def invoke(self, tool: str, payload: dict[str, Any]) -> Any:
+        self._session.register_attempt(tool)
+        policy = self._session.policy
+        if policy is not None and not policy.is_allowed(tool):
+            error = ToolPolicyViolationError(
+                f"Tool '{tool}' is not permitted for agent '{self._session.agent_name}' (policy restricted)."
+            )
+            self._session.record_failure(tool, error)
+            raise error
         try:
             result = await self._session.tool_service.invoke(tool, payload)
         except Exception as exc:  # pragma: no cover - surfaced via agent logic
@@ -190,6 +225,7 @@ class Orchestrator:
         meta_agent: MetaAgent | None = None,
         review_manager: ReviewManager | None = None,
         orchestration_planner: LLMOrchestrationPlanner | None = None,
+        planning_settings: PlanningSettings | None = None,
     ):
         self.agents = agents
         self._state_store = state_store
@@ -211,11 +247,34 @@ class Orchestrator:
         self._active_plan_steps = None
         self._active_plan_step_lookup = None
         self._roster_index = {}
+        self._planning_settings = planning_settings or get_settings().planning
+        self._max_tool_calls = max(0, int(self._planning_settings.max_tool_calls_per_run))
+        self._max_planner_recursions = max(0, int(self._planning_settings.max_planner_recursions))
+        self._max_run_seconds = max(0.0, float(self._planning_settings.max_run_seconds))
+        self._active_run_tracker: _RunTracker | None = None
 
     def _reset_plan_state(self) -> None:
         self._active_plan_steps = None
         self._active_plan_step_lookup = None
         self._roster_index = {}
+
+    def _begin_run(self, run_tracker: _RunTracker | None, *, task: Mapping[str, Any]) -> _RunTracker:
+        tracker = run_tracker
+        if tracker is None:
+            entry_point = str(task.get("source") or "api")
+            tracker = _RunTracker(run=None, entry_point=entry_point)
+        tracker.tool_calls = 0
+        tracker.planner_invocations = 0
+        tracker.abort_reason = None
+        tracker.started_at = time.perf_counter()
+        self._active_run_tracker = tracker
+        return tracker
+
+    def _complete_run(self) -> None:
+        if self._active_run_tracker is not None:
+            self._active_run_tracker.tool_calls = 0
+            self._active_run_tracker.planner_invocations = 0
+        self._active_run_tracker = None
 
     def _lookup_plan_step_for_agent(self, agent_name: str) -> PlannedAgentStep | None:
         if self._active_plan_step_lookup is not None:
@@ -312,6 +371,7 @@ class Orchestrator:
                     agent=agent,
                     base_context=self._current_context,
                     plan_step=plan_step,
+                    run_tracker=self._active_run_tracker,
                 )
                 agent_context = self._clone_context(
                     self._current_context,
@@ -339,6 +399,7 @@ class Orchestrator:
         agent: BaseAgent,
         base_context: AgentContext,
         plan_step: PlannedAgentStep | None,
+        run_tracker: _RunTracker | None = None,
     ) -> _ToolSession | None:
         if base_context.tools is None:
             return None
@@ -347,12 +408,18 @@ class Orchestrator:
         planned = tuple(plan_step.tools) if plan_step and plan_step.tools else ()
         fallback = tuple(plan_step.fallback_tools) if plan_step and plan_step.fallback_tools else ()
         reason = plan_step.reason if plan_step and plan_step.reason else None
+        resolved_tracker = run_tracker if run_tracker is not None else self._active_run_tracker
+        max_calls = self._max_tool_calls if self._max_tool_calls > 0 else None
+        policy = get_agent_tool_policy(agent.name)
         return _ToolSession(
             agent_name=agent.name,
             tool_service=base_context.tools,
             planned_tools=planned,
             fallback_tools=fallback,
             planner_reason=reason,
+            run_tracker=resolved_tracker,
+            max_tool_calls=max_calls,
+            policy=policy,
         )
 
     def _clone_context(
@@ -387,6 +454,43 @@ class Orchestrator:
             fallback_tools=fallback_list,
             planner_reason=planner_reason,
         )
+
+    def _register_abort(self, tracker: _RunTracker | None, *, reason: str) -> None:
+        resolved = tracker or self._active_run_tracker
+        if resolved is not None and resolved.abort_reason == reason:
+            return
+        if resolved is not None:
+            resolved.abort_reason = reason
+        increment_loop_abort(reason=reason)
+
+    def _enforce_run_time_budget(self, tracker: _RunTracker | None) -> None:
+        if self._max_run_seconds <= 0.0:
+            return
+        resolved = tracker or self._active_run_tracker
+        if resolved is None:
+            return
+        elapsed = time.perf_counter() - resolved.started_at
+        if elapsed > self._max_run_seconds:
+            self._register_abort(resolved, reason="run_time_limit")
+            raise SafetyLimitExceeded(
+                "run_time_limit",
+                (
+                    f"Orchestration exceeded maximum duration of {self._max_run_seconds:.2f} seconds "
+                    f"(elapsed {elapsed:.2f} seconds)."
+                ),
+            )
+
+    def _enforce_planner_budget(self, tracker: _RunTracker | None) -> None:
+        resolved = tracker or self._active_run_tracker
+        if resolved is None:
+            return
+        resolved.planner_invocations += 1
+        if self._max_planner_recursions > 0 and resolved.planner_invocations > self._max_planner_recursions:
+            self._register_abort(resolved, reason="planner_recursion_limit")
+            raise SafetyLimitExceeded(
+                "planner_recursion_limit",
+                f"Exceeded maximum of {self._max_planner_recursions} planner invocations while resolving task.",
+            )
 
     async def _enforce_tool_first_policy(
         self,
@@ -448,44 +552,24 @@ class Orchestrator:
                     "planner_expected": bool(summary["planned_tools"] or summary["fallback_tools"]),
                 }
             )
+            if tool_session.policy is not None:
+                policy_meta.setdefault("allowed_patterns", list(tool_session.policy.allowed_patterns))
+                if tool_session.policy.denied_patterns:
+                    policy_meta.setdefault("denied_patterns", list(tool_session.policy.denied_patterns))
 
+        planner_expected = bool(summary["planned_tools"] or summary["fallback_tools"])
         if not tool_session.successful:
             if not enforcement_required:
                 if tool_session.attempts == 0:
-                    if not summary["planned_tools"] and not summary["fallback_tools"]:
+                    if not planner_expected:
                         record_agent_tool_policy(agent=agent.name, outcome="optional_skipped")
                         return
                     if self._should_allow_optional_tool_skip(summary=summary, state=state):
                         record_agent_tool_policy(agent=agent.name, outcome="optional_skipped_planned")
                         return
                 outcome = "optional_failed" if tool_session.attempts else "optional_missing"
-                record_agent_tool_policy(agent=agent.name, outcome=outcome)
-                payload = {
-                    "attempts": tool_session.attempts,
-                    "errors": tool_session.failures,
-                    "reason": "no_successful_invocation" if tool_session.attempts else "no_invocation",
-                    "planner": summary,
-                }
-                await self._record_event(run_tracker, "tool_policy_violation", agent=agent.name, payload=payload)
-                if progress_cb is not None:
-                    event_payload = self._ensure_run_id(
-                        run_tracker,
-                        {
-                            "event": "tool_policy_violation",
-                            "agent": agent.name,
-                            "task_id": self._task_id_from_state(state),
-                            **payload,
-                        },
-                    )
-                    await self._notify(progress_cb, event_payload)
-                logger.warning(
-                    "tool_policy_optional_violation",
-                    agent=agent.name,
-                    task=self._task_id_from_state(state),
-                    reason=payload["reason"],
-                )
-                return
-            outcome = "violation_failed" if tool_session.attempts else "violation_missing"
+            else:
+                outcome = "violation_failed" if tool_session.attempts else "violation_missing"
             record_agent_tool_policy(agent=agent.name, outcome=outcome)
             payload = {
                 "attempts": tool_session.attempts,
@@ -493,6 +577,11 @@ class Orchestrator:
                 "reason": "no_successful_invocation" if tool_session.attempts else "no_invocation",
                 "planner": summary,
             }
+            if tool_session.policy is not None:
+                payload["policy"] = {
+                    "allowed": list(tool_session.policy.allowed_patterns),
+                    "denied": list(tool_session.policy.denied_patterns),
+                }
             await self._record_event(run_tracker, "tool_policy_violation", agent=agent.name, payload=payload)
             if progress_cb is not None:
                 event_payload = self._ensure_run_id(
@@ -505,12 +594,26 @@ class Orchestrator:
                     },
                 )
                 await self._notify(progress_cb, event_payload)
+            if not enforcement_required:
+                logger.warning(
+                    "tool_policy_optional_violation",
+                    agent=agent.name,
+                    task=self._task_id_from_state(state),
+                    reason=payload["reason"],
+                )
+                if planner_expected:
+                    planned_list = summary["planned_tools"] or summary["fallback_tools"]
+                    raise ToolFirstPolicyViolation(
+                        f"Agent '{agent.name}' must successfully invoke planner-selected tools {planned_list} before completing."
+                    )
+                raise ToolFirstPolicyViolation(
+                    f"Agent '{agent.name}' must successfully invoke at least one tool before completing."
+                )
             raise ToolFirstPolicyViolation(
                 f"Agent '{agent.name}' must successfully invoke at least one tool before completing."
             )
 
-        planned_expectations = bool(summary["planned_tools"] or summary["fallback_tools"])
-        if planned_expectations and not summary["allowed"]:
+        if planner_expected and not summary["allowed"]:
             outcome = "violation_planner_unfulfilled"
             record_agent_tool_policy(agent=agent.name, outcome=outcome)
             payload = {
@@ -539,13 +642,12 @@ class Orchestrator:
                     planned=summary["planned_tools"],
                     fallback=summary["fallback_tools"],
                 )
-                return
             planned_list = summary["planned_tools"] or summary["fallback_tools"]
             raise ToolFirstPolicyViolation(
                 f"Agent '{agent.name}' must successfully invoke planned tools or fallbacks {planned_list} before completing."
             )
 
-        if planned_expectations:
+        if planner_expected:
             classification = summary["classification"]
             if classification == "primary":
                 outcome = "compliant_primary"
@@ -559,18 +661,41 @@ class Orchestrator:
 
     @staticmethod
     def _should_allow_optional_tool_skip(*, summary: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
-        prompt = str(state.get("prompt") or "").strip()
-        if prompt and len(prompt) <= 12 and "?" not in prompt:
+        planned_tools = tuple(summary.get("planned_tools") or ())
+        fallback_tools = tuple(summary.get("fallback_tools") or ())
+        if not planned_tools and not fallback_tools:
             return True
+
+        prompt = str(state.get("prompt") or "").strip()
+        greeting_like = False
+        if prompt:
+            prompt_lc = prompt.lower()
+            greeting_terms = (
+                "hi",
+                "hello",
+                "hey",
+                "greetings",
+                "welcome",
+                "good morning",
+                "good afternoon",
+                "good evening",
+            )
+            greeting_like = any(
+                prompt_lc == term or prompt_lc.startswith(f"{term} ")
+                for term in greeting_terms
+            )
+
         reason = str(summary.get("planner_reason") or "").lower()
         if any(keyword in reason for keyword in ("greet", "hello", "welcome", "triage", "intro")):
-            return True
+            greeting_like = True
+
         metadata = state.get("metadata")
         if isinstance(metadata, Mapping):
             intent = metadata.get("intent")
             if isinstance(intent, str) and intent.lower() in {"greeting", "smalltalk"}:
-                return True
-        return False
+                greeting_like = True
+
+        return greeting_like
 
     async def route_task(
         self,
@@ -592,7 +717,10 @@ class Orchestrator:
             return {"status": "noop", "outputs": [], **task}
 
         try:
-            agent_sequence, routing_context, skipped_agents = await self._determine_agent_sequence(task)
+            agent_sequence, routing_context, skipped_agents = await self._determine_agent_sequence(
+                task,
+                run_tracker=run_tracker,
+            )
         except PlannerError as exc:
             error_message = str(exc) or "Planner failure"
             task.setdefault("outputs", [])
@@ -684,92 +812,104 @@ class Orchestrator:
         state = task
         state.setdefault("outputs", [])
         state.setdefault("shared_context", {"provenance": []})
-        task_id = str(state.get("id") or state.get("task_id") or "")
-        failure: Exception | None = None
-        plan_steps = list(self._active_plan_steps or [])
-        using_plan_steps = bool(plan_steps)
-        roster_index = self._roster_index if self._roster_index else {agent.name: agent for agent in self.agents}
-        execution_plan: list[tuple[int, PlannedAgentStep | None, BaseAgent]] = []
-        if using_plan_steps:
-            for idx, plan_step in enumerate(plan_steps):
-                candidate = roster_index.get(plan_step.agent)
-                if candidate is None:
-                    logger.error(
-                        "planner_step_agent_missing",
-                        task=task.get("id"),
-                        step_index=idx,
-                        planned_agent=plan_step.agent,
-                    )
-                    continue
-                execution_plan.append((idx, plan_step, candidate))
-            if not execution_plan:
-                using_plan_steps = False
-        if not execution_plan:
-            derived_agents = list(agent_sequence or self.agents)
-            execution_plan = [(idx, None, agent) for idx, agent in enumerate(derived_agents)]
-        agents = [agent for _, _, agent in execution_plan]
-        if skipped_agents:
-            routing_state = state.get("routing") if isinstance(state.get("routing"), dict) else {}
-            scores = routing_state.get("scores") if isinstance(routing_state.get("scores"), dict) else {}
-            for skipped in skipped_agents:
-                await self._record_event(
-                    run_tracker,
-                    "agent_skipped",
-                    agent=skipped.name,
-                    payload={"score": scores.get(skipped.name)},
-                )
-                await self._notify(
-                    progress_cb,
-                    self._ensure_run_id(
-                        run_tracker,
-                        {
-                            "event": "agent_skipped",
-                            "agent": skipped.name,
-                            "task_id": task.get("id"),
-                            "score": scores.get(skipped.name),
-                        },
-                    ),
-                )
-            logger.info(
-                "agents_skipped",
-                task=task.get("id"),
-                agents=[agent.name for agent in skipped_agents],
-            )
-
-        for step_index, plan_step, planned_agent in execution_plan:
-            executed_agent = planned_agent
-            resolved_step = plan_step
-            fallback_agent: BaseAgent | None = None
-            fallback_reason: str | None = None
-            step_confidence = 1.0
-            if plan_step is not None:
-                step_confidence = self._coerce_plan_confidence(getattr(plan_step, "confidence", 1.0))
-                plan_step.confidence = step_confidence
-                if step_confidence < LOW_PLANNER_CONFIDENCE_THRESHOLD:
-                    candidate = roster_index.get("general_agent")
-                    if candidate is not None and candidate.name != planned_agent.name:
-                        fallback_agent = candidate
-                        fallback_reason = (
-                            f"Planner confidence {step_confidence:.2f} below threshold "
-                            f"{LOW_PLANNER_CONFIDENCE_THRESHOLD:.2f}; rerouting to general_agent."
-                        )
-                        executed_agent = candidate
-                        resolved_step = PlannedAgentStep(
-                            agent=candidate.name,
-                            tools=[],
-                            fallback_tools=list(plan_step.fallback_tools),
-                            reason=f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}".strip(),
-                            confidence=step_confidence,
-                        )
-                        logger.warning(
-                            "planner_step_low_confidence_fallback",
+        run_tracker = self._begin_run(run_tracker, task=state)
+        self._current_context = context
+        try:
+            self._enforce_run_time_budget(run_tracker)
+            task_id = str(state.get("id") or state.get("task_id") or "")
+            failure: Exception | None = None
+            plan_steps = list(self._active_plan_steps or [])
+            using_plan_steps = bool(plan_steps)
+            roster_index = self._roster_index if self._roster_index else {agent.name: agent for agent in self.agents}
+            execution_plan: list[tuple[int, PlannedAgentStep | None, BaseAgent]] = []
+            if using_plan_steps:
+                for idx, plan_step in enumerate(plan_steps):
+                    candidate = roster_index.get(plan_step.agent)
+                    if candidate is None:
+                        logger.error(
+                            "planner_step_agent_missing",
                             task=task.get("id"),
-                            step_index=step_index,
+                            step_index=idx,
                             planned_agent=plan_step.agent,
-                            fallback_agent=candidate.name,
-                            confidence=step_confidence,
-                            threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
                         )
+                        continue
+                    execution_plan.append((idx, plan_step, candidate))
+                if not execution_plan:
+                    using_plan_steps = False
+            if not execution_plan:
+                derived_agents = list(agent_sequence or self.agents)
+                execution_plan = [(idx, None, agent) for idx, agent in enumerate(derived_agents)]
+            agents = [agent for _, _, agent in execution_plan]
+            if skipped_agents:
+                routing_state = state.get("routing") if isinstance(state.get("routing"), dict) else {}
+                scores = routing_state.get("scores") if isinstance(routing_state.get("scores"), dict) else {}
+                for skipped in skipped_agents:
+                    await self._record_event(
+                        run_tracker,
+                        "agent_skipped",
+                        agent=skipped.name,
+                        payload={"score": scores.get(skipped.name)},
+                    )
+                    await self._notify(
+                        progress_cb,
+                        self._ensure_run_id(
+                            run_tracker,
+                            {
+                                "event": "agent_skipped",
+                                "agent": skipped.name,
+                                "task_id": task.get("id"),
+                                "score": scores.get(skipped.name),
+                            },
+                        ),
+                    )
+                logger.info(
+                    "agents_skipped",
+                    task=task.get("id"),
+                    agents=[agent.name for agent in skipped_agents],
+                )
+
+            for step_index, plan_step, planned_agent in execution_plan:
+                self._enforce_run_time_budget(run_tracker)
+                executed_agent = planned_agent
+                resolved_step = plan_step
+                fallback_agent: BaseAgent | None = None
+                fallback_reason: str | None = None
+                step_confidence = 1.0
+                if plan_step is not None:
+                    step_confidence = self._coerce_plan_confidence(getattr(plan_step, "confidence", 1.0))
+                    plan_step.confidence = step_confidence
+                    if step_confidence < LOW_PLANNER_CONFIDENCE_THRESHOLD:
+                        candidate = roster_index.get("general_agent")
+                        if candidate is not None and candidate.name != planned_agent.name:
+                            fallback_agent = candidate
+                            fallback_reason = (
+                                f"Planner confidence {step_confidence:.2f} below threshold "
+                                f"{LOW_PLANNER_CONFIDENCE_THRESHOLD:.2f}; rerouting to general_agent."
+                            )
+                            executed_agent = candidate
+                            resolved_step = PlannedAgentStep(
+                                agent=candidate.name,
+                                tools=[],
+                                fallback_tools=list(plan_step.fallback_tools),
+                                reason=f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}".strip(),
+                                confidence=step_confidence,
+                            )
+                            logger.warning(
+                                "planner_step_low_confidence_fallback",
+                                task=task.get("id"),
+                                step_index=step_index,
+                                planned_agent=plan_step.agent,
+                                fallback_agent=candidate.name,
+                                confidence=step_confidence,
+                                threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
+                            )
+                        else:
+                            resolved_step = replace(
+                                plan_step,
+                                confidence=step_confidence,
+                                tools=list(plan_step.tools),
+                                fallback_tools=list(plan_step.fallback_tools),
+                            )
                     else:
                         resolved_step = replace(
                             plan_step,
@@ -777,264 +917,294 @@ class Orchestrator:
                             tools=list(plan_step.tools),
                             fallback_tools=list(plan_step.fallback_tools),
                         )
-                else:
-                    resolved_step = replace(
-                        plan_step,
-                        confidence=step_confidence,
-                        tools=list(plan_step.tools),
-                        fallback_tools=list(plan_step.fallback_tools),
+                step_context = resolved_step or plan_step
+                step_id = f"agent::{executed_agent.name}"
+                if using_plan_steps:
+                    step_id = f"{step_id}::{step_index}"
+                step_metadata: dict[str, Any] | None = None
+                if plan_step is not None or step_context is not None:
+                    step_metadata = self._build_planner_step_metadata(
+                        index=step_index,
+                        planned_step=plan_step,
+                        resolved_step=step_context,
+                        executed_agent=executed_agent,
+                        fallback_agent=fallback_agent,
+                        fallback_reason=fallback_reason,
                     )
-            step_context = resolved_step or plan_step
-            step_id = f"agent::{executed_agent.name}"
-            if using_plan_steps:
-                step_id = f"{step_id}::{step_index}"
-            step_metadata: dict[str, Any] | None = None
-            if plan_step is not None or step_context is not None:
-                step_metadata = self._build_planner_step_metadata(
-                    index=step_index,
-                    planned_step=plan_step,
-                    resolved_step=step_context,
-                    executed_agent=executed_agent,
-                    fallback_agent=fallback_agent,
-                    fallback_reason=fallback_reason,
-                )
-                step_metadata.setdefault("step_id", step_id)
-                self._append_step_metadata(state, step_metadata)
-                if fallback_agent is not None:
-                    self._record_step_override(state, step_metadata)
-                logger.info(
-                    "planner_step_started",
-                    task=task.get("id"),
-                    step_index=step_index,
-                    planned_agent=step_metadata.get("planned_agent"),
-                    executed_agent=step_metadata.get("executed_agent"),
-                    reason=step_metadata.get("executed_reason") or step_metadata.get("planned_reason"),
-                    tools=step_metadata.get("executed_tools") or step_metadata.get("planned_tools"),
-                    fallback_applied=step_metadata.get("fallback_applied"),
-                )
-            event_step_metadata = dict(step_metadata) if step_metadata is not None else None
-            if event_step_metadata is not None:
-                event_step_metadata["status"] = "started"
-            await self._record_event(
-                run_tracker,
-                "agent_started",
-                agent=executed_agent.name,
-                payload={"task_id": task.get("id"), "planner_step": event_step_metadata},
-            )
-            await self._notify(
-                progress_cb,
-                self._ensure_run_id(
+                    step_metadata.setdefault("step_id", step_id)
+                    self._append_step_metadata(state, step_metadata)
+                    if fallback_agent is not None:
+                        self._record_step_override(state, step_metadata)
+                    logger.info(
+                        "planner_step_started",
+                        task=task.get("id"),
+                        step_index=step_index,
+                        planned_agent=step_metadata.get("planned_agent"),
+                        executed_agent=step_metadata.get("executed_agent"),
+                        reason=step_metadata.get("executed_reason") or step_metadata.get("planned_reason"),
+                        tools=step_metadata.get("executed_tools") or step_metadata.get("planned_tools"),
+                        fallback_applied=step_metadata.get("fallback_applied"),
+                    )
+                event_step_metadata = dict(step_metadata) if step_metadata is not None else None
+                if event_step_metadata is not None:
+                    event_step_metadata["status"] = "started"
+                await self._record_event(
                     run_tracker,
-                    {
-                        "event": "agent_started",
-                        "agent": executed_agent.name,
-                        "task_id": task.get("id"),
-                        "step_id": step_id,
-                        "planner_step": event_step_metadata,
-                    },
-                ),
-            )
-            increment_agent_event(agent=executed_agent.name, event="started")
-            logger.info("agent_started", agent=executed_agent.name, task=task.get("id"))
-            start_time = time.perf_counter()
-            await self._record_lifecycle(
-                run_tracker,
-                task_id=task_id,
-                step_id=step_id,
-                event_type="agent_started",
-                status=LifecycleStatus.IN_PROGRESS,
-                agent=executed_agent.name,
-            )
-            await self._capture_snapshot(
-                run_tracker,
-                ContextStage.EXECUTION,
-                state,
-                agent=executed_agent.name,
-                extra={"event": "agent_started", "planner_step": event_step_metadata},
-            )
-            try:
-                tool_session = self._start_tool_session(
-                    agent=executed_agent,
-                    base_context=context,
-                    plan_step=step_context,
-                )
-                agent_context = self._clone_context(
-                    context,
-                    tool_session,
-                    step_context,
-                    agent_name=executed_agent.name,
-                )
-                agent_input = await self._prepare_agent_input(state, agent=executed_agent, context=agent_context)
-                result = await executed_agent.handle(agent_input, context=agent_context)
-                self._record_output(state, agent=executed_agent, result=result, planner_step=step_metadata)
-                await self._enforce_tool_first_policy(
-                    tool_session,
-                    agent=executed_agent,
-                    state=state,
-                    run_tracker=run_tracker,
-                    progress_cb=progress_cb,
-                )
-            except Exception as exc:
-                duration = time.perf_counter() - start_time
-                observe_agent_latency(agent=executed_agent.name, latency=duration)
-                increment_agent_event(agent=executed_agent.name, event="failed")
-                failure = exc
-                failed_step_metadata = dict(step_metadata) if step_metadata is not None else None
-                if failed_step_metadata is not None:
-                    failed_step_metadata["status"] = "failed"
-                await self._record_lifecycle(
-                    run_tracker,
-                    task_id=task_id,
-                    step_id=step_id,
-                    event_type="agent_failed",
-                    status=LifecycleStatus.FAILED,
+                    "agent_started",
                     agent=executed_agent.name,
-                    latency_ms=duration * 1000,
+                    payload={"task_id": task.get("id"), "planner_step": event_step_metadata},
                 )
                 await self._notify(
                     progress_cb,
                     self._ensure_run_id(
                         run_tracker,
                         {
-                            "event": "agent_failed",
+                            "event": "agent_started",
                             "agent": executed_agent.name,
                             "task_id": task.get("id"),
-                            "error": str(exc),
-                            "latency": duration,
                             "step_id": step_id,
-                            "planner_step": failed_step_metadata,
+                            "planner_step": event_step_metadata,
                         },
                     ),
                 )
-                logger.exception(
-                    "agent_failed",
-                    agent=executed_agent.name,
-                    task=task.get("id"),
-                    duration=duration,
-                )
-                if step_metadata is not None:
-                    logger.error(
-                        "planner_step_failed",
-                        task=task.get("id"),
-                        step_index=step_index,
-                        executed_agent=executed_agent.name,
-                        error=str(exc),
-                    )
-                state["status"] = "failed"
-                state["error"] = str(exc)
-                await self._record_event(
+                increment_agent_event(agent=executed_agent.name, event="started")
+                logger.info("agent_started", agent=executed_agent.name, task=task.get("id"))
+                start_time = time.perf_counter()
+                await self._record_lifecycle(
                     run_tracker,
-                    "agent_failed",
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="agent_started",
+                    status=LifecycleStatus.IN_PROGRESS,
                     agent=executed_agent.name,
-                    payload={"error": str(exc), "latency": duration, "planner_step": failed_step_metadata},
                 )
                 await self._capture_snapshot(
                     run_tracker,
                     ContextStage.EXECUTION,
                     state,
                     agent=executed_agent.name,
-                    extra={"event": "agent_failed", "error": str(exc), "planner_step": failed_step_metadata},
+                    extra={"event": "agent_started", "planner_step": event_step_metadata},
                 )
-                await self._finalize_run(run_tracker, state, status=OrchestratorStatus.FAILED, error=str(exc))
-                raise
-            duration = time.perf_counter() - start_time
-            observe_agent_latency(agent=executed_agent.name, latency=duration)
-            increment_agent_event(agent=executed_agent.name, event="completed")
-            logger.info(
-                "agent_completed",
-                agent=executed_agent.name,
-                task=task.get("id"),
-                duration=duration,
-                outputs=len(state.get("outputs", [])),
-            )
-            if step_metadata is not None:
+                try:
+                    tool_session = self._start_tool_session(
+                        agent=executed_agent,
+                        base_context=context,
+                        plan_step=step_context,
+                        run_tracker=run_tracker,
+                    )
+                    agent_context = self._clone_context(
+                        context,
+                        tool_session,
+                        step_context,
+                        agent_name=executed_agent.name,
+                    )
+                    agent_input = await self._prepare_agent_input(state, agent=executed_agent, context=agent_context)
+                    result = await executed_agent.handle(agent_input, context=agent_context)
+                    self._record_output(state, agent=executed_agent, result=result, planner_step=step_metadata)
+                    await self._enforce_tool_first_policy(
+                        tool_session,
+                        agent=executed_agent,
+                        state=state,
+                        run_tracker=run_tracker,
+                        progress_cb=progress_cb,
+                    )
+                except Exception as exc:
+                    duration = time.perf_counter() - start_time
+                    observe_agent_latency(agent=executed_agent.name, latency=duration)
+                    increment_agent_event(agent=executed_agent.name, event="failed")
+                    failure = exc
+                    failed_step_metadata = dict(step_metadata) if step_metadata is not None else None
+                    if failed_step_metadata is not None:
+                        failed_step_metadata["status"] = "failed"
+                    await self._record_lifecycle(
+                        run_tracker,
+                        task_id=task_id,
+                        step_id=step_id,
+                        event_type="agent_failed",
+                        status=LifecycleStatus.FAILED,
+                        agent=executed_agent.name,
+                        latency_ms=duration * 1000,
+                    )
+                    await self._notify(
+                        progress_cb,
+                        self._ensure_run_id(
+                            run_tracker,
+                            {
+                                "event": "agent_failed",
+                                "agent": executed_agent.name,
+                                "task_id": task.get("id"),
+                                "error": str(exc),
+                                "latency": duration,
+                                "step_id": step_id,
+                                "planner_step": failed_step_metadata,
+                            },
+                        ),
+                    )
+                    logger.exception(
+                        "agent_failed",
+                        agent=executed_agent.name,
+                        task=task.get("id"),
+                        duration=duration,
+                    )
+                    if step_metadata is not None:
+                        logger.error(
+                            "planner_step_failed",
+                            task=task.get("id"),
+                            step_index=step_index,
+                            executed_agent=executed_agent.name,
+                            error=str(exc),
+                        )
+                    state["status"] = "failed"
+                    state["error"] = str(exc)
+                    await self._record_event(
+                        run_tracker,
+                        "agent_failed",
+                        agent=executed_agent.name,
+                        payload={"error": str(exc), "latency": duration, "planner_step": failed_step_metadata},
+                    )
+                    await self._capture_snapshot(
+                        run_tracker,
+                        ContextStage.EXECUTION,
+                        state,
+                        agent=executed_agent.name,
+                        extra={"event": "agent_failed", "error": str(exc), "planner_step": failed_step_metadata},
+                    )
+                    if not isinstance(exc, SafetyLimitExceeded):
+                        await self._finalize_run(run_tracker, state, status=OrchestratorStatus.FAILED, error=str(exc))
+                    raise
+                duration = time.perf_counter() - start_time
+                observe_agent_latency(agent=executed_agent.name, latency=duration)
+                increment_agent_event(agent=executed_agent.name, event="completed")
                 logger.info(
-                    "planner_step_completed",
+                    "agent_completed",
+                    agent=executed_agent.name,
                     task=task.get("id"),
-                    step_index=step_index,
-                    executed_agent=step_metadata.get("executed_agent"),
-                    latency=duration,
-                    fallback_applied=step_metadata.get("fallback_applied"),
+                    duration=duration,
+                    outputs=len(state.get("outputs", [])),
                 )
-            latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
-            completed_step_metadata = dict(step_metadata) if step_metadata is not None else None
-            if completed_step_metadata is not None:
-                completed_step_metadata["status"] = "completed"
-            await self._notify(
-                progress_cb,
-                self._ensure_run_id(
+                if step_metadata is not None:
+                    logger.info(
+                        "planner_step_completed",
+                        task=task.get("id"),
+                        step_index=step_index,
+                        executed_agent=step_metadata.get("executed_agent"),
+                        latency=duration,
+                        fallback_applied=step_metadata.get("fallback_applied"),
+                    )
+                latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
+                completed_step_metadata = dict(step_metadata) if step_metadata is not None else None
+                if completed_step_metadata is not None:
+                    completed_step_metadata["status"] = "completed"
+                await self._notify(
+                    progress_cb,
+                    self._ensure_run_id(
+                        run_tracker,
+                        {
+                            "event": "agent_completed",
+                            "agent": executed_agent.name,
+                            "task_id": task.get("id"),
+                            "latency": duration,
+                            "output": latest_output,
+                            "step_id": step_id,
+                            "planner_step": completed_step_metadata,
+                        },
+                    ),
+                )
+                await self._record_event(
                     run_tracker,
-                    {
-                        "event": "agent_completed",
-                        "agent": executed_agent.name,
-                        "task_id": task.get("id"),
-                        "latency": duration,
-                        "output": latest_output,
-                        "step_id": step_id,
-                        "planner_step": completed_step_metadata,
-                    },
-                ),
+                    "agent_completed",
+                    agent=executed_agent.name,
+                    payload={"latency": duration, "output": latest_output, "planner_step": completed_step_metadata},
+                )
+                await self._record_lifecycle(
+                    run_tracker,
+                    task_id=task_id,
+                    step_id=step_id,
+                    event_type="agent_completed",
+                    status=LifecycleStatus.COMPLETED,
+                    agent=executed_agent.name,
+                    latency_ms=duration * 1000,
+                )
+                await self._capture_snapshot(
+                    run_tracker,
+                    ContextStage.EXECUTION,
+                    state,
+                    agent=executed_agent.name,
+                    extra={"event": "agent_completed", "output": latest_output, "planner_step": completed_step_metadata},
+                )
+                await self._update_state(run_tracker, state)
+                self._enforce_run_time_budget(run_tracker)
+
+            self._enforce_run_time_budget(run_tracker)
+            if state.get("status") != "failed":
+                meta_resolution: MetaResolution | None = None
+                if self._negotiation is not None:
+                    await self._apply_negotiation(state, run_tracker, progress_cb=progress_cb)
+                else:
+                    await self._generate_plan(state, run_tracker, progress_cb=progress_cb)
+                should_run_meta, skip_reason = self._should_run_meta_pipeline(state)
+                if should_run_meta:
+                    meta_resolution = await self._synthesize_meta_resolution(state, run_tracker)
+                    await self._assemble_dossier(state, run_tracker, meta_resolution=meta_resolution)
+                else:
+                    if skip_reason:
+                        logger.info("meta_pipeline_skipped", task=task.get("id"), reason=skip_reason)
+                        await self._record_event(
+                            run_tracker,
+                            "meta_pipeline_skipped",
+                            payload={"reason": skip_reason},
+                        )
+                    meta_section = state.setdefault("meta", {})
+                    meta_section.setdefault("status", "skipped")
+                    if skip_reason:
+                        meta_section.setdefault("reason", skip_reason)
+                    dossier_section = state.setdefault("dossier", {})
+                    dossier_section.setdefault("status", "skipped")
+                    if skip_reason:
+                        dossier_section.setdefault("reason", skip_reason)
+                state["status"] = "completed"
+                await self._finalize_run(
+                    run_tracker,
+                    state,
+                    status=OrchestratorStatus.COMPLETED if failure is None else OrchestratorStatus.FAILED,
+                    error=str(failure) if failure is not None else None,
+                )
+                return state
+        except SafetyLimitExceeded as exc:
+            self._register_abort(run_tracker, reason=exc.reason)
+            logger.error(
+                "safety_limit_exceeded",
+                task=state.get("id"),
+                reason=exc.reason,
+                error=str(exc),
             )
+            state["status"] = "failed"
+            state["error"] = str(exc)
+            failure_section = state.setdefault("failure", {})
+            failure_section.setdefault("type", exc.reason)
+            failure_section.setdefault("message", str(exc))
             await self._record_event(
                 run_tracker,
-                "agent_completed",
-                agent=executed_agent.name,
-                payload={"latency": duration, "output": latest_output, "planner_step": completed_step_metadata},
-            )
-            await self._record_lifecycle(
-                run_tracker,
-                task_id=task_id,
-                step_id=step_id,
-                event_type="agent_completed",
-                status=LifecycleStatus.COMPLETED,
-                agent=executed_agent.name,
-                latency_ms=duration * 1000,
+                "run_aborted",
+                payload={"reason": exc.reason, "message": str(exc)},
             )
             await self._capture_snapshot(
                 run_tracker,
                 ContextStage.EXECUTION,
                 state,
-                agent=executed_agent.name,
-                extra={"event": "agent_completed", "output": latest_output, "planner_step": completed_step_metadata},
+                extra={"event": "run_aborted", "reason": exc.reason, "error": str(exc)},
             )
-            await self._update_state(run_tracker, state)
+            await self._finalize_run(run_tracker, state, status=OrchestratorStatus.FAILED, error=str(exc))
+            raise
+        finally:
+            self._current_context = None
+            self._complete_run()
 
-        if state.get("status") != "failed":
-            meta_resolution: MetaResolution | None = None
-            if self._negotiation is not None:
-                await self._apply_negotiation(state, run_tracker, progress_cb=progress_cb)
-            else:
-                await self._generate_plan(state, run_tracker, progress_cb=progress_cb)
-            should_run_meta, skip_reason = self._should_run_meta_pipeline(state)
-            if should_run_meta:
-                meta_resolution = await self._synthesize_meta_resolution(state, run_tracker)
-                await self._assemble_dossier(state, run_tracker, meta_resolution=meta_resolution)
-            else:
-                if skip_reason:
-                    logger.info("meta_pipeline_skipped", task=task.get("id"), reason=skip_reason)
-                    await self._record_event(
-                        run_tracker,
-                        "meta_pipeline_skipped",
-                        payload={"reason": skip_reason},
-                    )
-                meta_section = state.setdefault("meta", {})
-                meta_section.setdefault("status", "skipped")
-                if skip_reason:
-                    meta_section.setdefault("reason", skip_reason)
-                dossier_section = state.setdefault("dossier", {})
-                dossier_section.setdefault("status", "skipped")
-                if skip_reason:
-                    dossier_section.setdefault("reason", skip_reason)
-        state["status"] = "completed"
-        await self._finalize_run(
-            run_tracker,
-            state,
-            status=OrchestratorStatus.COMPLETED if failure is None else OrchestratorStatus.FAILED,
-            error=str(failure) if failure is not None else None,
-        )
-        return state
-
-    async def _determine_agent_sequence(self, task: dict[str, Any]) -> tuple[list[BaseAgent], dict[str, Any], list[BaseAgent]]:
+    async def _determine_agent_sequence(
+        self,
+        task: dict[str, Any],
+        run_tracker: _RunTracker | None = None,
+    ) -> tuple[list[BaseAgent], dict[str, Any], list[BaseAgent]]:
         roster = list(self.agents)
         self._active_plan_steps = None
         self._active_plan_step_lookup = None
@@ -1067,12 +1237,15 @@ class Orchestrator:
             raise PlannerError(error_message)
 
         try:
+            self._enforce_planner_budget(run_tracker)
             planner_plan = await self._llm_planner.plan(
                 task=task,
                 prior_outputs=self._coerce_prior_outputs(task),
                 agents=roster,
                 tool_aliases=self._collect_tool_aliases(task),
             )
+        except SafetyLimitExceeded:
+            raise
         except PlannerError as exc:
             error_message = str(exc)
             self._register_planner_failure(task, roster, status="failed", error=error_message)
@@ -1628,6 +1801,7 @@ class Orchestrator:
     ) -> None:
         if self._negotiation is None:
             return
+        self._enforce_run_time_budget(tracker)
         try:
             await self._record_event(tracker, "negotiation_started", payload={"outputs": len(state.get("outputs", []))})
             decision = await self._negotiation.decide(state, state.get("outputs", []))
@@ -1666,6 +1840,7 @@ class Orchestrator:
     ) -> None:
         if self._planner is None:
             return
+        self._enforce_run_time_budget(tracker)
         try:
             plan = await self._planner.build_plan(
                 task=state,
@@ -1782,6 +1957,7 @@ class Orchestrator:
     ) -> MetaResolution | None:
         if self._meta_agent is None:
             return None
+        self._enforce_run_time_budget(tracker)
         try:
             resolution = await self._meta_agent.synthesize(
                 task=state,
@@ -1838,6 +2014,7 @@ class Orchestrator:
         *,
         meta_resolution: MetaResolution | None,
     ) -> None:
+        self._enforce_run_time_budget(tracker)
         try:
             dossier = build_decision_dossier(state, meta_resolution=meta_resolution)
         except Exception as exc:  # pragma: no cover - dossier generation should not fail the run

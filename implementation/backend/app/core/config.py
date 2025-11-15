@@ -7,9 +7,9 @@ from pydantic import BaseModel, Field, PostgresDsn, RedisDsn
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 TOOL_ENFORCEMENT_POLICY: dict[str, bool] = {
-    "finance_agent": False,
-    "research_agent": False,
-    "enterprise_agent": False,
+    "finance_agent": True,
+    "research_agent": True,
+    "enterprise_agent": True,
     "creative_agent": False,
     "general_agent": False,
 }
@@ -107,6 +107,9 @@ class PlanningSettings(BaseModel):
     max_dependency_depth: int = Field(4, ge=1)
     default_step_duration_minutes: int = Field(10, ge=1)
     assignment_strategy: Literal["capability", "round_robin"] = "capability"
+    max_tool_calls_per_run: int = Field(12, ge=1, description="Maximum tool invocations permitted during a single orchestration run.")
+    max_planner_recursions: int = Field(3, ge=1, description="Maximum planner invocations permitted while resolving a single task.")
+    max_run_seconds: float = Field(120.0, ge=1.0, description="Maximum wall-clock seconds allowed for an orchestration run before guardrail abort.")
 
 
 class SchedulingSettings(BaseModel):
@@ -238,7 +241,7 @@ class MCPToolSettings(BaseModel):
     extra_headers: dict[str, str] = Field(default_factory=dict, description="Additional HTTP headers to include for MCP calls.")
     aliases: dict[str, str] = Field(
         default_factory=dict,
-    description="Optional mapping of logical tool aliases to MCP tool identifiers (e.g. 'finance.snapshot' -> 'finance/alpha_vantage').",
+    description="Optional mapping of logical tool aliases to MCP tool identifiers (e.g. 'finance.snapshot' -> 'finance/yfinance').",
     )
     max_retries: int = Field(2, ge=0, description="Maximum retry attempts for MCP HTTP requests.")
     retry_backoff_seconds: float = Field(0.5, ge=0.0, description="Initial backoff delay between retries.")
@@ -261,6 +264,19 @@ class MCPToolSettings(BaseModel):
     use_local_router: bool = Field(
         False,
         description="Route MCP calls through the in-process FastAPI app using ASGI transport.",
+    )
+    snapshot_path: str | None = Field(
+        default=None,
+        description="Optional filesystem path where the latest tool catalog snapshot is written as JSON.",
+    )
+    snapshot_history_dir: str | None = Field(
+        default=None,
+        description="Optional directory where timestamped tool catalog snapshots are stored for auditing.",
+    )
+    snapshot_history_limit: int = Field(
+        20,
+        ge=0,
+        description="Maximum number of historical catalog snapshots to retain when snapshot_history_dir is set.",
     )
 
 
