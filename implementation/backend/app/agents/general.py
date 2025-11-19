@@ -24,7 +24,7 @@ class GeneralistAgent:
         " truly missing. Keep outputs actionable and concise."
     )
     description: str = "Handles greetings, casual queries, or triage before escalating as needed."
-    tool_preference: list[str] = field(default_factory=list)
+    tool_preference: list[str] = field(default_factory=lambda: ["research.search"])
     fallback_agent: str | None = None
     confidence_bias: float = 0.6
 

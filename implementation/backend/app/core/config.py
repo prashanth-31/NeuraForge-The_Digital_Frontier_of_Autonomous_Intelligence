@@ -110,6 +110,12 @@ class PlanningSettings(BaseModel):
     max_tool_calls_per_run: int = Field(12, ge=1, description="Maximum tool invocations permitted during a single orchestration run.")
     max_planner_recursions: int = Field(3, ge=1, description="Maximum planner invocations permitted while resolving a single task.")
     max_run_seconds: float = Field(120.0, ge=1.0, description="Maximum wall-clock seconds allowed for an orchestration run before guardrail abort.")
+    low_confidence_threshold: float = Field(
+        0.55,
+        ge=0.0,
+        le=1.0,
+        description="Planner confidence below this value triggers dynamic router fallback rather than hardcoding general_agent.",
+    )
 
 
 class SchedulingSettings(BaseModel):

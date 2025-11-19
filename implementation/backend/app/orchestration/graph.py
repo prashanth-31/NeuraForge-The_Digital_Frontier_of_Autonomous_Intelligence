@@ -42,6 +42,7 @@ from .meta import MetaAgent, MetaResolution
 from .negotiation import NegotiationEngine
 from .planner import TaskPlanner
 from .review import ReviewManager
+from .routing import DynamicAgentRouter, RoutingDecision
 from .scheduler import TaskScheduler
 from .state import OrchestratorEvent, OrchestratorRun, OrchestratorStatus
 from .store import OrchestratorStateStore
@@ -226,6 +227,7 @@ class Orchestrator:
         review_manager: ReviewManager | None = None,
         orchestration_planner: LLMOrchestrationPlanner | None = None,
         planning_settings: PlanningSettings | None = None,
+        agent_router: DynamicAgentRouter | None = None,
     ):
         self.agents = agents
         self._state_store = state_store
@@ -252,11 +254,30 @@ class Orchestrator:
         self._max_planner_recursions = max(0, int(self._planning_settings.max_planner_recursions))
         self._max_run_seconds = max(0.0, float(self._planning_settings.max_run_seconds))
         self._active_run_tracker: _RunTracker | None = None
+        self._agent_router = agent_router
+        self._low_confidence_threshold = self._resolve_low_confidence_threshold()
+        self._agent_tool_catalog: dict[str, set[str]] = {}
 
     def _reset_plan_state(self) -> None:
         self._active_plan_steps = None
         self._active_plan_step_lookup = None
         self._roster_index = {}
+        self._agent_tool_catalog = {}
+
+    def _resolve_low_confidence_threshold(self) -> float:
+        value = getattr(self._planning_settings, "low_confidence_threshold", None)
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return LOW_PLANNER_CONFIDENCE_THRESHOLD
+        if not math.isfinite(numeric):
+            return LOW_PLANNER_CONFIDENCE_THRESHOLD
+        return max(0.0, min(1.0, numeric))
+
+    def _is_low_confidence(self, confidence: float | None) -> bool:
+        if confidence is None:
+            return False
+        return confidence < self._low_confidence_threshold
 
     def _begin_run(self, run_tracker: _RunTracker | None, *, task: Mapping[str, Any]) -> _RunTracker:
         tracker = run_tracker
@@ -297,6 +318,7 @@ class Orchestrator:
         executed_agent: BaseAgent,
         fallback_agent: BaseAgent | None,
         fallback_reason: str | None,
+        router_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any]:
         capability = executed_agent.capability
         executed_capability = capability.value if hasattr(capability, "value") else str(capability)
@@ -332,8 +354,111 @@ class Orchestrator:
                 fallback_capability.value if hasattr(fallback_capability, "value") else str(fallback_capability)
             )
             metadata["fallback_reason"] = fallback_reason
-            metadata["confidence_threshold"] = LOW_PLANNER_CONFIDENCE_THRESHOLD
+            metadata["confidence_threshold"] = self._low_confidence_threshold
+        if router_metadata is not None:
+            metadata["router"] = dict(router_metadata)
         return metadata
+
+    async def _router_decision(
+        self,
+        task: Mapping[str, Any],
+        roster: Sequence[BaseAgent],
+    ) -> RoutingDecision | None:
+        if self._agent_router is None:
+            return None
+        try:
+            return await self._agent_router.select(task=task, agents=roster)
+        except Exception as exc:  # pragma: no cover - router best effort
+            logger.warning("dynamic_router_failed", error=str(exc))
+            return None
+
+    async def _router_low_confidence_selection(
+        self,
+        task: Mapping[str, Any],
+        roster: Sequence[BaseAgent],
+    ) -> tuple[list[BaseAgent], dict[str, Any]] | None:
+        decision = await self._router_decision(task, roster)
+        if decision is None or not decision.agents:
+            return None
+        return list(decision.agents), self._router_metadata(decision)
+
+    async def _router_pick_agent(
+        self,
+        task: Mapping[str, Any],
+        roster: Sequence[BaseAgent],
+        *,
+        exclude: set[str] | None = None,
+    ) -> tuple[BaseAgent | None, dict[str, Any] | None]:
+        decision = await self._router_decision(task, roster)
+        if decision is None or not decision.agents:
+            return None, None
+        for candidate in decision.agents:
+            if exclude and candidate.name in exclude:
+                continue
+            return candidate, self._router_metadata(decision)
+        return None, self._router_metadata(decision)
+
+    @staticmethod
+    def _router_metadata(decision: RoutingDecision) -> dict[str, Any]:
+        return {
+            "reason": decision.reason,
+            "scores": decision.scores,
+            "metadata": decision.metadata,
+        }
+
+    @staticmethod
+    def _collect_tool_names(candidate: Any) -> set[str]:
+        names: set[str] = set()
+        if candidate is None:
+            return names
+        if isinstance(candidate, Mapping):
+            iterable = candidate.keys()
+        elif isinstance(candidate, (list, tuple, set, frozenset)):
+            iterable = candidate
+        else:
+            return names
+        for item in iterable:
+            if isinstance(item, str):
+                token = item.strip()
+                if token:
+                    names.add(token)
+        return names
+
+    @classmethod
+    def _build_agent_tool_catalog(cls, roster: Sequence[BaseAgent]) -> dict[str, set[str]]:
+        catalog: dict[str, set[str]] = {}
+        for agent in roster:
+            tool_names: set[str] = set()
+            for attribute in ("tool_preference", "tool_candidates", "fallback_tools", "tools", "default_tools"):
+                tool_names |= cls._collect_tool_names(getattr(agent, attribute, None))
+            retry_config = getattr(agent, "tool_retry_config", None)
+            if isinstance(retry_config, Mapping):
+                tool_names |= cls._collect_tool_names(retry_config)
+            catalog[agent.name] = tool_names
+        return catalog
+
+    def _validate_plan_tools(self, steps: Sequence[PlannedAgentStep]) -> None:
+        if not steps:
+            return
+        invalid_entries: list[dict[str, Any]] = []
+        for step in steps:
+            catalog = self._agent_tool_catalog.get(step.agent)
+            if catalog is None:
+                invalid_entries.append({"agent": step.agent, "missing": sorted(set(step.tools))})
+                continue
+            missing = [tool for tool in step.tools if tool not in catalog]
+            fallback_missing = [tool for tool in step.fallback_tools if tool not in catalog]
+            if missing or fallback_missing:
+                invalid_entries.append(
+                    {
+                        "agent": step.agent,
+                        "missing": sorted(set(missing + fallback_missing)),
+                        "available": sorted(catalog),
+                    }
+                )
+        if invalid_entries:
+            logger.warning("planner_invalid_tools", entries=invalid_entries)
+            raise PlannerError("Planner referenced tools that target agents do not expose")
 
     def _record_step_override(self, state: dict[str, Any], step_metadata: Mapping[str, Any]) -> None:
         routing = state.get("routing")
@@ -946,26 +1071,36 @@ class Orchestrator:
                 resolved_step = plan_step
                 fallback_agent: BaseAgent | None = None
                 fallback_reason: str | None = None
+                step_router_metadata: dict[str, Any] | None = None
                 step_confidence = 1.0
                 if plan_step is not None:
                     step_confidence = self._coerce_plan_confidence(getattr(plan_step, "confidence", 1.0))
                     plan_step.confidence = step_confidence
-                    if step_confidence < LOW_PLANNER_CONFIDENCE_THRESHOLD:
-                        candidate = roster_index.get("general_agent")
+                    if self._is_low_confidence(step_confidence):
+                        exclude = {plan_step.agent}
+                        router_candidate, router_meta = await self._router_pick_agent(
+                            task,
+                            list(roster_index.values()),
+                            exclude=exclude,
+                        )
+                        candidate = router_candidate or roster_index.get("general_agent")
                         if candidate is not None and candidate.name != planned_agent.name:
                             fallback_agent = candidate
                             fallback_reason = (
                                 f"Planner confidence {step_confidence:.2f} below threshold "
-                                f"{LOW_PLANNER_CONFIDENCE_THRESHOLD:.2f}; rerouting to general_agent."
+                                f"{self._low_confidence_threshold:.2f}; rerouting to {candidate.name}."
                             )
                             executed_agent = candidate
                             resolved_step = PlannedAgentStep(
                                 agent=candidate.name,
                                 tools=[],
                                 fallback_tools=list(plan_step.fallback_tools),
-                                reason=f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}".strip(),
+                                reason=(
+                                    f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}"
+                                ).strip(),
                                 confidence=step_confidence,
                             )
+                            step_router_metadata = router_meta if router_candidate is not None else None
                             logger.warning(
                                 "planner_step_low_confidence_fallback",
                                 task=task.get("id"),
@@ -973,7 +1108,8 @@ class Orchestrator:
                                 planned_agent=plan_step.agent,
                                 fallback_agent=candidate.name,
                                 confidence=step_confidence,
-                                threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
+                                threshold=self._low_confidence_threshold,
+                                router=step_router_metadata,
                             )
                         else:
                             resolved_step = replace(
@@ -1002,6 +1138,7 @@ class Orchestrator:
                         executed_agent=executed_agent,
                         fallback_agent=fallback_agent,
                         fallback_reason=fallback_reason,
+                        router_metadata=step_router_metadata,
                     )
                     step_metadata.setdefault("step_id", step_id)
                     self._append_step_metadata(state, step_metadata)
@@ -1344,22 +1481,54 @@ class Orchestrator:
             record_plan_metrics(strategy="llm_orchestration", status="failed", steps=len(planner_plan.steps))
             raise PlannerError(empty_reason)
 
+        self._agent_tool_catalog = self._build_agent_tool_catalog(roster)
+        self._validate_plan_tools(planner_plan.steps)
+
         base_confidence = getattr(planner_plan, "confidence", None)
         metadata_confidence = planner_plan.metadata.get("confidence", base_confidence or 1.0)
         confidence = self._coerce_plan_confidence(metadata_confidence)
         planner_plan.confidence = confidence
         planner_plan.metadata["confidence"] = confidence
-        if confidence < LOW_PLANNER_CONFIDENCE_THRESHOLD:
+        if self._is_low_confidence(confidence):
+            router_selection = await self._router_low_confidence_selection(task, roster)
+            if router_selection is not None:
+                selection, router_meta = router_selection
+                planner_plan.metadata.setdefault("fallback_reason", "low_confidence_router")
+                planner_plan.metadata.setdefault("confidence_threshold", self._low_confidence_threshold)
+                planner_plan.metadata.setdefault("router_fallback", router_meta)
+                logger.warning(
+                    "planner_low_confidence_router",
+                    task=task.get("id"),
+                    confidence=confidence,
+                    threshold=self._low_confidence_threshold,
+                    agents=[agent.name for agent in selection],
+                )
+                routing_payload = self._build_planner_routing_payload(
+                    planner_plan,
+                    roster,
+                    selection,
+                    status="fallback",
+                    reason="planner.low_confidence_router",
+                )
+                routing_payload.setdefault("metadata", {}).setdefault("router", router_meta)
+                self._annotate_task_with_plan(task, planner_plan, selection, status="fallback")
+                record_plan_metrics(
+                    strategy="llm_orchestration",
+                    status="fallback",
+                    steps=len(planner_plan.steps),
+                )
+                skipped_agents = [agent for agent in roster if agent not in selection]
+                return selection, routing_payload, skipped_agents
             fallback_agent = next((agent for agent in roster if agent.name == "general_agent"), None)
             if fallback_agent is not None:
                 planner_plan.metadata.setdefault("fallback_reason", "low_confidence")
-                planner_plan.metadata.setdefault("confidence_threshold", LOW_PLANNER_CONFIDENCE_THRESHOLD)
+                planner_plan.metadata.setdefault("confidence_threshold", self._low_confidence_threshold)
                 planner_plan.metadata.setdefault("fallback_selected_agents", [fallback_agent.name])
                 logger.warning(
                     "planner_low_confidence_fallback",
                     task=task.get("id"),
                     confidence=confidence,
-                    threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
+                    threshold=self._low_confidence_threshold,
                     fallback_agent=fallback_agent.name,
                 )
                 selection = [fallback_agent]
@@ -1382,7 +1551,7 @@ class Orchestrator:
                 "planner_low_confidence_no_general_agent",
                 task=task.get("id"),
                 confidence=confidence,
-                threshold=LOW_PLANNER_CONFIDENCE_THRESHOLD,
+                threshold=self._low_confidence_threshold,
                 roster=[agent.name for agent in roster],
             )
 

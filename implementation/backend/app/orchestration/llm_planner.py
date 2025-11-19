@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import string
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..agents.base import BaseAgent, get_agent_schema
@@ -10,6 +11,7 @@ from ..core.config import Settings
 from ..core.logging import get_logger
 from ..schemas.agents import AgentCapability
 from ..services.llm import LLMService
+from ..services.tools import get_tool_service
 from ..tools.registry import tool_registry
 from .tool_policy import get_agent_tool_policy
 from .planner_contract import (
@@ -22,6 +24,8 @@ from .planner_contract import (
 logger = get_logger(name=__name__)
 
 _DEFAULT_TOOL_ALIAS_CACHE: dict[str, str] | None = None
+_CAPABILITY_CACHE: dict[str, dict[str, Any]] | None = None
+_CAPABILITY_CACHE: dict[str, dict[str, Any]] | None = None
 
 
 def _load_default_tool_aliases() -> dict[str, str]:
@@ -35,6 +39,31 @@ def _load_default_tool_aliases() -> dict[str, str]:
     else:
         _DEFAULT_TOOL_ALIAS_CACHE = {str(alias): str(target) for alias, target in DEFAULT_TOOL_ALIASES.items()}
     return _DEFAULT_TOOL_ALIAS_CACHE
+
+
+def _load_capability_catalog() -> dict[str, dict[str, Any]]:
+    global _CAPABILITY_CACHE
+    if _CAPABILITY_CACHE is not None:
+        return _CAPABILITY_CACHE
+    path = Path(__file__).with_name("capabilities.json")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        logger.warning("planner_capabilities_missing", path=str(path))
+        payload = {}
+    except json.JSONDecodeError as exc:
+        logger.warning("planner_capabilities_invalid", path=str(path), error=str(exc))
+        payload = {}
+    catalog: dict[str, dict[str, Any]] = {}
+    for key, value in payload.items():
+        if not isinstance(value, Mapping):
+            continue
+        catalog[str(key)] = {
+            "description": str(value.get("description") or "") or "(no description)",
+            "dependencies": [str(dep) for dep in value.get("dependencies", []) if isinstance(dep, str)],
+        }
+    _CAPABILITY_CACHE = catalog
+    return catalog
 
 
 class PlannerError(RuntimeError):
@@ -65,7 +94,16 @@ class LLMOrchestrationPlanner:
         tool_aliases: Mapping[str, str] | None = None,
     ) -> PlannerPlan:
         original_prompt = str(task.get("prompt") or "")
-        prompt = self._build_prompt(task=task, prior_outputs=prior_outputs, agents=agents, tool_aliases=tool_aliases)
+        capability_catalog = _load_capability_catalog()
+        alias_snapshot = await self._resolve_tool_alias_snapshot()
+        merged_aliases = self._merge_alias_sources(alias_snapshot, tool_aliases)
+        prompt = self._build_prompt(
+            task=task,
+            prior_outputs=prior_outputs,
+            agents=agents,
+            tool_aliases=merged_aliases,
+            capabilities=capability_catalog,
+        )
         logger.debug("planner_prompt", prompt=prompt)
         response = await self._llm.generate(
             prompt=prompt,
@@ -179,6 +217,7 @@ class LLMOrchestrationPlanner:
         prior_outputs: Sequence[Mapping[str, Any]],
         agents: Sequence[BaseAgent],
         tool_aliases: Mapping[str, str] | None,
+        capabilities: Mapping[str, Mapping[str, Any]] | None,
     ) -> str:
         prompt = str(task.get("prompt") or "").strip()
         metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}
@@ -186,6 +225,7 @@ class LLMOrchestrationPlanner:
         agent_catalog = self._summarize_agents(agents)
         agent_metadata = self._summarize_agent_metadata(agents)
         alias_catalog = self._summarize_aliases(tool_aliases)
+        capability_graph = self._summarize_capabilities(capabilities)
         meta_section = json.dumps(metadata, indent=2, sort_keys=True) if metadata else "{}"
         instructions = (
             "Respond with a single JSON object matching this structure (do not include any text before or after it):\n"
@@ -213,6 +253,7 @@ class LLMOrchestrationPlanner:
             "Task Metadata (JSON):\n" + meta_section,
             "Available Agents:\n" + agent_catalog,
             "Agent Metadata:\n" + agent_metadata,
+            "Capabilities Graph:\n" + capability_graph,
             "Tool Aliases:\n" + alias_catalog,
             "Prior Outputs:\n" + prior_summary,
             "Planning Instructions:\n" + instructions,
@@ -260,12 +301,58 @@ class LLMOrchestrationPlanner:
         return "\n".join(lines)
 
     def _summarize_aliases(self, aliases: Mapping[str, str] | None) -> str:
-        resolved = dict(tool_registry.aliases())
         if aliases:
-            for key, value in aliases.items():
-                resolved[str(key)] = str(value)
+            resolved = {str(key): str(value) for key, value in aliases.items()}
+        else:
+            resolved = dict(tool_registry.aliases())
         lines = [f"- {alias} -> {target}" for alias, target in sorted(resolved.items())]
         return "\n".join(lines) if lines else "(no tool aliases)"
+
+    def _summarize_capabilities(self, capabilities: Mapping[str, Mapping[str, Any]] | None) -> str:
+        if not capabilities:
+            return "(no capability metadata)"
+        lines: list[str] = []
+        for name in sorted(capabilities):
+            entry = capabilities[name]
+            description = str(entry.get("description") or "").strip() or "(no description)"
+            dependencies = [dep.strip() for dep in entry.get("dependencies", []) if isinstance(dep, str) and dep.strip()]
+            dependency_str = f" depends on {', '.join(dependencies)}" if dependencies else ""
+            lines.append(f"- {name}: {description}{dependency_str}")
+        return "\n".join(lines)
+
+    def _merge_alias_sources(
+        self,
+        base_aliases: Mapping[str, str] | None,
+        overrides: Mapping[str, str] | None,
+    ) -> dict[str, str]:
+        merged: dict[str, str] = {}
+        if base_aliases:
+            for key, value in base_aliases.items():
+                merged[str(key)] = str(value)
+        if overrides:
+            for key, value in overrides.items():
+                merged[str(key)] = str(value)
+        return merged
+
+    async def _resolve_tool_alias_snapshot(self) -> dict[str, str]:
+        alias_map: dict[str, str] = {}
+        registry_aliases = tool_registry.aliases()
+        for key, value in registry_aliases.items():
+            alias_map[str(key)] = str(value)
+        default_aliases = _load_default_tool_aliases()
+        for key, value in default_aliases.items():
+            alias_map.setdefault(str(key), str(value))
+        if getattr(self._settings.tools.mcp, "enabled", False):
+            try:
+                service = await get_tool_service()
+                diagnostics = service.get_diagnostics()
+                remote_aliases = diagnostics.get("aliases") if isinstance(diagnostics, Mapping) else None
+                if isinstance(remote_aliases, Mapping):
+                    for key, value in remote_aliases.items():
+                        alias_map[str(key)] = str(value)
+            except Exception as exc:  # pragma: no cover - diagnostics best effort
+                logger.warning("planner_alias_snapshot_failed", error=str(exc))
+        return alias_map
 
     def _post_process_steps(
         self,
