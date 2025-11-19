@@ -7,6 +7,7 @@ import pytest
 from app.orchestration.graph import Orchestrator, ToolFirstPolicyViolation, _ToolSession
 from app.orchestration.tool_policy import get_agent_tool_policy
 from app.schemas.agents import AgentCapability
+from app.services.tools import ToolInvocationError
 from app.tools.exceptions import ToolPolicyViolationError
 
 
@@ -82,6 +83,63 @@ async def test_optional_agent_with_plan_raises_when_context_requires_tools() -> 
 
     with pytest.raises(ToolFirstPolicyViolation):
         await orchestrator._enforce_tool_first_policy(session, agent=agent, state=state)
+
+
+@pytest.mark.asyncio
+async def test_agent_override_allows_skip_after_tool_failures() -> None:
+    orchestrator = Orchestrator(agents=[])
+    session = _ToolSession(
+        agent_name="finance_agent",
+        tool_service=_NullToolService(),
+        planned_tools=("finance.snapshot",),
+    )
+    session.record_failure("finance.snapshot", ToolInvocationError("rate limit"))
+    agent = _StubAgent("finance_agent", AgentCapability.FINANCE)
+    state = {
+        "outputs": [
+            {
+                "agent": "finance_agent",
+                "metadata": {
+                    "tool_policy_override": {
+                        "allow_skip": True,
+                        "reason": "tool_attempts_exhausted",
+                        "attempts": 1,
+                    }
+                },
+            }
+        ]
+    }
+
+    await orchestrator._enforce_tool_first_policy(session, agent=agent, state=state)
+
+
+@pytest.mark.asyncio
+async def test_agent_override_allows_planner_mismatch() -> None:
+    orchestrator = Orchestrator(agents=[])
+    session = _ToolSession(
+        agent_name="finance_agent",
+        tool_service=_NullToolService(),
+        planned_tools=("finance.snapshot", "finance/pandas"),
+    )
+    session.record_failure("finance.snapshot", ToolInvocationError("rate limit"))
+    session.record_success("finance.snapshot.cached", {"ok": True})
+    agent = _StubAgent("finance_agent", AgentCapability.FINANCE)
+    state = {
+        "outputs": [
+            {
+                "agent": "finance_agent",
+                "metadata": {
+                    "tool_policy_override": {
+                        "allow_skip": True,
+                        "reason": "unplanned_tool_success",
+                        "replacement_tool": "finance.snapshot.cached",
+                    }
+                },
+            }
+        ]
+    }
+
+    await orchestrator._enforce_tool_first_policy(session, agent=agent, state=state)
 
 
 @pytest.mark.asyncio

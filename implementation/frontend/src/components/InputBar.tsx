@@ -1,20 +1,160 @@
-import { Send, Paperclip, Settings2 } from "lucide-react";
-import { useState } from "react";
+import { Send, Paperclip, Settings2, Loader2, X } from "lucide-react";
+import { useRef, useState } from "react";
 
 import { useTaskContext } from "@/contexts/TaskContext";
 import { Button } from "./ui/button";
 import { Textarea } from "./ui/textarea";
+import { API_BASE_URL } from "@/lib/api";
+import { DocumentAnalysisResponse } from "@/types/documents";
+import { useToast } from "@/hooks/use-toast";
+
+type AttachmentStatus = "uploading" | "ready" | "error";
+
+interface AttachmentRecord {
+  id: string;
+  fileName: string;
+  status: AttachmentStatus;
+  memoryTaskId?: string | null;
+  persisted?: boolean;
+  document?: DocumentAnalysisResponse["document"];
+  preview?: string | null;
+  truncated?: boolean;
+  error?: string;
+}
+
+const randomId = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
 
 const InputBar = () => {
   const [message, setMessage] = useState("");
+  const [attachments, setAttachments] = useState<AttachmentRecord[]>([]);
   const { submitTask, isStreaming } = useTaskContext();
+  const { toast } = useToast();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const isUploadingAttachment = attachments.some((attachment) => attachment.status === "uploading");
+  const readyAttachments = attachments.filter((attachment) => attachment.status === "ready");
+
+  const removeAttachment = (id: string) => {
+    setAttachments((previous) => previous.filter((attachment) => attachment.id !== id));
+  };
+
+  const handleAttachmentUpload = async (file: File) => {
+    const attachmentId = randomId();
+    setAttachments((previous) => [
+      ...previous,
+      {
+        id: attachmentId,
+        fileName: file.name,
+        status: "uploading",
+      },
+    ]);
+
+    const formData = new FormData();
+    formData.append("document", file);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/upload_document?persist=true`, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        let detail = "Upload failed.";
+        try {
+          const payload = await response.json();
+          detail = payload?.detail ?? detail;
+        } catch (error) {
+          // ignore parse errors
+        }
+        throw new Error(detail);
+      }
+
+      const payload: DocumentAnalysisResponse = await response.json();
+      setAttachments((previous) =>
+        previous.map((attachment) =>
+          attachment.id === attachmentId
+            ? {
+                ...attachment,
+                status: "ready",
+                persisted: payload.persisted,
+                memoryTaskId: payload.memory_task_id,
+                document: payload.document,
+                preview: payload.preview,
+                truncated: payload.truncated,
+              }
+            : attachment,
+        ),
+      );
+      toast({
+        title: "Document attached",
+        description: payload.memory_task_id
+          ? `${file.name} analyzed and stored as ${payload.memory_task_id}.`
+          : `${file.name} analyzed without persistence.`,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : "Unexpected error while uploading.";
+      setAttachments((previous) =>
+        previous.map((attachment) =>
+          attachment.id === attachmentId
+            ? {
+                ...attachment,
+                status: "error",
+                error: detail,
+              }
+            : attachment,
+        ),
+      );
+      toast({
+        title: "Failed to attach file",
+        description: detail,
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleFileSelection = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files ? Array.from(event.target.files) : [];
+    event.target.value = "";
+    for (const file of files) {
+      void handleAttachmentUpload(file);
+    }
+  };
 
   const handleSubmit = async () => {
     if (!message.trim()) {
       return;
     }
-    await submitTask(message);
+    if (isUploadingAttachment) {
+      toast({
+        title: "Documents still processing",
+        description: "Wait for uploads to finish before sending your prompt.",
+      });
+      return;
+    }
+
+    const metadata: Record<string, unknown> = {};
+    if (readyAttachments.length > 0) {
+      const attachmentPayload = readyAttachments.map((attachment) => ({
+        id: attachment.memoryTaskId ?? attachment.id,
+        filename: attachment.fileName,
+        memory_task_id: attachment.memoryTaskId,
+        persisted: attachment.persisted ?? false,
+        truncated: attachment.truncated ?? false,
+        preview: attachment.preview,
+        document: attachment.document,
+      }));
+      metadata.attachments = attachmentPayload;
+      const documentIds = attachmentPayload
+        .map((item) => item.memory_task_id)
+        .filter((value): value is string => typeof value === "string" && value.length > 0);
+      if (documentIds.length > 0) {
+        metadata.documents = documentIds;
+      }
+    }
+
+    await submitTask(message, Object.keys(metadata).length > 0 ? metadata : undefined);
     setMessage("");
+    setAttachments([]);
   };
 
   return (
@@ -37,8 +177,23 @@ const InputBar = () => {
                 disabled={isStreaming}
               />
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
-                <Button type="button" variant="ghost" size="icon" className="h-8 w-8" disabled>
-                  <Paperclip className="h-4 w-4" />
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,.docx,.txt,.csv,.json,.md,.markdown"
+                  multiple
+                  className="hidden"
+                  onChange={handleFileSelection}
+                />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={isStreaming}
+                >
+                  {isUploadingAttachment ? <Loader2 className="h-4 w-4 animate-spin" /> : <Paperclip className="h-4 w-4" />}
                 </Button>
                 <Button type="button" variant="ghost" size="icon" className="h-8 w-8" disabled>
                   <Settings2 className="h-4 w-4" />
@@ -49,11 +204,42 @@ const InputBar = () => {
               size="icon"
               className="h-[52px] w-[52px] bg-primary hover:bg-primary/90 transition-smooth hover:scale-105"
               onClick={() => void handleSubmit()}
-              disabled={isStreaming}
+              disabled={isStreaming || isUploadingAttachment}
             >
               <Send className="h-5 w-5" />
             </Button>
           </div>
+          {attachments.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {attachments.map((attachment) => (
+                <div
+                  key={attachment.id}
+                  className="flex items-center gap-2 rounded-md border border-dashed border-border/60 bg-muted/40 px-3 py-1 text-xs text-foreground"
+                >
+                  <span className="font-medium truncate max-w-[180px]" title={attachment.fileName}>
+                    {attachment.fileName}
+                  </span>
+                  {attachment.status === "uploading" && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  {attachment.status === "ready" && <span className="text-emerald-600 font-medium">Ready</span>}
+                  {attachment.status === "error" && (
+                    <span className="text-destructive" title={attachment.error}>
+                      Failed
+                    </span>
+                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon"
+                    className="h-5 w-5 text-muted-foreground hover:text-foreground"
+                    onClick={() => removeAttachment(attachment.id)}
+                    disabled={attachment.status === "uploading"}
+                  >
+                    <X className="h-3 w-3" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
           <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
             <span>Shift + Enter for new line • Enter to send</span>
             <span>{isStreaming ? "Agents responding..." : "Collaborative Mode"}</span>

@@ -10,6 +10,7 @@ import math
 import os
 import time
 import csv
+import random
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Mapping, Sequence
@@ -21,42 +22,31 @@ from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 from app.core import metrics
+from app.mcp.symbols import (
+    KEYWORD_SYMBOL_OVERRIDES,
+    extract_symbols_from_text,
+    keyword_symbol_lookup,
+    looks_like_symbol,
+)
 
 from .base import MCPToolAdapter
 
 YAHOO_QUOTE_ENDPOINT = "https://query1.finance.yahoo.com/v7/finance/quote"
 YAHOO_CRUMB_ENDPOINT = "https://query1.finance.yahoo.com/v1/test/getcrumb"
 YAHOO_DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:127.0) Gecko/20100101 Firefox/127.0"
+YAHOO_USER_AGENT_POOL: tuple[str, ...] = (
+    YAHOO_DEFAULT_USER_AGENT,
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15",
+)
 YAHOO_SEARCH_ENDPOINT = "https://query2.finance.yahoo.com/v1/finance/search"
 ALPHA_VANTAGE_ENDPOINT = "https://www.alphavantage.co/query"
 _ALPHA_VANTAGE_RATE_LIMIT = 5
 _ALPHA_VANTAGE_WINDOW_SECONDS = 60.0
 COINGECKO_NEWS_ENDPOINT = "https://api.coingecko.com/api/v3/news"
 _FINBERT_MODEL_ID = "ProsusAI/finbert"
-
-# Minimal keyword-to-symbol mapping to avoid repeated remote lookups for common equities.
-KEYWORD_SYMBOL_OVERRIDES: dict[str, list[str]] = {
-    "amazon": ["AMZN"],
-    "amzn": ["AMZN"],
-    "apple": ["AAPL"],
-    "aapl": ["AAPL"],
-    "microsoft": ["MSFT"],
-    "msft": ["MSFT"],
-    "google": ["GOOGL", "GOOG"],
-    "alphabet": ["GOOGL", "GOOG"],
-    "meta": ["META"],
-    "facebook": ["META"],
-    "netflix": ["NFLX"],
-    "tesla": ["TSLA"],
-    "tsla": ["TSLA"],
-    "nvidia": ["NVDA"],
-    "nvda": ["NVDA"],
-    "samsung": ["005930.KS", "SSNLF"],
-    "samsung electronics": ["005930.KS"],
-    "ssnlf": ["SSNLF"],
-    "005930": ["005930.KS"],
-}
-
 
 logger = logging.getLogger(__name__)
 
@@ -109,9 +99,9 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
     _lookup_cache: dict[str, tuple[float, list[str]]] = {}
     _lookup_cache_lock: asyncio.Lock = asyncio.Lock()
     _lookup_cache_ttl: float = 600.0
-    _lookup_max_attempts: int = 4
+    _lookup_max_attempts: int = 2
     _lookup_base_delay: float = 0.5
-    _quote_max_attempts: int = 4
+    _quote_max_attempts: int = 2
     _quote_base_delay: float = 0.75
     _quote_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
     _quote_cache_lock: asyncio.Lock = asyncio.Lock()
@@ -120,11 +110,16 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
     _quote_session_cookies: httpx.Cookies | None = None
     _quote_session_crumb: str | None = None
     _quote_session_refreshed_at: float = 0.0
-    _quote_session_ttl: float = 1800.0
+    _quote_session_ttl: float = 3600.0
     _crumb_max_attempts: int = 3
     _crumb_base_delay: float = 0.75
+    _crumb_retry_base: float = 30.0
+    _crumb_retry_interval: float = 30.0
+    _crumb_retry_max: float = 900.0
+    _crumb_next_attempt_at: float = 0.0
 
     async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
+        _sanitize_finance_request(payload_model)
         symbols = payload_model.symbols
         if not symbols:
             assert payload_model.query is not None
@@ -180,7 +175,7 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
         normalized = query.strip().lower()
         if not normalized:
             return []
-        keyword_matches = _keyword_symbol_lookup(normalized)
+        keyword_matches = keyword_symbol_lookup(normalized)
         if keyword_matches:
             return keyword_matches
         now = time.monotonic()
@@ -218,12 +213,12 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
                 return symbols
 
         if last_error is not None:
-            keyword_matches = _keyword_symbol_lookup(normalized)
+            keyword_matches = keyword_symbol_lookup(normalized)
             if keyword_matches:
                 return keyword_matches
             raise ValueError(f"Symbol lookup failed after retries: {last_error}") from last_error
 
-        return _keyword_symbol_lookup(normalized)
+        return keyword_symbol_lookup(normalized)
 
     async def _perform_symbol_lookup(self, normalized_query: str) -> dict[str, Any]:
         params = {"q": normalized_query, "quotesCount": 5}
@@ -249,7 +244,7 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
         for attempt in range(1, self._quote_max_attempts + 1):
             crumb, cookies = await self._ensure_quote_session(force_refresh=refresh_session)
             headers = {
-                "User-Agent": YAHOO_DEFAULT_USER_AGENT,
+                "User-Agent": _pick_user_agent(),
                 "Accept": "application/json",
                 "Accept-Language": "en-US,en;q=0.9",
                 "Connection": "keep-alive",
@@ -298,7 +293,7 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
                     extra={"symbols": symbols_tuple, "reason": str(last_error)},
                 )
                 fallback_quotes = await self._attach_fundamentals([dict(item) for item in fallback_quotes], symbols_tuple)
-                fallback_quotes = _degrade_quote_snapshots(
+                fallback_quotes = _annotate_fallback_quotes(
                     fallback_quotes,
                     provider="yfinance",
                     reason=fallback_reason,
@@ -312,13 +307,13 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
                     "finance_stooq_http_fallback",
                     extra={"symbols": symbols_tuple, "reason": str(last_error)},
                 )
-                degraded = _degrade_quote_snapshots(
+                annotated = _annotate_fallback_quotes(
                     [dict(item) for item in stooq_quotes],
                     provider="stooq",
                     reason=fallback_reason,
                 )
                 metrics.increment_finance_quote_fallback(provider="stooq", reason=fallback_reason)
-                return degraded
+                return annotated
 
             cached = await self._get_cached_quotes(cache_key)
             if cached is not None:
@@ -326,7 +321,11 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
                     provider="cache",
                     reason=fallback_reason,
                 )
-                return [dict(entry) for entry in cached]
+                return _annotate_fallback_quotes(
+                    [dict(entry) for entry in cached],
+                    provider="cache",
+                    reason=fallback_reason,
+                )
             logger.error(
                 "finance_quote_fetch_failed",
                 extra={"symbols": symbols_tuple, "reason": str(last_error)},
@@ -342,26 +341,50 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
     async def _ensure_quote_session(self, *, force_refresh: bool = False) -> tuple[str | None, httpx.Cookies | None]:
         async with self._quote_session_lock:
             if force_refresh or self._quote_session_needs_refresh():
-                return await self._refresh_quote_session_locked()
+                return await self._refresh_quote_session_locked(force_refresh=force_refresh)
             cookies = copy.copy(self._quote_session_cookies) if self._quote_session_cookies is not None else None
             return self._quote_session_crumb, cookies
 
     def _quote_session_needs_refresh(self) -> bool:
+        now = time.monotonic()
         if self._quote_session_refreshed_at == 0.0:
-            return True
-        return (time.monotonic() - self._quote_session_refreshed_at) > self._quote_session_ttl
+            return now >= self._crumb_next_attempt_at
+        if (now - self._quote_session_refreshed_at) <= self._quote_session_ttl:
+            return False
+        return now >= self._crumb_next_attempt_at
 
-    async def _refresh_quote_session_locked(self) -> tuple[str | None, httpx.Cookies | None]:
+    async def _refresh_quote_session_locked(
+        self,
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[str | None, httpx.Cookies | None]:
+        now = time.monotonic()
+        if not force_refresh and now < self._crumb_next_attempt_at:
+            cached_cookies = copy.copy(self._quote_session_cookies) if self._quote_session_cookies is not None else None
+            return self._quote_session_crumb, cached_cookies
+
         crumb: str | None = None
         cookies: httpx.Cookies | None = None
         previous_crumb = self._quote_session_crumb
         previous_cookies = self._quote_session_cookies
         try:
             crumb, cookies = await self._fetch_yahoo_crumb()
+        except httpx.HTTPStatusError as exc:  # pragma: no cover - defensive guard
+            is_rate_limited = exc.response is not None and exc.response.status_code == 429
+            self._schedule_crumb_retry(penalize=True)
+            logger.warning(
+                "finance_yahoo_crumb_fetch_failed",
+                extra={"error": str(exc), "rate_limited": is_rate_limited},
+            )
+            crumb = None
+            cookies = None
         except Exception as exc:  # pragma: no cover - defensive guard
+            self._schedule_crumb_retry(penalize=True)
             logger.warning("finance_yahoo_crumb_fetch_failed", extra={"error": str(exc)})
             crumb = None
             cookies = None
+        else:
+            self._schedule_crumb_retry(penalize=False)
 
         if crumb is None and previous_crumb is not None:
             crumb = previous_crumb
@@ -376,9 +399,18 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
 
         return crumb, copy.copy(cookies) if cookies is not None else None
 
+    def _schedule_crumb_retry(self, *, penalize: bool) -> None:
+        if penalize:
+            next_interval = max(self._crumb_retry_interval * 2, self._crumb_retry_base)
+            self._crumb_retry_interval = min(next_interval, self._crumb_retry_max)
+            self._crumb_next_attempt_at = time.monotonic() + self._crumb_retry_interval
+            return
+        self._crumb_retry_interval = self._crumb_retry_base
+        self._crumb_next_attempt_at = time.monotonic()
+
     async def _fetch_yahoo_crumb(self) -> tuple[str | None, httpx.Cookies | None]:
         headers = {
-            "User-Agent": YAHOO_DEFAULT_USER_AGENT,
+            "User-Agent": _pick_user_agent(),
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
             "Connection": "keep-alive",
@@ -408,57 +440,7 @@ class YahooFinanceSnapshotAdapter(MCPToolAdapter):
         return None, None
 
     async def _fetch_quotes_via_stooq(self, symbols: Sequence[str]) -> list[dict[str, Any]]:
-        results: list[dict[str, Any]] = []
-        async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": YAHOO_DEFAULT_USER_AGENT}) as client:
-            for symbol in symbols:
-                stooq_symbol = symbol.lower()
-                if "." not in stooq_symbol:
-                    stooq_symbol = f"{stooq_symbol}.us"
-                params = {"s": stooq_symbol, "i": "d"}
-                try:
-                    response = await client.get("https://stooq.com/q/d/l/", params=params)
-                    response.raise_for_status()
-                except httpx.HTTPError:
-                    continue
-                content = response.text.strip()
-                if not content:
-                    continue
-                reader = csv.DictReader(content.splitlines())
-                latest_row: dict[str, str] | None = None
-                for row in reader:
-                    latest_row = row
-                if not latest_row:
-                    continue
-                try:
-                    close_price = float(latest_row.get("Close", ""))
-                except ValueError:
-                    close_price = None
-                try:
-                    open_price = float(latest_row.get("Open", ""))
-                except ValueError:
-                    open_price = None
-                try:
-                    day_high = float(latest_row.get("High", ""))
-                except ValueError:
-                    day_high = None
-                try:
-                    day_low = float(latest_row.get("Low", ""))
-                except ValueError:
-                    day_low = None
-                try:
-                    volume = int(float(latest_row.get("Volume", "")))
-                except ValueError:
-                    volume = None
-                payload = {
-                    "symbol": symbol,
-                    "regularMarketPrice": close_price,
-                    "regularMarketOpen": open_price,
-                    "regularMarketDayHigh": day_high,
-                    "regularMarketDayLow": day_low,
-                    "regularMarketVolume": volume,
-                }
-                results.append(payload)
-        return results
+        return await fetch_quotes_from_stooq(symbols)
 
     async def _fetch_quotes_via_yfinance(self, symbols: Sequence[str]) -> list[dict[str, Any]]:
         try:
@@ -658,56 +640,68 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
     _symbol_cache_ttl: float = 900.0
 
     async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
+        _sanitize_finance_request(payload_model)
         api_key = (os.getenv("ALPHAVANTAGE_API_KEY") or "").strip()
         if not api_key:
             raise RuntimeError("Alpha Vantage API key (ALPHAVANTAGE_API_KEY) is not configured.")
+        resolved_symbols: list[str] = []
+        try:
+            async with httpx.AsyncClient(timeout=12.0) as client:
+                symbols = await self._resolve_symbols(payload_model, api_key, client)
+                resolved_symbols = list(symbols)
+                if not symbols:
+                    no_symbol_error = ValueError("No matching symbols found for query")
+                    fallback = await self._fallback_via_stooq(payload_model, resolved_symbols, no_symbol_error)
+                    if fallback is not None:
+                        return fallback
+                    raise no_symbol_error
 
-        async with httpx.AsyncClient(timeout=12.0) as client:
-            symbols = await self._resolve_symbols(payload_model, api_key, client)
-            if not symbols:
-                raise ValueError("No matching symbols found for query")
+                metrics_models: list[YahooFinanceMetrics] = []
+                fundamentals_payload: list[dict[str, Any] | None] = []
+                for symbol in symbols:
+                    uppercase_symbol = symbol.upper()
+                    try:
+                        overview = await self._fetch_overview(uppercase_symbol, api_key, client)
+                    except Exception as exc:
+                        logger.warning("alpha_vantage_overview_failed", symbol=uppercase_symbol, error=str(exc))
+                        overview = None
+                    series = await self._fetch_time_series(uppercase_symbol, api_key, client)
+                    metric = self._build_metric(uppercase_symbol, overview, series)
+                    metrics_models.append(metric)
+                    fundamentals_payload.append(self._build_fundamentals(overview))
 
-            metrics_models: list[YahooFinanceMetrics] = []
-            fundamentals_payload: list[dict[str, Any] | None] = []
-            for symbol in symbols:
-                uppercase_symbol = symbol.upper()
-                try:
-                    overview = await self._fetch_overview(uppercase_symbol, api_key, client)
-                except Exception as exc:
-                    logger.warning("alpha_vantage_overview_failed", symbol=uppercase_symbol, error=str(exc))
-                    overview = None
-                series = await self._fetch_time_series(uppercase_symbol, api_key, client)
-                metric = self._build_metric(uppercase_symbol, overview, series)
-                metrics_models.append(metric)
-                fundamentals_payload.append(self._build_fundamentals(overview))
+            filtered_metrics = metrics_models
+            if payload_model.fields:
+                filtered_metrics = [
+                    YahooFinanceMetrics(
+                        **{
+                            field: metric.model_dump().get(field)
+                            for field in payload_model.fields
+                            if field in metric.model_dump()
+                        }
+                        | {"symbol": metric.symbol}
+                    )
+                    for metric in metrics_models
+                ]
 
-        filtered_metrics = metrics_models
-        if payload_model.fields:
-            filtered_metrics = [
-                YahooFinanceMetrics(
-                    **{
-                        field: metric.model_dump().get(field)
-                        for field in payload_model.fields
-                        if field in metric.model_dump()
-                    }
-                    | {"symbol": metric.symbol}
-                )
-                for metric in metrics_models
-            ]
+            enriched: list[dict[str, Any]] = []
+            for metric, fundamentals in zip(filtered_metrics, fundamentals_payload):
+                payload = metric.model_dump()
+                if fundamentals:
+                    payload.setdefault("fundamentals", fundamentals)
+                payload.setdefault("provider", "alpha_vantage")
+                enriched.append(payload)
 
-        enriched: list[dict[str, Any]] = []
-        for metric, fundamentals in zip(filtered_metrics, fundamentals_payload):
-            payload = metric.model_dump()
-            if fundamentals:
-                payload.setdefault("fundamentals", fundamentals)
-            payload.setdefault("provider", "alpha_vantage")
-            enriched.append(payload)
-
-        return {
-            "requested": symbols,
-            "generated_at": datetime.now(UTC),
-            "metrics": enriched,
-        }
+            return {
+                "requested": symbols,
+                "generated_at": datetime.now(UTC),
+                "metrics": enriched,
+            }
+        except Exception as exc:
+            fallback = await self._fallback_via_stooq(payload_model, resolved_symbols, exc)
+            if fallback is not None:
+                return fallback
+            raise
 
     @classmethod
     async def _resolve_symbols(
@@ -728,7 +722,7 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
         query = (payload_model.query or "").strip()
         if not query:
             return []
-        keyword_matches = _keyword_symbol_lookup(query.lower())
+        keyword_matches = keyword_symbol_lookup(query.lower())
         if keyword_matches:
             return keyword_matches
         now = time.monotonic()
@@ -790,6 +784,87 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
         normalized = {key: dict(value) for key, value in series.items() if isinstance(value, Mapping)}
         cls._timeseries_cache[symbol] = (time.monotonic(), normalized)
         return copy.deepcopy(normalized)
+
+    async def _fallback_via_stooq(
+        self,
+        payload_model: YahooFinanceRequest,
+        resolved_symbols: Sequence[str],
+        error: Exception,
+    ) -> dict[str, Any] | None:
+        fallback_symbols = self._derive_stooq_symbols(payload_model, resolved_symbols)
+        if not fallback_symbols:
+            return None
+        stooq_quotes = await fetch_quotes_from_stooq(fallback_symbols)
+        if not stooq_quotes:
+            return None
+        reason = _classify_fallback_reason(error)
+        logger.warning(
+            "alpha_vantage_stooq_fallback",
+            extra={"symbols": fallback_symbols, "reason": str(error)},
+        )
+        now = datetime.now(UTC)
+        quotes_by_symbol: dict[str, dict[str, Any]] = {}
+        for entry in stooq_quotes:
+            symbol = entry.get("symbol")
+            if isinstance(symbol, str) and symbol.strip():
+                quotes_by_symbol[symbol.strip().upper()] = dict(entry)
+        metrics_payload: list[dict[str, Any]] = []
+        for symbol in fallback_symbols:
+            candidate = quotes_by_symbol.get(symbol.upper())
+            if candidate is None:
+                continue
+            metric = YahooFinanceMetrics(
+                symbol=symbol.upper(),
+                price=_safe_float(candidate.get("regularMarketPrice")),
+                previous_close=_safe_float(candidate.get("regularMarketPreviousClose")),
+                open=_safe_float(candidate.get("regularMarketOpen")),
+                day_low=_safe_float(candidate.get("regularMarketDayLow")),
+                day_high=_safe_float(candidate.get("regularMarketDayHigh")),
+                volume=_safe_int(candidate.get("regularMarketVolume")),
+                updated_at=now,
+            )
+            payload = metric.model_dump()
+            payload.setdefault("provider", "stooq")
+            metrics_payload.append(payload)
+        if not metrics_payload:
+            return None
+        metrics.increment_finance_quote_fallback(provider="stooq", reason=reason)
+        annotated = _annotate_fallback_quotes(metrics_payload, provider="stooq", reason=reason)
+        return {
+            "requested": list(fallback_symbols),
+            "generated_at": now,
+            "metrics": annotated,
+        }
+
+    def _derive_stooq_symbols(
+        self,
+        payload_model: YahooFinanceRequest,
+        resolved_symbols: Sequence[str],
+    ) -> list[str]:
+        symbols: list[str] = []
+        for symbol in resolved_symbols:
+            if isinstance(symbol, str) and symbol.strip():
+                normalized = symbol.strip().upper()
+                if normalized not in symbols:
+                    symbols.append(normalized)
+        if symbols:
+            return symbols
+        if payload_model.symbols:
+            for symbol in payload_model.symbols:
+                if isinstance(symbol, str) and symbol.strip():
+                    normalized = symbol.strip().upper()
+                    if normalized not in symbols:
+                        symbols.append(normalized)
+        if symbols:
+            return symbols
+        query = (payload_model.query or "").strip().lower()
+        if query:
+            matches = keyword_symbol_lookup(query)
+            for symbol in matches:
+                normalized = symbol.strip().upper()
+                if normalized not in symbols:
+                    symbols.append(normalized)
+        return symbols
 
     @classmethod
     async def _request(cls, client: httpx.AsyncClient, params: dict[str, Any]) -> dict[str, Any]:
@@ -930,6 +1005,60 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
         return low_value, high_value
 
 
+class StooqSnapshotAdapter(MCPToolAdapter):
+    name = "finance/stooq"
+    description = "Fetch end-of-day quote snapshots using the public Stooq dataset."
+    labels = ("finance", "fallback")
+    InputModel = YahooFinanceRequest
+    OutputModel = YahooFinanceResponse
+
+    async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
+        _sanitize_finance_request(payload_model)
+        symbols = self._resolve_symbols(payload_model)
+        if not symbols:
+            raise ValueError("No symbols provided for Stooq adapter")
+
+        quotes = await fetch_quotes_from_stooq(symbols)
+        if not quotes:
+            raise RuntimeError("Stooq did not return any quote data")
+
+        metrics_payload: list[dict[str, Any]] = []
+        for entry in quotes:
+            metric = YahooFinanceMetrics(
+                symbol=entry.get("symbol", ""),
+                price=_safe_float(entry.get("regularMarketPrice")),
+                open=_safe_float(entry.get("regularMarketOpen")),
+                day_high=_safe_float(entry.get("regularMarketDayHigh")),
+                day_low=_safe_float(entry.get("regularMarketDayLow")),
+                volume=_safe_int(entry.get("regularMarketVolume")),
+            ).model_dump()
+            metric.setdefault("provider", "stooq")
+            metric.setdefault("source", "stooq")
+            metrics_payload.append(metric)
+
+        return {
+            "requested": symbols,
+            "generated_at": datetime.now(UTC),
+            "metrics": metrics_payload,
+        }
+
+    def _resolve_symbols(self, payload_model: YahooFinanceRequest) -> list[str]:
+        symbols: list[str] = []
+        if payload_model.symbols:
+            for symbol in payload_model.symbols:
+                if isinstance(symbol, str) and symbol.strip():
+                    candidate = symbol.strip().upper()
+                    if candidate not in symbols:
+                        symbols.append(candidate)
+        if symbols:
+            return symbols
+
+        query = (payload_model.query or "").strip().lower()
+        if not query:
+            return []
+        return keyword_symbol_lookup(query)
+
+
 class CachedQuoteSnapshotAdapter(MCPToolAdapter):
     name = "finance/cached_quotes"
     description = "Return deterministic quote snapshots from bundled cache when live providers fail."
@@ -942,6 +1071,7 @@ class CachedQuoteSnapshotAdapter(MCPToolAdapter):
     _data_path: Path = Path(__file__).resolve().parent / "data" / "cached_quotes.json"
 
     async def _invoke(self, payload_model: YahooFinanceRequest) -> dict[str, Any]:
+        _sanitize_finance_request(payload_model)
         dataset = await self._load_dataset()
         symbols = self._resolve_symbols(payload_model, dataset)
         if not symbols:
@@ -1004,7 +1134,7 @@ class CachedQuoteSnapshotAdapter(MCPToolAdapter):
 
         query = (payload_model.query or "").strip()
         if query:
-            inferred = _keyword_symbol_lookup(query.lower())
+            inferred = keyword_symbol_lookup(query.lower())
             for symbol in inferred:
                 normalized = symbol.strip().upper()
                 if normalized and normalized not in symbols:
@@ -1401,26 +1531,29 @@ def _fallback_finbert_pipeline(text: str, top_k: int = 1):
     return scores[:top_k]
 
 
-def _keyword_symbol_lookup(normalized_query: str) -> list[str]:
-    if not normalized_query:
-        return []
-    matches: list[str] = []
-    tokens = normalized_query.replace("-", " ").replace("/", " ").split()
-    for token in tokens:
-        symbols = KEYWORD_SYMBOL_OVERRIDES.get(token)
-        if not symbols:
-            continue
-        for symbol in symbols:
-            if symbol not in matches:
-                matches.append(symbol)
-    if matches:
-        return matches
-    for keyword, symbols in KEYWORD_SYMBOL_OVERRIDES.items():
-        if keyword in normalized_query:
-            for symbol in symbols:
-                if symbol not in matches:
-                    matches.append(symbol)
-    return matches
+def _sanitize_finance_request(payload_model: YahooFinanceRequest) -> None:
+    sources: list[str] = []
+    if payload_model.symbols:
+        sources.extend([item for item in payload_model.symbols if isinstance(item, str)])
+    if payload_model.query:
+        sources.append(payload_model.query)
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+
+    def _add(symbol: str) -> None:
+        candidate = (symbol or "").strip().upper()
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            normalized.append(candidate)
+
+    for source in sources:
+        for symbol in extract_symbols_from_text(source):
+            _add(symbol)
+
+    if normalized:
+        payload_model.symbols = normalized[:20]
+        logger.info("finance_prompt_sanitized", extra={"symbols": normalized[:5], "source_count": len(sources)})
 
 
 def _load_dataframe(payload_model: PandasAnalyticsRequest) -> pd.DataFrame:
@@ -1488,6 +1621,7 @@ def _serialize_x(value: Any) -> Any:
 FINANCE_ADAPTER_CLASSES: tuple[type[MCPToolAdapter], ...] = (
     YahooFinanceSnapshotAdapter,
     AlphaVantageSnapshotAdapter,
+    StooqSnapshotAdapter,
     CachedQuoteSnapshotAdapter,
     PandasAnalyticsAdapter,
     FinancePlotAdapter,
@@ -1495,6 +1629,61 @@ FINANCE_ADAPTER_CLASSES: tuple[type[MCPToolAdapter], ...] = (
     CSVAnalyzerAdapter,
     FinbertSentimentAdapter,
 )
+
+
+async def fetch_quotes_from_stooq(symbols: Sequence[str]) -> list[dict[str, Any]]:
+    """Fetch the latest daily quotes from Stooq for the provided symbols."""
+    results: list[dict[str, Any]] = []
+    async with httpx.AsyncClient(timeout=8.0, headers={"User-Agent": YAHOO_DEFAULT_USER_AGENT}) as client:
+        for symbol in symbols:
+            stooq_symbol = symbol.lower()
+            if "." not in stooq_symbol:
+                stooq_symbol = f"{stooq_symbol}.us"
+            params = {"s": stooq_symbol, "i": "d"}
+            try:
+                response = await client.get("https://stooq.com/q/d/l/", params=params)
+                response.raise_for_status()
+            except httpx.HTTPError:
+                continue
+            content = response.text.strip()
+            if not content:
+                continue
+            reader = csv.DictReader(content.splitlines())
+            latest_row: dict[str, str] | None = None
+            for row in reader:
+                latest_row = row
+            if not latest_row:
+                continue
+            try:
+                close_price = float(latest_row.get("Close", ""))
+            except ValueError:
+                close_price = None
+            try:
+                open_price = float(latest_row.get("Open", ""))
+            except ValueError:
+                open_price = None
+            try:
+                day_high = float(latest_row.get("High", ""))
+            except ValueError:
+                day_high = None
+            try:
+                day_low = float(latest_row.get("Low", ""))
+            except ValueError:
+                day_low = None
+            try:
+                volume = int(float(latest_row.get("Volume", "")))
+            except ValueError:
+                volume = None
+            payload = {
+                "symbol": symbol,
+                "regularMarketPrice": close_price,
+                "regularMarketOpen": open_price,
+                "regularMarketDayHigh": day_high,
+                "regularMarketDayLow": day_low,
+                "regularMarketVolume": volume,
+            }
+            results.append(payload)
+    return results
 
 
 def _extract_fundamentals_payload(quotes: Sequence[Mapping[str, Any]], symbol: str) -> dict[str, Any] | None:
@@ -1508,6 +1697,12 @@ def _extract_fundamentals_payload(quotes: Sequence[Mapping[str, Any]], symbol: s
             if isinstance(fundamentals, Mapping) and fundamentals:
                 return copy.deepcopy(dict(fundamentals))
     return None
+
+
+def _pick_user_agent() -> str:
+    if not YAHOO_USER_AGENT_POOL:
+        return YAHOO_DEFAULT_USER_AGENT
+    return random.choice(YAHOO_USER_AGENT_POOL)
 
 
 def _build_fundamentals_snapshot(ticker: Any) -> dict[str, Any] | None:
@@ -1621,33 +1816,20 @@ def _extract_guidance_fields(info: Mapping[str, Any]) -> dict[str, Any]:
     return guidance
 
 
-def _degrade_quote_snapshots(
+def _annotate_fallback_quotes(
     quotes: Sequence[Mapping[str, Any]],
     *,
     provider: str,
     reason: str,
 ) -> list[dict[str, Any]]:
-    """Strip volatile real-time fields from fallback payloads."""
-
-    degraded: list[dict[str, Any]] = []
-    volatile_fields = (
-        "regularMarketPrice",
-        "regularMarketChange",
-        "regularMarketChangePercent",
-        "regularMarketPreviousClose",
-        "regularMarketOpen",
-        "regularMarketDayLow",
-        "regularMarketDayHigh",
-        "regularMarketVolume",
-    )
+    annotated: list[dict[str, Any]] = []
     for entry in quotes:
         payload = dict(entry)
-        for field in volatile_fields:
-            payload[field] = None
+        payload.setdefault("provider", provider)
         payload["_fallback_provider"] = provider
         payload["_fallback_reason"] = reason
-        degraded.append(payload)
-    return degraded
+        annotated.append(payload)
+    return annotated
 
 
 def _classify_fallback_reason(error: Exception | None) -> str:
@@ -1683,6 +1865,7 @@ for _public_name, _private_name in (
 __all__ = [
     "YahooFinanceSnapshotAdapter",
     "AlphaVantageSnapshotAdapter",
+    "StooqSnapshotAdapter",
     "CachedQuoteSnapshotAdapter",
     "PandasAnalyticsAdapter",
     "FinancePlotAdapter",

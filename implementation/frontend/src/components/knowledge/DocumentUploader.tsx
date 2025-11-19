@@ -10,24 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
 import { Clipboard, ClipboardCheck, FileText, Loader2, Upload, AlertTriangle } from "lucide-react";
-
-interface DocumentMetadata {
-  filename: string;
-  content_type: string | null;
-  extension: string | null;
-  line_count: number;
-  character_count: number;
-  filesize_bytes: number;
-}
-
-interface DocumentAnalysisResponse {
-  output: string;
-  document: DocumentMetadata;
-  truncated: boolean;
-  persisted: boolean;
-  memory_task_id: string | null;
-  preview: string | null;
-}
+import { DocumentAnalysisResponse } from "@/types/documents";
 
 const formatBytes = (value: number) => {
   if (value < 1024) return `${value} B`;

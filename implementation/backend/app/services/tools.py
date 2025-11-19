@@ -7,6 +7,7 @@ import base64
 import hashlib
 import hmac
 import contextvars
+import os
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -168,6 +169,7 @@ class ToolService:
             period_seconds=settings.rate_limit.period_seconds,
         )
         self._alias_mapping = {**DEFAULT_TOOL_ALIASES, **(settings.aliases or {})}
+        self._apply_finance_snapshot_override()
         self._register_aliases(self._alias_mapping)
         self._catalog: dict[str, MCPToolDescriptor] = {}
         self._catalog_expiry: float = 0.0
@@ -200,6 +202,36 @@ class ToolService:
         self._last_invocation: dict[str, Any] | None = None
         self._last_catalog_refresh: float | None = None
         self._payload_string_limit = MAX_PAYLOAD_STRING_LENGTH
+
+    def _apply_finance_snapshot_override(self) -> None:
+        raw_value = os.getenv("FINANCE_SNAPSHOT_PROVIDER") or ""
+        providers = [segment.strip().lower() for segment in raw_value.split(",") if segment.strip()]
+        if not providers:
+            return
+        provider_mapping = {
+            "alpha_vantage": "finance/alpha_vantage",
+            "alpha": "finance/alpha_vantage",
+            "yfinance": "finance/yfinance",
+            "yahoo": "finance/yfinance",
+        }
+        resolved: list[str] = []
+        for provider in providers:
+            target = provider_mapping.get(provider)
+            if target and target not in resolved:
+                resolved.append(target)
+        if not resolved:
+            return
+        primary = resolved[0]
+        self._alias_mapping["finance.snapshot"] = primary
+
+        fallback = next((candidate for candidate in resolved[1:] if candidate != primary), None)
+        if fallback is None:
+            default_fallback = (
+                "finance/yfinance" if primary == "finance/alpha_vantage" else "finance/alpha_vantage"
+            )
+            fallback = default_fallback if default_fallback != primary else None
+        if fallback:
+            self._alias_mapping["finance.snapshot.alpha"] = fallback
 
     def _register_aliases(self, mapping: Mapping[str, str]) -> None:
         for alias, target in mapping.items():

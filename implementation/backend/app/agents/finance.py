@@ -5,11 +5,12 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from ..agents.base import AgentContext
 from ..core.logging import get_logger
 from ..core.metrics import observe_confidence_component
+from ..mcp.symbols import extract_symbols_from_text
 from ..schemas.agents import AgentCapability, AgentExchange, AgentInput, AgentOutput
 from ..services.tools import ToolDisabledError, ToolInvocationError, ToolInvocationResult
 
@@ -46,6 +47,11 @@ class FinanceAgent:
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("finance_agent_task", task=task.model_dump())
+        logger.info(
+            "finance_agent_context",
+            planned_tools=context.planned_tools,
+            fallback_tools=context.fallback_tools,
+        )
         context_section = task.context
         if context_section is None and context.context is not None:
             bundle = await context.context.build(task=_serialize_agent_input(task), agent=self.name)
@@ -84,7 +90,21 @@ class FinanceAgent:
             )
         if confidence_breakdown is not None:
             metadata["confidence_breakdown"] = confidence_breakdown
-        override_payload = self._tool_policy_override(tool_result=tool_result, tool_trace=tool_trace, tools=context.tools)
+        override_payload = self._tool_policy_override(
+            tool_result=tool_result,
+            tool_trace=tool_trace,
+            tools=context.tools,
+            planned_tools=context.planned_tools,
+            fallback_tools=context.fallback_tools,
+            task_metadata=task.metadata if isinstance(task.metadata, dict) else None,
+        )
+        logger.info(
+            "finance_agent_override_payload",
+            has_override=bool(override_payload),
+            override_reason=(override_payload or {}).get("reason"),
+            planned_tools=context.planned_tools,
+            fallback_tools=context.fallback_tools,
+        )
         if override_payload is not None:
             metadata["tool_policy_override"] = override_payload
 
@@ -205,21 +225,126 @@ class FinanceAgent:
         tool_result: ToolInvocationResult | None,
         tool_trace: list[dict[str, Any]],
         tools: Any,
+        planned_tools: list[str] | None = None,
+        fallback_tools: list[str] | None = None,
+        task_metadata: Mapping[str, Any] | None = None,
     ) -> dict[str, Any] | None:
-        if tool_result is not None:
+        planned = tuple(tool for tool in (planned_tools or []) if isinstance(tool, str))
+        fallback = tuple(tool for tool in (fallback_tools or []) if isinstance(tool, str))
+        if (not planned or not fallback) and task_metadata:
+            derived_planned, derived_fallback = self._extract_planner_tools_from_metadata(task_metadata)
+            if not planned and derived_planned:
+                planned = tuple(derived_planned)
+            if not fallback and derived_fallback:
+                fallback = tuple(derived_fallback)
+        planner_expected = bool(planned or fallback)
+
+        if tool_result is None:
+            payload: dict[str, Any] = {"allow_skip": True, "attempts": len(tool_trace)}
+            if tools is None:
+                payload["reason"] = "tool_service_unavailable"
+            elif tool_trace:
+                payload["reason"] = "tool_attempts_exhausted"
+            else:
+                payload["reason"] = "tool_payload_missing"
+            if planner_expected and planned:
+                payload["requested_tools"] = list(planned)
+            last_error = next((attempt.get("error") for attempt in reversed(tool_trace) if attempt.get("error")), None)
+            if last_error:
+                payload["last_error"] = last_error
+            return payload
+
+        if not planner_expected:
             return None
-        payload: dict[str, Any] = {"allow_skip": True}
-        if tools is None:
-            payload["reason"] = "tool_service_unavailable"
-        elif tool_trace:
-            payload["reason"] = "tool_attempts_exhausted"
+
+        success_aliases = [entry.get("tool") for entry in tool_trace if entry.get("status") == "success"]
+        planned_success = any(alias in planned for alias in success_aliases if alias)
+        fallback_success = any(alias in fallback for alias in success_aliases if alias)
+        if planned_success or fallback_success:
+            return None
+
+        supported_aliases = set(self.tool_candidates) | {"finance.news"}
+        unsupported_planned = [tool for tool in planned if tool not in supported_aliases]
+        unsupported_fallback = [tool for tool in fallback if tool not in supported_aliases]
+        failed_planned = [
+            attempt
+            for attempt in tool_trace
+            if attempt.get("tool") in planned and attempt.get("status") != "success"
+        ]
+        payload: dict[str, Any] = {"allow_skip": True, "attempts": len(tool_trace)}
+        success_alias = getattr(tool_result, "tool", None)
+
+        if unsupported_planned or unsupported_fallback:
+            payload["reason"] = "planner_tool_unsupported"
+            if unsupported_planned:
+                payload["unsupported_planned"] = unsupported_planned
+            if unsupported_fallback:
+                payload["unsupported_fallback"] = unsupported_fallback
+        elif failed_planned:
+            payload["reason"] = "planner_tool_outage"
+            payload["failed_planned"] = [
+                {
+                    "tool": attempt.get("tool"),
+                    "status": attempt.get("status"),
+                    "error": attempt.get("error"),
+                }
+                for attempt in failed_planned
+            ]
+        elif success_alias and success_alias not in planned and success_alias not in fallback:
+            payload["reason"] = "unplanned_tool_success"
+            payload["replacement_tool"] = success_alias
         else:
-            payload["reason"] = "tool_payload_missing"
-        payload["attempts"] = len(tool_trace)
+            return None
+
+        if success_alias:
+            payload["tool_used"] = success_alias
         last_error = next((attempt.get("error") for attempt in reversed(tool_trace) if attempt.get("error")), None)
         if last_error:
-            payload["last_error"] = last_error
+            payload.setdefault("last_error", last_error)
+        if planned:
+            payload.setdefault("requested_tools", list(planned))
         return payload
+
+    def _extract_planner_tools_from_metadata(
+        self, metadata: Mapping[str, Any] | None
+    ) -> tuple[list[str], list[str]]:
+        if not isinstance(metadata, Mapping):
+            return [], []
+
+        def _normalize(value: Any) -> list[str]:
+            if isinstance(value, str):
+                return [token.strip() for token in value.split() if token.strip()]
+            if isinstance(value, Sequence):
+                cleaned: list[str] = []
+                for item in value:
+                    if isinstance(item, str) and item.strip():
+                        cleaned.append(item.strip())
+                return cleaned
+            return []
+
+        planned: list[str] = []
+        fallback: list[str] = []
+
+        candidates: list[Mapping[str, Any]] = []
+        planner_step = metadata.get("planner_step")
+        if isinstance(planner_step, Mapping):
+            candidates.append(planner_step)
+        shared_context = metadata.get("_shared_context")
+        if isinstance(shared_context, Mapping):
+            planner_steps = shared_context.get("planner_steps")
+            if isinstance(planner_steps, Sequence):
+                for entry in reversed(planner_steps):
+                    if isinstance(entry, Mapping) and entry.get("planned_agent") == self.name:
+                        candidates.append(entry)
+                        break
+
+        for candidate in candidates:
+            planned = _normalize(candidate.get("executed_tools") or candidate.get("planned_tools")) or planned
+            fallback = _normalize(candidate.get("planned_fallback_tools") or candidate.get("executed_fallback_tools")) or fallback
+            if planned:
+                break
+
+        return planned, fallback
 
     def _build_news_payload(self, task: AgentInput) -> dict[str, Any] | None:
         metadata: dict[str, Any] = task.metadata if isinstance(task.metadata, dict) else {}
@@ -275,8 +400,19 @@ class FinanceAgent:
     def _infer_symbols_from_prompt(self, prompt: str | None) -> list[str]:
         if not prompt:
             return []
+        inferred = extract_symbols_from_text(prompt)
+        unique: list[str] = []
+        for symbol in inferred:
+            if symbol and symbol not in unique:
+                unique.append(symbol)
+
         ticker_candidates = re.findall(r"\b[A-Z]{1,5}\b", prompt)
-        return [candidate for candidate in ticker_candidates if len(candidate) >= 2]
+        for candidate in ticker_candidates:
+            if len(candidate) < 2:
+                continue
+            if candidate not in unique:
+                unique.append(candidate)
+        return unique
 
     def _derive_company_query(self, task: AgentInput, metadata: dict[str, Any]) -> str | None:
         candidates: list[str] = []

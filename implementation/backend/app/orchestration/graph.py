@@ -558,13 +558,37 @@ class Orchestrator:
                     policy_meta.setdefault("denied_patterns", list(tool_session.policy.denied_patterns))
 
         planner_expected = bool(summary["planned_tools"] or summary["fallback_tools"])
+        override = self._extract_tool_policy_override(state, agent_name=agent.name)
         if not tool_session.successful:
+            if override and bool(override.get("allow_skip")):
+                outcome = "override_allowed"
+                record_agent_tool_policy(agent=agent.name, outcome=outcome)
+                payload = {
+                    "attempts": tool_session.attempts,
+                    "errors": tool_session.failures,
+                    "planner": summary,
+                    "override": dict(override),
+                    "reason": override.get("reason", "agent_override"),
+                }
+                await self._record_event(run_tracker, "tool_policy_override", agent=agent.name, payload=payload)
+                if progress_cb is not None:
+                    event_payload = self._ensure_run_id(
+                        run_tracker,
+                        {
+                            "event": "tool_policy_override",
+                            "agent": agent.name,
+                            "task_id": self._task_id_from_state(state),
+                            **payload,
+                        },
+                    )
+                    await self._notify(progress_cb, event_payload)
+                return
             if not enforcement_required:
                 if tool_session.attempts == 0:
                     if not planner_expected:
                         record_agent_tool_policy(agent=agent.name, outcome="optional_skipped")
                         return
-                    if self._should_allow_optional_tool_skip(summary=summary, state=state):
+                    if self._should_allow_optional_tool_skip(summary=summary, state=state, agent_name=agent.name):
                         record_agent_tool_policy(agent=agent.name, outcome="optional_skipped_planned")
                         return
                 outcome = "optional_failed" if tool_session.attempts else "optional_missing"
@@ -614,6 +638,30 @@ class Orchestrator:
             )
 
         if planner_expected and not summary["allowed"]:
+            if override and bool(override.get("allow_skip")):
+                outcome = "override_allowed_planner_mismatch"
+                record_agent_tool_policy(agent=agent.name, outcome=outcome)
+                payload = {
+                    "attempts": tool_session.attempts,
+                    "errors": tool_session.failures,
+                    "planner": summary,
+                    "override": dict(override),
+                    "reason": override.get("reason", "agent_override"),
+                    "successful": summary["successful_tools"],
+                }
+                await self._record_event(run_tracker, "tool_policy_override", agent=agent.name, payload=payload)
+                if progress_cb is not None:
+                    event_payload = self._ensure_run_id(
+                        run_tracker,
+                        {
+                            "event": "tool_policy_override",
+                            "agent": agent.name,
+                            "task_id": self._task_id_from_state(state),
+                            **payload,
+                        },
+                    )
+                    await self._notify(progress_cb, event_payload)
+                return
             outcome = "violation_planner_unfulfilled"
             record_agent_tool_policy(agent=agent.name, outcome=outcome)
             payload = {
@@ -660,7 +708,10 @@ class Orchestrator:
         record_agent_tool_policy(agent=agent.name, outcome=outcome)
 
     @staticmethod
-    def _should_allow_optional_tool_skip(*, summary: Mapping[str, Any], state: Mapping[str, Any]) -> bool:
+    def _should_allow_optional_tool_skip(*, summary: Mapping[str, Any], state: Mapping[str, Any], agent_name: str | None = None) -> bool:
+        override = Orchestrator._extract_tool_policy_override(state, agent_name=agent_name)
+        if override and bool(override.get("allow_skip")):
+            return True
         planned_tools = tuple(summary.get("planned_tools") or ())
         fallback_tools = tuple(summary.get("fallback_tools") or ())
         if not planned_tools and not fallback_tools:
@@ -696,6 +747,27 @@ class Orchestrator:
                 greeting_like = True
 
         return greeting_like
+
+    @staticmethod
+    def _extract_tool_policy_override(state: Mapping[str, Any], *, agent_name: str | None = None) -> Mapping[str, Any] | None:
+        outputs = state.get("outputs")
+        if not isinstance(outputs, list) or not outputs:
+            return None
+        for entry in reversed(outputs):
+            if not isinstance(entry, Mapping):
+                continue
+            if agent_name and entry.get("agent") != agent_name:
+                continue
+            metadata = entry.get("metadata")
+            if not isinstance(metadata, Mapping):
+                continue
+            override = metadata.get("tool_policy_override")
+            if isinstance(override, Mapping):
+                return dict(override)
+            if agent_name:
+                # Stop searching once we've inspected the most recent record for this agent
+                break
+        return None
 
     async def route_task(
         self,

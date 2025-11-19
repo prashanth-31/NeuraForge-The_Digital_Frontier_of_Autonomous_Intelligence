@@ -36,6 +36,7 @@ Copy-Item .env.example .env
 ```
 
 Adjust the secrets and connection strings as needed for your local setup.
+At minimum, set `ALPHAVANTAGE_API_KEY` (the public `demo` key works for MSFT smoke tests, but request your own key for sustained use) and `FINANCE_SNAPSHOT_PROVIDER=alpha_vantage` so the finance snapshot tool can hit its primary data source. You can provide a comma-separated list such as `FINANCE_SNAPSHOT_PROVIDER=alpha_vantage,yfinance` to make Alpha Vantage the primary provider while automatically falling back to Yahoo Finance if the first provider errors.
 
 ### 3. Run services locally
 

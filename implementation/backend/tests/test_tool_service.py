@@ -131,6 +131,32 @@ async def test_invoke_resolves_alias(monkeypatch: pytest.MonkeyPatch, tool_setti
 
 
 @pytest.mark.asyncio
+async def test_finance_snapshot_provider_env_override(
+    monkeypatch: pytest.MonkeyPatch, tool_settings: MCPToolSettings
+) -> None:
+    monkeypatch.setenv("FINANCE_SNAPSHOT_PROVIDER", "alpha_vantage")
+    service = ToolService(tool_settings)
+    resolved = service._resolve_tool_identifier("finance.snapshot")
+    fallback = service._resolve_tool_identifier("finance.snapshot.alpha")
+    assert resolved == "finance/alpha_vantage"
+    assert fallback == "finance/yfinance"
+    await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_finance_snapshot_provider_env_override_multiple(
+    monkeypatch: pytest.MonkeyPatch, tool_settings: MCPToolSettings
+) -> None:
+    monkeypatch.setenv("FINANCE_SNAPSHOT_PROVIDER", "yfinance, alpha_vantage")
+    service = ToolService(tool_settings)
+    primary = service._resolve_tool_identifier("finance.snapshot")
+    secondary = service._resolve_tool_identifier("finance.snapshot.alpha")
+    assert primary == "finance/yfinance"
+    assert secondary == "finance/alpha_vantage"
+    await service.aclose()
+
+
+@pytest.mark.asyncio
 async def test_refresh_catalog_preserves_local_overrides(
     monkeypatch: pytest.MonkeyPatch,
     tool_settings: MCPToolSettings,

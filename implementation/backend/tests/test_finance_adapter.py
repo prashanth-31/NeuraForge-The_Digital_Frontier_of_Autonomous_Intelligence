@@ -1,7 +1,11 @@
 import httpx
 import pytest
 
-from app.mcp.adapters.finance import YAHOO_QUOTE_ENDPOINT, YahooFinanceSnapshotAdapter
+from app.mcp.adapters.finance import (
+    YAHOO_QUOTE_ENDPOINT,
+    StooqSnapshotAdapter,
+    YahooFinanceSnapshotAdapter,
+)
 
 
 @pytest.mark.asyncio
@@ -56,3 +60,32 @@ async def test_yfinance_rate_limit_fallback(monkeypatch: pytest.MonkeyPatch) -> 
     metric = result["metrics"][0]
     assert metric["symbol"] == "AMZN"
     assert metric["price"] is None
+
+
+@pytest.mark.asyncio
+async def test_stooq_adapter_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = StooqSnapshotAdapter()
+
+    async def fake_fetch(symbols):
+        assert symbols == ["AAPL"]
+        return [
+            {
+                "symbol": "AAPL",
+                "regularMarketPrice": 100.0,
+                "regularMarketOpen": 98.0,
+                "regularMarketDayHigh": 101.0,
+                "regularMarketDayLow": 97.5,
+                "regularMarketVolume": 123456,
+            }
+        ]
+
+    monkeypatch.setattr("app.mcp.adapters.finance.fetch_quotes_from_stooq", fake_fetch)
+
+    payload = adapter.InputModel(symbols=["AAPL"])
+    result = await adapter._invoke(payload)
+    assert result["requested"] == ["AAPL"]
+    assert result["metrics"]
+    metric = result["metrics"][0]
+    assert metric["symbol"] == "AAPL"
+    assert metric["price"] == 100.0
+    assert metric["provider"] == "stooq"
