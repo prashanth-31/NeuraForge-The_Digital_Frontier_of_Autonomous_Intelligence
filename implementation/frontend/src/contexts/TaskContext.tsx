@@ -663,6 +663,23 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             return;
           }
 
+          if (eventName === "planner_failed") {
+            const errorMessage =
+              typeof payload.error === "string"
+                ? (payload.error as string)
+                : "Automatic planner failed to route this task.";
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: randomId(),
+                role: "system",
+                content: errorMessage,
+                timestamp: formatTimestamp(eventTimestamp),
+              },
+            ]);
+            return;
+          }
+
           if (eventName === "task_failed") {
             const errorMessage = typeof payload.error === "string" ? payload.error : "Task failed";
             const systemMessage: ChatMessage = {

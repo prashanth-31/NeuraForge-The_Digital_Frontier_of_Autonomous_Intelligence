@@ -114,6 +114,7 @@ class LLMOrchestrationPlanner:
 
         try:
             payload = self._parse_json(trimmed)
+            payload = self._sanitize_plan_payload(payload)
             validated_plan = self._gatekeeper.enforce(payload, raw_response=trimmed)
         except (PlannerError, PlannerContractViolation) as exc:
             logger.exception("planner_output_invalid", error=str(exc), response=trimmed)
@@ -188,6 +189,38 @@ class LLMOrchestrationPlanner:
             adjustments=bool(adjustments),
         )
         return PlannerPlan(steps=steps, raw_response=trimmed, metadata=metadata, confidence=confidence)
+
+    def _sanitize_plan_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        allowed_top_level = {"steps", "metadata", "confidence"}
+        sanitized: dict[str, Any] = {}
+        extra_top_level = [key for key in payload.keys() if key not in allowed_top_level]
+        if extra_top_level:
+            logger.warning("planner_payload_extra_fields", extra_keys=sorted(extra_top_level))
+
+        for key in allowed_top_level:
+            if key in payload:
+                sanitized[key] = payload[key]
+
+        steps = payload.get("steps")
+        cleaned_steps: list[dict[str, Any]] = []
+        if isinstance(steps, Sequence):
+            allowed_step_keys = {"agent", "reason", "tools", "fallback_tools", "confidence"}
+            for index, entry in enumerate(steps):
+                if not isinstance(entry, Mapping):
+                    continue
+                extra_fields = [field for field in entry.keys() if field not in allowed_step_keys]
+                if extra_fields:
+                    logger.warning(
+                        "planner_step_extra_fields_removed",
+                        step_index=index,
+                        extra_keys=sorted(extra_fields),
+                    )
+                cleaned_steps.append({key: entry[key] for key in allowed_step_keys if key in entry})
+
+        sanitized["steps"] = cleaned_steps
+        if not isinstance(sanitized.get("metadata"), Mapping):
+            sanitized["metadata"] = {}
+        return sanitized
 
     @staticmethod
     def _coerce_plan_confidence(raw_value: Any) -> float:
@@ -366,6 +399,7 @@ class LLMOrchestrationPlanner:
             return steps, adjustments
 
         allowed_tools = self._allowed_tool_names(tool_aliases)
+        simple_greeting = self._is_simple_greeting(prompt)
         updated_steps = [
             PlannedAgentStep(
                 agent=step.agent,
@@ -377,7 +411,8 @@ class LLMOrchestrationPlanner:
             for step in steps
         ]
 
-        if self._is_simple_greeting(prompt) and updated_steps:
+        simple_greeting_selected = False
+        if simple_greeting and updated_steps:
             general_step = next((step for step in updated_steps if step.agent == "general_agent"), None)
             selected = general_step or updated_steps[0]
             removed_agents = [step.agent for step in updated_steps if step is not selected]
@@ -402,6 +437,7 @@ class LLMOrchestrationPlanner:
                     confidence=selected.confidence,
                 )
             ]
+            simple_greeting_selected = True
 
         sanitized_entries: list[dict[str, Any]] = []
         canonicalized_entries: list[dict[str, Any]] = []
@@ -465,6 +501,9 @@ class LLMOrchestrationPlanner:
 
         added_agents: list[str] = []
 
+        if simple_greeting_selected:
+            return updated_steps, adjustments
+
         if self._needs_finance_agent(prompt, updated_steps):
             finance_step = PlannedAgentStep(
                 agent="finance_agent",
@@ -473,7 +512,7 @@ class LLMOrchestrationPlanner:
                 reason="financial report requested",
                 confidence=1.0,
             )
-            updated_steps.append(finance_step)
+            updated_steps.insert(0, finance_step)
             added_agents.append(finance_step.agent)
             logger.info(
                 "planner_added_finance_agent",
@@ -507,7 +546,8 @@ class LLMOrchestrationPlanner:
                 reason="creative deliverable requested",
                 confidence=1.0,
             )
-            updated_steps.append(creative_step)
+            general_index = next((idx for idx, step in enumerate(updated_steps) if step.agent == "general_agent"), len(updated_steps))
+            updated_steps.insert(general_index, creative_step)
             added_agents.append(creative_step.agent)
             logger.info(
                 "planner_added_creative_agent",
@@ -524,7 +564,8 @@ class LLMOrchestrationPlanner:
                 reason="business strategy requested",
                 confidence=1.0,
             )
-            updated_steps.append(enterprise_step)
+            general_index = next((idx for idx, step in enumerate(updated_steps) if step.agent == "general_agent"), len(updated_steps))
+            updated_steps.insert(general_index, enterprise_step)
             added_agents.append(enterprise_step.agent)
             logger.info(
                 "planner_added_enterprise_agent",
@@ -532,6 +573,29 @@ class LLMOrchestrationPlanner:
                 agent=enterprise_step.agent,
                 tools=enterprise_step.tools,
             )
+
+        priority_order: list[str] = []
+        if self._prompt_mentions_finance(prompt):
+            priority_order.append("finance_agent")
+        if self._prompt_mentions_enterprise(prompt):
+            priority_order.append("enterprise_agent")
+        if self._prompt_mentions_creative(prompt):
+            priority_order.append("creative_agent")
+
+        if priority_order:
+            original_order = [step.agent for step in updated_steps]
+            prioritized_steps = self._reorder_by_priority(updated_steps, priority_order)
+            new_order = [step.agent for step in prioritized_steps]
+            if new_order != original_order:
+                adjustments.setdefault(
+                    "reordered_agents",
+                    {
+                        "priority": priority_order,
+                        "original_order": original_order,
+                        "updated_order": new_order,
+                    },
+                )
+            updated_steps = prioritized_steps
 
         if added_agents:
             adjustments.setdefault("added_agents", added_agents)
@@ -576,13 +640,17 @@ class LLMOrchestrationPlanner:
     def _needs_finance_agent(self, prompt: str, steps: Sequence[PlannedAgentStep]) -> bool:
         if any(step.agent == "finance_agent" for step in steps):
             return False
+        return self._prompt_mentions_finance(prompt)
 
+    def _prompt_mentions_finance(self, prompt: str) -> bool:
+        if self._is_simple_greeting(prompt):
+            return False
         original = (prompt or "").strip()
         normalized = original.lower()
         if not normalized:
             return False
 
-        finance_keywords = {
+        strong_keywords = {
             "financial",
             "finance",
             "financial report",
@@ -593,14 +661,11 @@ class LLMOrchestrationPlanner:
             "loss",
             "forecast",
             "guidance",
-            "quarter",
             "q1",
             "q2",
             "q3",
             "q4",
             "fy",
-            "yearly",
-            "annual",
             "investment",
             "invest",
             "portfolio",
@@ -613,12 +678,26 @@ class LLMOrchestrationPlanner:
             "banknifty",
             "netflix",
             "nflx",
+            "stock",
+            "stocks",
+            "share",
+            "shares",
+            "ticker",
+            "valuation",
+            "pricing",
         }
+
+        ambiguous_markers = {"quarter", "yearly", "annual"}
+        context_indicators = strong_keywords | {"results", "performance", "report", "budget"}
 
         rupee_symbol = "\u20b9"
 
-        if any(keyword in normalized for keyword in finance_keywords):
+        if any(keyword in normalized for keyword in strong_keywords):
             return True
+
+        if any(marker in normalized for marker in ambiguous_markers):
+            if any(context in normalized for context in context_indicators):
+                return True
 
         if rupee_symbol in original:
             return True
@@ -626,7 +705,8 @@ class LLMOrchestrationPlanner:
         stripped_original = original.translate(str.maketrans("", "", string.punctuation))
         raw_tokens = [token for token in stripped_original.split() if token]
         if any(token.isalpha() and token.isupper() and 1 < len(token) <= 5 for token in raw_tokens):
-            return True
+            if any(context in normalized for context in context_indicators):
+                return True
 
         return False
 
@@ -667,7 +747,11 @@ class LLMOrchestrationPlanner:
     def _needs_creative_agent(self, prompt: str, steps: Sequence[PlannedAgentStep]) -> bool:
         if any(step.agent == "creative_agent" for step in steps):
             return False
+        return self._prompt_mentions_creative(prompt)
 
+    def _prompt_mentions_creative(self, prompt: str) -> bool:
+        if self._is_simple_greeting(prompt):
+            return False
         normalized = (prompt or "").strip().lower()
         if not normalized:
             return False
@@ -684,6 +768,19 @@ class LLMOrchestrationPlanner:
             "creative",
             "tone",
             "branding",
+            "poem",
+            "poetry",
+            "sonnet",
+            "verse",
+            "lyrics",
+            "lyric",
+            "shakespeare",
+            "bard",
+            "play",
+            "script",
+            "creative brief",
+            "metaphor",
+            "imagery",
         }
 
         return any(keyword in normalized for keyword in creative_keywords)
@@ -691,7 +788,11 @@ class LLMOrchestrationPlanner:
     def _needs_enterprise_agent(self, prompt: str, steps: Sequence[PlannedAgentStep]) -> bool:
         if any(step.agent == "enterprise_agent" for step in steps):
             return False
+        return self._prompt_mentions_enterprise(prompt)
 
+    def _prompt_mentions_enterprise(self, prompt: str) -> bool:
+        if self._is_simple_greeting(prompt):
+            return False
         normalized = (prompt or "").strip().lower()
         if not normalized:
             return False
@@ -705,17 +806,24 @@ class LLMOrchestrationPlanner:
             "strategic",
             "enterprise",
             "enterprise idea",
+            "enterprise level",
+            "enterprise-level",
+            "enterprise grade",
+            "enterprise-grade",
             "roadmap",
             "operations",
             "operational",
             "operational insight",
             "operational insights",
             "executive",
+            "executive summary",
             "board",
+            "board update",
             "stakeholder",
             "market entry",
             "org design",
             "organizational",
+            "operating model",
             "pricing",
             "sales",
             "change management",
@@ -725,12 +833,39 @@ class LLMOrchestrationPlanner:
             "b2b",
             "enterprise sales",
             "enterprise strategy",
+            "corporate",
+            "corporate strategy",
+            "enterprise roadmap",
+            "enterprise architecture",
+            "enterprise solution",
         }
 
         if any(keyword in normalized for keyword in enterprise_keywords):
             return True
 
         return "operational insight" in normalized or "operational insights" in normalized
+
+    @staticmethod
+    def _reorder_by_priority(
+        steps: Sequence[PlannedAgentStep],
+        priority: Sequence[str],
+    ) -> list[PlannedAgentStep]:
+        if not steps:
+            return []
+        prioritized: list[PlannedAgentStep] = []
+        consumed: set[int] = set()
+        for agent_name in priority:
+            for index, step in enumerate(steps):
+                if index in consumed:
+                    continue
+                if step.agent == agent_name:
+                    prioritized.append(step)
+                    consumed.add(index)
+                    break
+        for index, step in enumerate(steps):
+            if index not in consumed:
+                prioritized.append(step)
+        return prioritized
 
     def _allowed_tool_names(self, tool_aliases: Mapping[str, str] | None) -> set[str]:
         registry_aliases = dict(tool_registry.aliases())
@@ -884,18 +1019,10 @@ class LLMOrchestrationPlanner:
                 )
 
         # Prioritize specialist agents based on keyword heuristics so complex prompts don't fall back to general_agent only.
-        research_needed = self._needs_research_agent(prompt, steps)
         finance_needed = self._needs_finance_agent(prompt, steps)
         enterprise_needed = self._needs_enterprise_agent(prompt, steps)
+        research_needed = self._needs_research_agent(prompt, steps)
         creative_needed = self._needs_creative_agent(prompt, steps)
-
-        if research_needed:
-            add_step(
-                "research_agent",
-                tools=["research.search", "research.summarizer"],
-                fallback_tools=["research.doc_loader"],
-                step_reason="heuristic: prompt requests external research",
-            )
 
         if finance_needed:
             add_step(
@@ -911,6 +1038,14 @@ class LLMOrchestrationPlanner:
                 tools=["enterprise.playbook"],
                 fallback_tools=["enterprise.policy"],
                 step_reason="heuristic: prompt focuses on operations/strategy",
+            )
+
+        if research_needed:
+            add_step(
+                "research_agent",
+                tools=["research.search", "research.summarizer"],
+                fallback_tools=["research.doc_loader"],
+                step_reason="heuristic: prompt requests external research",
             )
 
         if creative_needed:

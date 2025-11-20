@@ -25,7 +25,11 @@ target_metadata = metadata
 
 def _get_database_url() -> str:
     settings = get_settings()
-    return str(settings.postgres.dsn)
+    url = str(settings.postgres.dsn)
+    if url.startswith("postgresql://"):
+        # Ensure Alembic uses the asyncpg driver instead of defaulting to psycopg2
+        return url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    return url
 
 
 def run_migrations_offline() -> None:

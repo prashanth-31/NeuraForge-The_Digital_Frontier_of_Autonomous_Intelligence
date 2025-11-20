@@ -37,10 +37,6 @@ guardrail_decision_enum = sa.Enum(
 
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    lifecycle_status_enum.create(bind, checkfirst=True)
-    guardrail_decision_enum.create(bind, checkfirst=True)
-
     op.create_table(
         "task_lifecycle_events",
         sa.Column("id", sa.BigInteger(), primary_key=True, autoincrement=True),
@@ -115,5 +111,6 @@ def downgrade() -> None:
     op.drop_index("ix_task_lifecycle_task", table_name="task_lifecycle_events")
     op.drop_table("task_lifecycle_events")
 
-    guardrail_decision_enum.drop(op.get_bind(), checkfirst=True)
-    lifecycle_status_enum.drop(op.get_bind(), checkfirst=True)
+    bind = op.get_bind()
+    guardrail_decision_enum.drop(bind, checkfirst=True)
+    lifecycle_status_enum.drop(bind, checkfirst=True)

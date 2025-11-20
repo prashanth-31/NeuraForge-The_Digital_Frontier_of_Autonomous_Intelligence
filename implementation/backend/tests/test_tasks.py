@@ -78,6 +78,29 @@ def test_submit_task_executes_agents_and_persists_results(submit_client):
     assert all("text" in entry["content"] for entry in results)
 
 
+def test_submit_task_handles_simple_greeting(submit_client):
+    client, memory, llm, _queue = submit_client
+
+    response = client.post(
+        "/api/v1/submit_task",
+        json={"prompt": "hi", "metadata": {}},
+    )
+
+    assert response.status_code == 200
+    task_id = response.json()["task_id"]
+    assert task_id in memory.ephemeral
+
+    stored = memory.ephemeral[task_id]["result"]
+    assert stored["status"] == "completed"
+    report_block = stored.get("report")
+    assert isinstance(report_block, dict)
+    assert report_block.get("headline")
+
+    outputs = stored.get("outputs") or []
+    assert any(output.get("agent") == "general_agent" for output in outputs)
+    assert len(llm.calls) >= 1
+
+
 def test_submit_task_records_failure_when_llm_unavailable(monkeypatch: pytest.MonkeyPatch):
     memory = StubMemoryService()
     queue = ImmediateQueue()

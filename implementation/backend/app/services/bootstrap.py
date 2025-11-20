@@ -9,6 +9,7 @@ from app.core.config import Settings
 from app.core.logging import get_logger
 from app.services.tool_reconciliation import ToolReconciliationJob
 from app.services.tools import ToolConfigurationError, get_tool_service
+from app.utils.embeddings import warm_embedding_model
 
 try:  # pragma: no cover - optional dependency for semantic store
     from qdrant_client import AsyncQdrantClient
@@ -45,6 +46,17 @@ async def ensure_foundation_ready(settings: Settings) -> None:
             raise
         logger.warning(
             "mcp_bootstrap_degraded",
+            error=str(exc),
+            environment=settings.environment,
+        )
+
+    try:
+        await _warm_embedding_models(settings)
+    except Exception as exc:  # pragma: no cover - defensive guard during startup
+        if settings.environment == "production":
+            raise
+        logger.warning(
+            "embedding_warmup_degraded",
             error=str(exc),
             environment=settings.environment,
         )
@@ -158,3 +170,15 @@ async def _wait_for_mcp_readiness(settings: Settings) -> None:
         logger.warning("mcp_not_ready", attempt=attempt, retry_in=round(delay, 2), error=last_error)
         await asyncio.sleep(delay)
         delay = min(delay * 1.5, 6.0)
+
+
+async def _warm_embedding_models(settings: Settings) -> None:
+    if not settings.embedding.warm_cache_on_startup:
+        logger.info("embedding_warmup_skipped", reason="disabled")
+        return
+
+    loaded = await warm_embedding_model(settings.embedding.default_model)
+    if loaded:
+        logger.info("embedding_model_warmed", model=settings.embedding.default_model)
+    else:
+        logger.warning("embedding_model_warm_failed", model=settings.embedding.default_model)

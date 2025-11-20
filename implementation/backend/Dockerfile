@@ -17,6 +17,7 @@ RUN curl -sSL https://install.python-poetry.org | python - \
 # Copy dependency files first (for caching)
 COPY pyproject.toml poetry.lock* ./
 RUN poetry install --no-interaction --no-ansi --only main --no-root
+RUN poetry run pip install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu121
 
 # Copy application code
 COPY . .
