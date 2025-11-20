@@ -190,6 +190,21 @@ class RetrievalSettings(BaseModel):
     relevance_threshold: float = Field(0.0, ge=0.0)
 
 
+class DocumentSettings(BaseModel):
+    enabled: bool = Field(True, description="Toggle server-side document ingestion pipeline.")
+    chunk_size: int = Field(1_200, ge=200, description="Characters per stored chunk when ingesting documents.")
+    chunk_overlap: int = Field(150, ge=0, description="Number of characters overlapped between adjacent chunks.")
+    max_chunks: int = Field(200, ge=1, description="Maximum number of chunks retained per document.")
+    working_ttl_seconds: int = Field(86_400, ge=60, description="TTL for cached chunk text stored in working memory.")
+    preview_chars: int = Field(800, ge=100, description="Preview characters returned to clients after upload.")
+    max_context_chunks: int = Field(4, ge=1, description="Chunks pulled into agent context per referenced document.")
+    embedding_collection: str = Field(
+        "documents",
+        min_length=1,
+        description="Semantic collection name used when storing document embeddings.",
+    )
+
+
 class ConsolidationSettings(BaseModel):
     enabled: bool = Field(False)
     interval_seconds: int = Field(300, ge=30)
@@ -319,6 +334,7 @@ class Settings(BaseSettings):
     snapshots: SnapshotSettings = Field(default_factory=SnapshotSettings)  # type: ignore[arg-type]
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)  # type: ignore[arg-type]
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)  # type: ignore[arg-type]
+    documents: DocumentSettings = Field(default_factory=DocumentSettings)  # type: ignore[arg-type]
     consolidation: ConsolidationSettings = Field(default_factory=ConsolidationSettings)  # type: ignore[arg-type]
     tools: ToolSettings = Field(default_factory=ToolSettings)  # type: ignore[arg-type]
     scoring: ScoringSettings = Field(default_factory=ScoringSettings)  # type: ignore[arg-type]

@@ -7,6 +7,13 @@ export interface DocumentMetadata {
   filesize_bytes: number;
 }
 
+export interface DocumentIngestionInfo {
+  document_id: string;
+  chunk_count: number;
+  truncated: boolean;
+  preview: string | null;
+}
+
 export interface DocumentAnalysisResponse {
   output: string;
   document: DocumentMetadata;
@@ -14,4 +21,5 @@ export interface DocumentAnalysisResponse {
   persisted: boolean;
   memory_task_id: string | null;
   preview: string | null;
+  ingestion: DocumentIngestionInfo | null;
 }

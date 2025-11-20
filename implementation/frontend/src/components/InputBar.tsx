@@ -15,10 +15,12 @@ interface AttachmentRecord {
   fileName: string;
   status: AttachmentStatus;
   memoryTaskId?: string | null;
+  documentId?: string | null;
   persisted?: boolean;
   document?: DocumentAnalysisResponse["document"];
   preview?: string | null;
   truncated?: boolean;
+  ingestion?: DocumentAnalysisResponse["ingestion"];
   error?: string;
 }
 
@@ -78,9 +80,11 @@ const InputBar = () => {
                 status: "ready",
                 persisted: payload.persisted,
                 memoryTaskId: payload.memory_task_id,
+                documentId: payload.ingestion?.document_id ?? null,
                 document: payload.document,
                 preview: payload.preview,
                 truncated: payload.truncated,
+                ingestion: payload.ingestion,
               }
             : attachment,
         ),
@@ -138,14 +142,16 @@ const InputBar = () => {
         id: attachment.memoryTaskId ?? attachment.id,
         filename: attachment.fileName,
         memory_task_id: attachment.memoryTaskId,
+        document_id: attachment.documentId,
         persisted: attachment.persisted ?? false,
         truncated: attachment.truncated ?? false,
         preview: attachment.preview,
         document: attachment.document,
+        ingestion: attachment.ingestion,
       }));
       metadata.attachments = attachmentPayload;
       const documentIds = attachmentPayload
-        .map((item) => item.memory_task_id)
+        .map((item) => item.document_id ?? item.memory_task_id)
         .filter((value): value is string => typeof value === "string" && value.length > 0);
       if (documentIds.length > 0) {
         metadata.documents = documentIds;

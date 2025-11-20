@@ -25,11 +25,15 @@ const DocumentUploader = () => {
   const [response, setResponse] = useState<DocumentAnalysisResponse | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [copyState, setCopyState] = useState<"idle" | "copied">("idle");
+  const [docCopyState, setDocCopyState] = useState<"idle" | "copied">("idle");
 
   const analysisPreview = useMemo(() => {
-    if (!response?.preview) return null;
-    return response.preview.length > 0 ? response.preview : null;
+    const preview = response?.ingestion?.preview ?? response?.preview;
+    if (!preview) return null;
+    return preview.length > 0 ? preview : null;
   }, [response]);
+
+  const ingestionInfo = response?.ingestion;
 
   const handleCopyTaskId = async () => {
     if (!response?.memory_task_id) return;
@@ -45,6 +49,24 @@ const DocumentUploader = () => {
       toast({
         title: "Copy failed",
         description: "Unable to copy task identifier to the clipboard.",
+      });
+    }
+  };
+
+  const handleCopyDocumentId = async () => {
+    if (!ingestionInfo?.document_id) return;
+    try {
+      await navigator.clipboard.writeText(ingestionInfo.document_id);
+      setDocCopyState("copied");
+      setTimeout(() => setDocCopyState("idle"), 1500);
+      toast({
+        title: "Document ID copied",
+        description: "Use this ID to thread the uploaded content into tasks.",
+      });
+    } catch (error) {
+      toast({
+        title: "Copy failed",
+        description: "Unable to copy the document identifier.",
       });
     }
   };
@@ -214,7 +236,6 @@ const DocumentUploader = () => {
                 </div>
               )}
             </Card>
-
             <Card className="p-4 space-y-3">
               <div className="flex items-center justify-between gap-2">
                 <div>
@@ -241,6 +262,47 @@ const DocumentUploader = () => {
               </p>
             </Card>
           </div>
+
+          {ingestionInfo && (
+            <Card className="p-4 space-y-3">
+              <div className="flex items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-sm font-semibold text-foreground">Document context</h3>
+                  <p className="text-xs text-muted-foreground">
+                    Use the document ID to retrieve chunked context inside conversations.
+                  </p>
+                </div>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  onClick={handleCopyDocumentId}
+                  disabled={!ingestionInfo.document_id}
+                  className="gap-2"
+                >
+                  {docCopyState === "copied" ? <ClipboardCheck className="h-4 w-4" /> : <Clipboard className="h-4 w-4" />}
+                  {docCopyState === "copied" ? "Copied" : "Copy doc ID"}
+                </Button>
+              </div>
+
+              <dl className="grid grid-cols-2 gap-x-3 gap-y-2 text-sm">
+                <dt className="text-muted-foreground">Document ID</dt>
+                <dd className="font-mono break-all">{ingestionInfo.document_id}</dd>
+                <dt className="text-muted-foreground">Chunks</dt>
+                <dd>{ingestionInfo.chunk_count}</dd>
+                <dt className="text-muted-foreground">Chunk preview</dt>
+                <dd>
+                  {ingestionInfo.preview
+                    ? ingestionInfo.preview.length > 80
+                      ? `${ingestionInfo.preview.slice(0, 80)}…`
+                      : ingestionInfo.preview
+                    : "n/a"}
+                </dd>
+                <dt className="text-muted-foreground">Truncated</dt>
+                <dd>{ingestionInfo.truncated ? "Yes" : "No"}</dd>
+              </dl>
+            </Card>
+          )}
 
           <div className="space-y-2">
             <Label htmlFor="analysis-output">LLM summary</Label>

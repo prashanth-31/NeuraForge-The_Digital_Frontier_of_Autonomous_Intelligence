@@ -106,6 +106,28 @@ class RedisRepository:
         finally:
             observe_memory_store_latency(store="redis", operation="set", latency=perf_counter() - start)
 
+    async def fetch_working_memory(self, key: str) -> str | None:
+        client = self._client
+        if client is None:
+            return None
+        start = perf_counter()
+        try:
+            value = await client.get(self._key(key))
+            set_memory_service_health(store="redis", healthy=True)
+        except Exception as exc:  # pragma: no cover - connectivity guard
+            logger.warning("redis_operation_failed", operation="get", key=key, error=str(exc))
+            set_memory_service_health(store="redis", healthy=False)
+            return None
+        finally:
+            observe_memory_store_latency(store="redis", operation="get", latency=perf_counter() - start)
+        if value is None:
+            return None
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="ignore")
+        if isinstance(value, str):
+            return value
+        return str(value)
+
     async def store_working_batch(self, items: Sequence[tuple[str, str]], ttl: int | None = None) -> None:
         if not self.enabled or not items:
             return
@@ -632,6 +654,12 @@ class HybridMemoryService:
             logger.warning("redis_not_configured", key=key)
             return
         await self._redis_repo.store_working_memory(key, value, ttl=ttl or self.config.working_memory_ttl)
+
+    async def fetch_working_memory(self, key: str) -> str | None:
+        if self._redis_repo is None:
+            logger.warning("redis_not_configured_fetch", key=key)
+            return None
+        return await self._redis_repo.fetch_working_memory(key)
 
     async def store_working_memory_batch(
         self,

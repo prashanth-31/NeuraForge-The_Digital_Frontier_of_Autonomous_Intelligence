@@ -51,8 +51,9 @@ from ..schemas.reviews import (
     ReviewMetricsResponse,
 )
 from ..schemas.tasks import TaskRequest, TaskResponse, TaskResult, TaskStatusMetrics, TaskStatusResponse
-from ..schemas.documents import DocumentAnalysisResponse, DocumentMetadata
+from ..schemas.documents import DocumentAnalysisResponse, DocumentMetadata, DocumentIngestionInfo
 from ..schemas.orchestrator import OrchestratorEventModel, OrchestratorRunDetail
+from ..services.document_ingestion import DocumentIngestionService, IngestedDocument
 from ..services.embedding import EmbeddingService
 from ..services.llm import LLMService
 from ..services.memory import HybridMemoryService
@@ -753,8 +754,8 @@ async def upload_document(
             reason=llm_error,
         )
 
-    persisted = False
     memory_task_id: str | None = None
+    ingestion_result: IngestedDocument | None = None
     if persist:
         try:
             memory_service = HybridMemoryService.from_settings(settings)
@@ -763,25 +764,49 @@ async def upload_document(
         else:
             try:
                 async with memory_service.lifecycle() as memory:
-                    memory_task_id = str(uuid.uuid4())
-                    payload = {
-                        "type": "document_analysis",
-                        "filename": parsed.metadata.get("filename"),
-                        "content_type": parsed.metadata.get("content_type"),
-                        "character_count": parsed.metadata.get("character_count"),
-                        "analysis": analysis,
-                    }
-                    await memory.store_ephemeral_memory(memory_task_id, payload)
-                    await memory.store_working_memory(
-                        f"document:{memory_task_id}",
-                        parsed.text,
-                        ttl=settings.memory.working_memory_ttl,
-                    )
-                    persisted = True
-            except Exception as exc:  # pragma: no cover - persistence best effort
-                logger.warning("document_memory_persist_failed", error=str(exc))
+                    embedding_service: EmbeddingService | None = None
+                    if settings.documents.enabled:
+                        try:
+                            embedding_service = EmbeddingService.from_settings(settings, memory_service=memory)
+                        except Exception as exc:  # pragma: no cover - embedding optional
+                            logger.warning("document_embedding_service_unavailable", error=str(exc))
+
+                    if settings.documents.enabled:
+                        ingestion_service = DocumentIngestionService(
+                            memory=memory,
+                            embedder=embedding_service,
+                            config=settings.documents,
+                        )
+                        try:
+                            ingestion_result = await ingestion_service.ingest(parsed)
+                        except Exception as exc:  # pragma: no cover - ingestion best effort
+                            logger.warning("document_ingestion_failed", error=str(exc))
+                            ingestion_result = None
+
+                    try:
+                        memory_task_id = str(uuid.uuid4())
+                        payload = {
+                            "type": "document_analysis",
+                            "filename": parsed.metadata.get("filename"),
+                            "content_type": parsed.metadata.get("content_type"),
+                            "character_count": parsed.metadata.get("character_count"),
+                            "analysis": analysis,
+                        }
+                        if ingestion_result is not None:
+                            payload["document_id"] = ingestion_result.document_id
+                            payload["chunk_count"] = ingestion_result.chunk_count
+                        await memory.store_ephemeral_memory(memory_task_id, payload)
+                        await memory.store_working_memory(
+                            f"document:{memory_task_id}",
+                            parsed.text,
+                            ttl=settings.memory.working_memory_ttl,
+                        )
+                    except Exception as exc:  # pragma: no cover - persistence best effort
+                        logger.warning("document_memory_persist_failed", error=str(exc))
+                        memory_task_id = None
+            except Exception as exc:  # pragma: no cover - lifecycle best effort
+                logger.warning("document_memory_lifecycle_failed", error=str(exc))
                 memory_task_id = None
-                persisted = False
 
     metadata = DocumentMetadata(
         filename=parsed.metadata["filename"],
@@ -792,8 +817,18 @@ async def upload_document(
         filesize_bytes=parsed.metadata["filesize_bytes"],
     )
 
-    preview = parsed.text[:DOCUMENT_PREVIEW_CHARS].strip()
+    preview = (ingestion_result.preview if ingestion_result else parsed.text[:DOCUMENT_PREVIEW_CHARS]).strip()
     cleaned_analysis = analysis.strip() or "Document processed, but no analysis was generated."
+    ingestion_info: DocumentIngestionInfo | None = None
+    if ingestion_result is not None:
+        ingestion_info = DocumentIngestionInfo(
+            document_id=ingestion_result.document_id,
+            chunk_count=ingestion_result.chunk_count,
+            truncated=ingestion_result.truncated,
+            preview=ingestion_result.preview or None,
+        )
+
+    persisted = bool(memory_task_id or ingestion_result)
 
     return DocumentAnalysisResponse(
         output=cleaned_analysis,
@@ -802,6 +837,7 @@ async def upload_document(
         persisted=persisted,
         memory_task_id=memory_task_id,
         preview=preview or None,
+        ingestion=ingestion_info,
     )
 
 

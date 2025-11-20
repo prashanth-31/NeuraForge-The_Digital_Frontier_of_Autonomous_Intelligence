@@ -5,6 +5,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import math
 from typing import Any, Mapping, Sequence
 
 from ..agents.base import AgentContext
@@ -33,6 +34,11 @@ class FinanceAgent:
         "finance.snapshot",
         "finance.snapshot.alpha",
         "finance.snapshot.cached",
+        "finance.plot",
+        "finance.news",
+        "finance/coingecko_news",
+        "finance.analytics",
+        "finance/pandas",
     )
     tool_retry_config: dict[str, tuple[int, float]] = field(
         default_factory=lambda: {
@@ -40,6 +46,7 @@ class FinanceAgent:
             "finance.snapshot.alpha": (2, 1.0),
             "finance.snapshot.cached": (1, 0.0),
             "finance.news": (1, 0.0),
+            "finance.plot": (1, 0.0),
         }
     )
     fallback_agent: str | None = "enterprise_agent"
@@ -57,6 +64,12 @@ class FinanceAgent:
             bundle = await context.context.build(task=_serialize_agent_input(task), agent=self.name)
             context_section = bundle.as_prompt_section()
         tool_result, tool_trace = await self._maybe_invoke_tool(task, context=context)
+        plot_result = await self._maybe_generate_plot(
+            task,
+            context=context,
+            snapshot_result=tool_result,
+            tool_trace=tool_trace,
+        )
         prompt = self._build_prompt(task, context_section=context_section, tool_result=tool_result)
         forecast = await context.llm.generate(prompt=prompt, system_prompt=self.system_prompt, temperature=0.2)
 
@@ -81,8 +94,26 @@ class FinanceAgent:
                 observe_confidence_component(agent=self.name, component=component, value=value)
 
         metadata: dict[str, Any] = {"type": "financial_forecast"}
+        tools_metadata: list[dict[str, Any]] = []
         if tool_result is not None:
-            metadata["tool"] = self._tool_metadata(tool_result)
+            primary_tool_meta = self._tool_metadata(tool_result)
+            metadata["tool"] = primary_tool_meta
+            tools_metadata.append(primary_tool_meta)
+        if plot_result is not None:
+            plot_meta = self._tool_metadata(plot_result)
+            tools_metadata.append(plot_meta)
+            metadata.setdefault("visualizations", []).append(
+                {
+                    "tool": plot_result.tool,
+                    "title": plot_result.response.get("title"),
+                    "mime_type": plot_result.response.get("mime_type"),
+                    "image_base64": plot_result.response.get("image_base64"),
+                    "legend": plot_result.response.get("legend"),
+                    "points": plot_result.response.get("points"),
+                }
+            )
+        if tools_metadata:
+            metadata.setdefault("tools_used", tools_metadata)
         if tool_trace:
             metadata["tool_attempts"] = tool_trace
             metadata["tool_fallback_used"] = any(
@@ -263,7 +294,7 @@ class FinanceAgent:
         if planned_success or fallback_success:
             return None
 
-        supported_aliases = set(self.tool_candidates) | {"finance.news"}
+        supported_aliases = set(self.tool_candidates) | {"finance.news", "finance.plot"}
         unsupported_planned = [tool for tool in planned if tool not in supported_aliases]
         unsupported_fallback = [tool for tool in fallback if tool not in supported_aliases]
         failed_planned = [
@@ -304,6 +335,123 @@ class FinanceAgent:
         if planned:
             payload.setdefault("requested_tools", list(planned))
         return payload
+
+    async def _maybe_generate_plot(
+        self,
+        task: AgentInput,
+        *,
+        context: AgentContext,
+        snapshot_result: ToolInvocationResult | None,
+        tool_trace: list[dict[str, Any]],
+    ) -> ToolInvocationResult | None:
+        alias = "finance.plot"
+        metadata = task.metadata if isinstance(task.metadata, Mapping) else None
+        if not self._planner_requested_plot(
+            planned_tools=context.planned_tools,
+            fallback_tools=context.fallback_tools,
+            task_metadata=metadata,
+        ):
+            return None
+        if context.tools is None:
+            tool_trace.append({"tool": alias, "status": "skipped", "reason": "tool_service_unavailable"})
+            return None
+        if snapshot_result is None:
+            tool_trace.append({"tool": alias, "status": "skipped", "reason": "snapshot_unavailable"})
+            return None
+        payload = self._build_plot_payload(snapshot_result)
+        if payload is None:
+            tool_trace.append({"tool": alias, "status": "skipped", "reason": "insufficient_plot_data"})
+            return None
+        return await self._invoke_finance_tool(context, alias, payload, tool_trace)
+
+    def _planner_requested_plot(
+        self,
+        *,
+        planned_tools: list[str] | None,
+        fallback_tools: list[str] | None,
+        task_metadata: Mapping[str, Any] | None,
+    ) -> bool:
+        variants = self._normalize_tools(planned_tools) | self._normalize_tools(fallback_tools)
+        derived_planned, derived_fallback = self._extract_planner_tools_from_metadata(task_metadata)
+        variants |= self._normalize_tools(derived_planned)
+        variants |= self._normalize_tools(derived_fallback)
+        return "finance.plot" in variants or "finance/plot" in variants
+
+    def _build_plot_payload(self, snapshot_result: ToolInvocationResult) -> dict[str, Any] | None:
+        metrics = self._extract_tool_metrics(snapshot_result)
+        if not metrics:
+            return None
+        primary = metrics[0]
+        fundamentals = primary.get("fundamentals")
+        if not isinstance(fundamentals, Mapping):
+            return None
+        quarterly = fundamentals.get("quarterly")
+        if not isinstance(quarterly, list):
+            return None
+        revenue_points = self._collect_quarterly_points(quarterly, "total_revenue")
+        income_points = self._collect_quarterly_points(quarterly, "net_income")
+        series: list[dict[str, Any]] = []
+        if len(revenue_points) >= 2:
+            series.append({"name": "Revenue (B)", "points": revenue_points})
+        if len(income_points) >= 2:
+            series.append({"name": "Net Income (B)", "points": income_points})
+        if not series:
+            return None
+        title = primary.get("company_name") or primary.get("symbol") or "Finance Plot"
+        return {
+            "title": f"{title} quarterly trends"[:120],
+            "y_label": "USD (billions)",
+            "x_label": "Quarter",
+            "series": series,
+        }
+
+    def _collect_quarterly_points(self, entries: Sequence[Any], key: str) -> list[dict[str, Any]]:
+        points: list[dict[str, Any]] = []
+        filtered = [entry for entry in entries if isinstance(entry, Mapping)]
+        trimmed = filtered[:6]
+        for idx, entry in enumerate(reversed(trimmed)):
+            value = self._safe_number(entry.get(key))
+            if value is None:
+                continue
+            label = self._extract_period_label(entry, idx)
+            points.append({"x": label, "y": value / 1_000_000_000})
+        return points
+
+    @staticmethod
+    def _safe_number(value: Any) -> float | None:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return None
+        if math.isnan(number) or math.isinf(number):
+            return None
+        return number
+
+    @staticmethod
+    def _extract_period_label(entry: Mapping[str, Any], fallback_index: int) -> str:
+        for key in ("period", "end_date", "date"):
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return f"T-{fallback_index}"
+
+    @staticmethod
+    def _normalize_tools(tools: Sequence[str] | None) -> set[str]:
+        normalized: set[str] = set()
+        if not tools:
+            return normalized
+        for tool in tools:
+            if not isinstance(tool, str):
+                continue
+            candidate = tool.strip()
+            if not candidate:
+                continue
+            normalized.add(candidate)
+            if "/" in candidate:
+                normalized.add(candidate.replace("/", "."))
+            if "." in candidate:
+                normalized.add(candidate.replace(".", "/"))
+        return normalized
 
     def _extract_planner_tools_from_metadata(
         self, metadata: Mapping[str, Any] | None

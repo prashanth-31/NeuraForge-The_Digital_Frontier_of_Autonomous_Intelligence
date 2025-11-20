@@ -23,6 +23,12 @@ class ResearchAgent:
     )
     description: str = "Finds factual, evidence-backed information and compiles concise briefings."
     tool_preference: list[str] = field(default_factory=lambda: ["research.search", "research.summarizer"])
+    tool_candidates: tuple[str, ...] = (
+        "research.search",
+        "research.summarizer",
+        "research.doc_loader",
+        "research/doc_loader",
+    )
     fallback_agent: str | None = "enterprise_agent"
     confidence_bias: float = 0.9
 

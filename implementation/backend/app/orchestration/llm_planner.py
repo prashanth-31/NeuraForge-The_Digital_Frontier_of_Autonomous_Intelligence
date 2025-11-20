@@ -365,30 +365,6 @@ class LLMOrchestrationPlanner:
         if not steps:
             return steps, adjustments
 
-        if self._is_simple_greeting(prompt):
-            general_step = next((step for step in steps if step.agent == "general_agent"), None)
-            selected = general_step or steps[0]
-            if len(steps) > 1 or selected is not steps[0]:
-                logger.info(
-                    "planner_trimmed_agents",
-                    reason="simple_greeting",
-                    prompt=prompt.strip(),
-                    selected_agent=selected.agent,
-                )
-            adjustments = {
-                "reason": "simple_greeting",
-                "selected_agent": selected.agent,
-                "removed_agents": [step.agent for step in steps if step.agent != selected.agent],
-            }
-            clone = PlannedAgentStep(
-                agent=selected.agent,
-                tools=list(selected.tools),
-                fallback_tools=list(selected.fallback_tools),
-                reason=selected.reason,
-                confidence=selected.confidence,
-            )
-            return [clone], adjustments
-
         allowed_tools = self._allowed_tool_names(tool_aliases)
         updated_steps = [
             PlannedAgentStep(
@@ -400,6 +376,32 @@ class LLMOrchestrationPlanner:
             )
             for step in steps
         ]
+
+        if self._is_simple_greeting(prompt) and updated_steps:
+            general_step = next((step for step in updated_steps if step.agent == "general_agent"), None)
+            selected = general_step or updated_steps[0]
+            removed_agents = [step.agent for step in updated_steps if step is not selected]
+            if removed_agents:
+                logger.info(
+                    "planner_trimmed_agents",
+                    reason="simple_greeting",
+                    prompt=prompt.strip(),
+                    selected_agent=selected.agent,
+                )
+            adjustments = {
+                "reason": "simple_greeting",
+                "selected_agent": selected.agent,
+                "removed_agents": removed_agents,
+            }
+            updated_steps = [
+                PlannedAgentStep(
+                    agent=selected.agent,
+                    tools=list(selected.tools),
+                    fallback_tools=list(selected.fallback_tools),
+                    reason=selected.reason,
+                    confidence=selected.confidence,
+                )
+            ]
 
         sanitized_entries: list[dict[str, Any]] = []
         canonicalized_entries: list[dict[str, Any]] = []
@@ -701,6 +703,8 @@ class LLMOrchestrationPlanner:
             "business plan",
             "strategy",
             "strategic",
+            "enterprise",
+            "enterprise idea",
             "roadmap",
             "operations",
             "operational",
@@ -718,6 +722,9 @@ class LLMOrchestrationPlanner:
             "transformation",
             "expansion",
             "action plan",
+            "b2b",
+            "enterprise sales",
+            "enterprise strategy",
         }
 
         if any(keyword in normalized for keyword in enterprise_keywords):

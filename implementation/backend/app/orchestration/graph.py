@@ -409,6 +409,19 @@ class Orchestrator:
     @staticmethod
     def _collect_tool_names(candidate: Any) -> set[str]:
         names: set[str] = set()
+
+        def _add_with_variants(identifier: str | None) -> None:
+            if not identifier:
+                return
+            token = identifier.strip()
+            if not token:
+                return
+            names.add(token)
+            if "/" in token:
+                names.add(token.replace("/", "."))
+            if "." in token:
+                names.add(token.replace(".", "/"))
+
         if candidate is None:
             return names
         if isinstance(candidate, Mapping):
@@ -419,9 +432,7 @@ class Orchestrator:
             return names
         for item in iterable:
             if isinstance(item, str):
-                token = item.strip()
-                if token:
-                    names.add(token)
+                _add_with_variants(item)
         return names
 
     @classmethod

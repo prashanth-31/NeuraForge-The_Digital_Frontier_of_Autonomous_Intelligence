@@ -184,7 +184,23 @@ AGENT_TOOL_POLICIES: dict[str, AgentToolPolicy] = {
             "code.*",
         ),
     ),
-    "general_agent": AgentToolPolicy(agent="general_agent", allowed_patterns=("*",)),
+    # Keep the general agent constrained to lightweight research/triage helpers so planners
+    # cannot assign specialist finance/enterprise tools it cannot execute.
+    "general_agent": _policy(
+        "general_agent",
+        allowed=(
+            "search.*",
+            "research.*",
+            "document.*",
+            "browser.*",
+            "text.*",
+        ),
+        denied=(
+            "finance.*",
+            "enterprise.*",
+            "creative.*",
+        ),
+    ),
 }
 
 
