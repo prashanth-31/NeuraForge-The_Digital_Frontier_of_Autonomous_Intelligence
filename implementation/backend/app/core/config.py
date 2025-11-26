@@ -181,6 +181,10 @@ class EmbeddingSettings(BaseModel):
     cache_ttl_seconds: int = Field(86_400, ge=0)
     preferred_dimension: int | None = Field(None, ge=1, description="Optional expected vector dimension.")
     cache_enabled: bool = Field(True)
+    warm_cache_on_startup: bool = Field(
+        True,
+        description="Preload the default embedding model during application startup to avoid cold requests.",
+    )
 
 
 class RetrievalSettings(BaseModel):

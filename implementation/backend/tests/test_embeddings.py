@@ -4,6 +4,7 @@ from typing import Any, Sequence, cast
 
 import pytest
 
+import app.utils.embeddings as emb_utils
 from app.services.embedding import (
 	EmbeddingCache,
 	EmbeddingModelInfo,
@@ -11,6 +12,7 @@ from app.services.embedding import (
 	EmbeddingServiceConfig,
 )
 from app.services.memory import HybridMemoryService
+from app.utils.embeddings import get_embedding_model, warm_embedding_model
 
 
 class DummyBackend:
@@ -132,3 +134,23 @@ async def test_embedding_service_stores_metadata_with_memory() -> None:
 	assert stored["score"] == 0.5
 
 	await service.aclose()
+
+
+@pytest.mark.asyncio
+async def test_warm_embedding_model_preloads(monkeypatch: pytest.MonkeyPatch) -> None:
+	# Ensure the cache is clear before testing.
+	get_embedding_model.cache_clear()  # type: ignore[attr-defined]
+
+	load_calls: list[str] = []
+
+	class DummySentenceTransformer:
+		def __init__(self, name: str) -> None:
+			load_calls.append(name)
+
+	monkeypatch.setattr(emb_utils, "SentenceTransformer", DummySentenceTransformer)
+
+	loaded = await warm_embedding_model("test-model")
+
+	assert loaded is True
+	assert load_calls == ["test-model"]
+	assert get_embedding_model("test-model") is not None

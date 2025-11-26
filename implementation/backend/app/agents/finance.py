@@ -161,6 +161,7 @@ class FinanceAgent:
         retrieved = context_section or "(no retrieved context)"
         tool_data = self._format_tool_metrics(tool_result)
         tool_json = self._format_tool_json(tool_result)
+        recency_anchor = self._format_tool_recency(tool_result)
         handoff = self._format_handoff(task.metadata)
         return (
             f"Business question:\n{task.prompt}\n\n"
@@ -168,6 +169,7 @@ class FinanceAgent:
             f"Shared context from peers:\n{handoff}\n\n"
             f"Earlier agent signals:\n{prior}\n\n"
             f"Retrieved context:\n{retrieved}\n\n"
+            f"Tool recency anchor:\n{recency_anchor}\n\n"
             f"Tool metrics summary:\n{tool_data}\n\n"
             f"Raw tool metrics JSON (primary source, prefer over model priors):\n{tool_json}\n\n"
             "Estimate revenue or cost implications, surface 2-3 headline metrics, and outline immediate actions."
@@ -663,6 +665,28 @@ class FinanceAgent:
         except TypeError:
             return "(tool payload not serializable)"
 
+    def _format_tool_recency(self, tool_result: ToolInvocationResult | None) -> str:
+        if tool_result is None:
+            return "Tool invocation unavailable"
+
+        timestamps: list[datetime] = []
+        for metric in self._extract_tool_metrics(tool_result):
+            parsed = self._parse_timestamp(metric.get("updated_at"))
+            if parsed:
+                timestamps.append(parsed)
+
+        response = tool_result.response if isinstance(tool_result.response, dict) else {}
+        generated = self._parse_timestamp(response.get("generated_at"))
+        if generated:
+            timestamps.append(generated)
+
+        if timestamps:
+            latest = max(timestamps)
+            return f"Latest tool data captured {latest.strftime('%Y-%m-%d %H:%M %Z')}"
+
+        provider = getattr(tool_result, "resolved_tool", None) or tool_result.tool
+        return f"Tool {provider} returned no timestamp; treat outputs as legacy context"
+
     @staticmethod
     def _extract_tool_metrics(tool_result: ToolInvocationResult | None) -> list[dict[str, Any]]:
         if tool_result is None:
@@ -702,6 +726,24 @@ class FinanceAgent:
                 return raw
             return dt.strftime("%Y-%m-%d %H:%M %Z")
         return str(raw)
+
+    @staticmethod
+    def _parse_timestamp(value: Any) -> datetime | None:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value if value.tzinfo else value.replace(tzinfo=UTC)
+        if isinstance(value, (int, float)):
+            try:
+                return datetime.fromtimestamp(float(value), tz=UTC)
+            except (OverflowError, ValueError):
+                return None
+        if isinstance(value, str):
+            try:
+                return datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
 
     @staticmethod
     def _tool_metadata(tool_result: ToolInvocationResult) -> dict[str, Any]:

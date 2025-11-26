@@ -33,6 +33,7 @@ from ..core.metrics import (
 )
 from ..schemas.agents import AgentInput, AgentOutput
 from ..tools.exceptions import ToolError, ToolPolicyViolationError
+from ..tools.registry import normalize_tool_name, tool_registry
 from .context import ContextAssemblyContract, ContextSnapshot, ContextSnapshotStore, ContextStage
 from .dossier import build_decision_dossier
 from .guardrails import GuardrailDecisionType, GuardrailManager
@@ -411,16 +412,22 @@ class Orchestrator:
         names: set[str] = set()
 
         def _add_with_variants(identifier: str | None) -> None:
-            if not identifier:
+            if not identifier or not isinstance(identifier, str):
                 return
             token = identifier.strip()
             if not token:
                 return
-            names.add(token)
+            normalized = Orchestrator._normalize_tool_identifier(token)
+            if normalized:
+                names.add(normalized)
             if "/" in token:
-                names.add(token.replace("/", "."))
+                variant = Orchestrator._normalize_tool_identifier(token.replace("/", "."))
+                if variant:
+                    names.add(variant)
             if "." in token:
-                names.add(token.replace(".", "/"))
+                variant = Orchestrator._normalize_tool_identifier(token.replace(".", "/"))
+                if variant:
+                    names.add(variant)
 
         if candidate is None:
             return names
@@ -437,6 +444,15 @@ class Orchestrator:
 
     @classmethod
     def _build_agent_tool_catalog(cls, roster: Sequence[BaseAgent]) -> dict[str, set[str]]:
+        alias_map = tool_registry.aliases()
+        reverse_aliases: dict[str, set[str]] = {}
+        for alias, target in alias_map.items():
+            normalized_target = cls._normalize_tool_identifier(target)
+            normalized_alias = cls._normalize_tool_identifier(alias)
+            if not normalized_target or not normalized_alias:
+                continue
+            reverse_aliases.setdefault(normalized_target, set()).add(normalized_alias)
+
         catalog: dict[str, set[str]] = {}
         for agent in roster:
             tool_names: set[str] = set()
@@ -445,31 +461,67 @@ class Orchestrator:
             retry_config = getattr(agent, "tool_retry_config", None)
             if isinstance(retry_config, Mapping):
                 tool_names |= cls._collect_tool_names(retry_config)
-            catalog[agent.name] = tool_names
+            resolved_names: set[str] = set()
+            for name in tool_names:
+                if not name:
+                    continue
+                resolved_names.add(name)
+                canonical = tool_registry.resolve(name)
+                normalized_canonical = cls._normalize_tool_identifier(canonical) if canonical else None
+                if normalized_canonical:
+                    resolved_names.add(normalized_canonical)
+            alias_variants: set[str] = set()
+            for key in resolved_names:
+                alias_variants |= reverse_aliases.get(key, set())
+            catalog[agent.name] = resolved_names | alias_variants
         return catalog
+
+    @staticmethod
+    def _normalize_tool_identifier(identifier: str | None) -> str | None:
+        if not identifier or not isinstance(identifier, str):
+            return None
+        token = identifier.strip()
+        if not token:
+            return None
+        try:
+            return normalize_tool_name(token)
+        except Exception:
+            return token.replace("\\", "_").strip().lower()
+
+    @classmethod
+    def _tool_in_catalog(cls, tool: str, catalog: set[str] | None) -> bool:
+        if not catalog:
+            return False
+        normalized = cls._normalize_tool_identifier(tool)
+        return bool(normalized and normalized in catalog)
 
     def _validate_plan_tools(self, steps: Sequence[PlannedAgentStep]) -> None:
         if not steps:
             return
-        invalid_entries: list[dict[str, Any]] = []
-        for step in steps:
+        sanitized_entries: list[dict[str, Any]] = []
+        for index, step in enumerate(steps):
             catalog = self._agent_tool_catalog.get(step.agent)
             if catalog is None:
-                invalid_entries.append({"agent": step.agent, "missing": sorted(set(step.tools))})
                 continue
-            missing = [tool for tool in step.tools if tool not in catalog]
-            fallback_missing = [tool for tool in step.fallback_tools if tool not in catalog]
-            if missing or fallback_missing:
-                invalid_entries.append(
-                    {
-                        "agent": step.agent,
-                        "missing": sorted(set(missing + fallback_missing)),
-                        "available": sorted(catalog),
-                    }
-                )
-        if invalid_entries:
-            logger.warning("planner_invalid_tools", entries=invalid_entries)
-            raise PlannerError("Planner referenced tools that target agents do not expose")
+            missing = [tool for tool in step.tools if not self._tool_in_catalog(tool, catalog)]
+            fallback_missing = [tool for tool in step.fallback_tools if not self._tool_in_catalog(tool, catalog)]
+            if not missing and not fallback_missing:
+                continue
+            if missing:
+                step.tools = [tool for tool in step.tools if tool not in missing]
+            if fallback_missing:
+                step.fallback_tools = [tool for tool in step.fallback_tools if tool not in fallback_missing]
+            sanitized_entries.append(
+                {
+                    "agent": step.agent,
+                    "step_index": index,
+                    "removed_tools": sorted(set(missing)),
+                    "removed_fallback_tools": sorted(set(fallback_missing)),
+                    "available": sorted(catalog),
+                }
+            )
+        if sanitized_entries:
+            logger.warning("planner_invalid_tools_sanitized", entries=sanitized_entries)
 
     def _record_step_override(self, state: dict[str, Any], step_metadata: Mapping[str, Any]) -> None:
         routing = state.get("routing")
