@@ -22,6 +22,7 @@ class CreativeAgent:
     )
     description: str = "Creates expressive, poetic, or stylistic content tailored to the brief."
     tool_preference: list[str] = field(default_factory=lambda: ["creative.tonecheck"])
+    fallback_tools: list[str] = field(default_factory=lambda: ["creative.image"])
     fallback_agent: str | None = "general_agent"
     confidence_bias: float = 0.8
 

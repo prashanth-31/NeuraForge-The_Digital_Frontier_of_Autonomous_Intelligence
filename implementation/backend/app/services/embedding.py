@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
-from typing import TYPE_CHECKING, Any, Protocol, Sequence, cast
+from typing import TYPE_CHECKING, Any, Protocol, Sequence
 
 try:
 	from redis.asyncio import Redis
@@ -25,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover
 
 from ..core.config import EmbeddingSettings, Settings
 from ..core.logging import get_logger
+from ..utils.embeddings import get_embedding_model
 from .memory import HybridMemoryService
 
 logger = get_logger(name=__name__)
@@ -145,10 +146,8 @@ class SentenceTransformerBackend:
 	def __init__(self, *, model_name: str, normalize: bool = True) -> None:
 		if SentenceTransformer is None:
 			raise RuntimeError("sentence_transformers_not_available")
-		factory = cast("type[SentenceTransformerType]", SentenceTransformer)
 		self._model_name = model_name
 		self._normalize = normalize
-		self._factory = factory
 		self._model: SentenceTransformerType | None = None
 		self.info = EmbeddingModelInfo(
 			provider="sentence-transformers",
@@ -159,7 +158,10 @@ class SentenceTransformerBackend:
 
 	def _load_model(self) -> SentenceTransformerType:
 		if self._model is None:
-			self._model = self._factory(self._model_name)
+			model = get_embedding_model(self._model_name)
+			if model is None:
+				raise RuntimeError("sentence_transformers_not_available")
+			self._model = model
 			try:
 				getter = getattr(self._model, "get_sentence_embedding_dimension", None)
 				if callable(getter):

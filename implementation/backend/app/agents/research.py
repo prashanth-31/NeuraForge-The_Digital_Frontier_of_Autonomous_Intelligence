@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from ..agents.base import AgentContext
@@ -19,7 +21,9 @@ class ResearchAgent:
     capability: AgentCapability = AgentCapability.RESEARCH
     system_prompt: str = (
         "You are NeuraForge's Research Agent. Derive concise, well-sourced insights from the task "
-        "description and prior agent outputs. Highlight 2-3 key findings and note missing context."
+        "description and prior agent outputs. Highlight 2-3 key findings, prioritize the most recent "
+        "data available, and optionally surface a clearly labeled Historical Insight when older context "
+        "materially explains the story. Always note missing context."
     )
     description: str = "Finds factual, evidence-backed information and compiles concise briefings."
     tool_preference: list[str] = field(default_factory=lambda: ["research.search", "research.summarizer"])
@@ -95,7 +99,9 @@ class ResearchAgent:
             f"Known metadata:\n{metadata}\n\n"
             f"Prior agent outputs (if any):\n{history}\n\n"
             f"Retrieved context:\n{retrieved}\n\n"
-            "Summarize credible research-backed insights, cite sources inline, and call out missing data."
+            "Summarize credible research-backed insights, cite sources inline, and call out missing data. "
+            "If tools uncovered a remarkable historical pattern, append a short 'Historical Insight' note "
+            "that references the relevant year and source."
         )
 
     async def _maybe_invoke_tool(self, task: AgentInput, *, context: AgentContext) -> ToolInvocationResult | None:
@@ -133,6 +139,8 @@ class ResearchAgent:
         if len(query) < 3:
             return None
 
+        query = self._ensure_current_year(query)
+
         payload: dict[str, Any] = {"query": query[:512]}
         region = metadata.get("region") or metadata.get("market")
         if isinstance(region, str) and region.strip():
@@ -141,6 +149,12 @@ class ResearchAgent:
         if isinstance(max_results, int) and 1 <= max_results <= 20:
             payload["max_results"] = max_results
         return payload
+
+    def _ensure_current_year(self, query: str) -> str:
+        if re.search(r"\b20\d{2}\b", query):
+            return query
+        current_year = datetime.now(UTC).year
+        return f"{query} {current_year}".strip()
 
     def _format_tool_response(self, tool_result: ToolInvocationResult | None) -> str:
         if tool_result is None:

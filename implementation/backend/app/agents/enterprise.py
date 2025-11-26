@@ -23,6 +23,7 @@ class EnterpriseAgent:
     )
     description: str = "Creates workflows, strategies, and executive documentation for stakeholders."
     tool_preference: list[str] = field(default_factory=lambda: ["enterprise.playbook"])
+    fallback_tools: list[str] = field(default_factory=lambda: ["enterprise.policy"])
     fallback_agent: str | None = "research_agent"
     confidence_bias: float = 0.85
 

@@ -22,12 +22,15 @@ class _StubMemory:
 
 
 class _StubAgent:
-    def __init__(self, name: str, capability: AgentCapability) -> None:
+    def __init__(self, name: str, capability: AgentCapability, *, tools: list[str] | None = None) -> None:
         self.name = name
         self.capability = capability
         self.calls = 0
         self.description = f"Stub agent for {name}"
-        self.tool_preference: list[str] = []
+        default_tools: list[str] = []
+        if name == "creative_agent":
+            default_tools = ["creative.write", "creative.image", "creative.tonecheck", "search.web"]
+        self.tool_preference = list(tools if tools is not None else default_tools)
         self.fallback_agent: str | None = None
         self.confidence_bias = 0.5
 
@@ -168,7 +171,10 @@ class _ToolUsingAgent:
         self.capability = capability
         self._tool_to_use = tool_to_use
         self.description = f"Tool-using stub for {name}"
-        self.tool_preference = [tool_to_use]
+        creative_defaults = {"creative.write", "creative.image", "search.web"}
+        tool_set = set(creative_defaults)
+        tool_set.add(tool_to_use)
+        self.tool_preference = sorted(tool_set)
         self.fallback_agent = None
         self.confidence_bias = 0.6
 

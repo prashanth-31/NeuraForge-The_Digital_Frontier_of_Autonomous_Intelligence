@@ -54,6 +54,27 @@ docker compose up --build
 
 `docker compose` automatically runs migrations on container startup; rerun `poetry run alembic upgrade head` locally whenever models change.
 
+### GPU acceleration
+
+The backend container now ships with CUDA-enabled PyTorch (cu121) and can offload SentenceTransformer workloads to an NVIDIA GPU when available. Before rebuilding the image:
+
+- Install the latest NVIDIA drivers on the host and add the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+- Confirm `nvidia-smi` works on the host outside Docker.
+- Rebuild the backend image so the CUDA wheel is baked in:
+
+	```powershell
+	docker compose build backend
+	docker compose up -d backend
+	```
+
+Docker Compose requests a single GPU via `deploy.resources.reservations.devices`; on multi-GPU machines you can raise the `count` or set it to `all`. At runtime, the container exposes `NVIDIA_VISIBLE_DEVICES=all`, so you can restrict usage by overriding that environment variable if necessary.
+
+Verify that the container sees your GPU:
+
+```powershell
+docker compose -f implementation/docker-compose.yml exec backend nvidia-smi
+```
+
 ### 4. Run tests & quality gates
 
 ```powershell
