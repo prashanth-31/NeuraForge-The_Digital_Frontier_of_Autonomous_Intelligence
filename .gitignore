@@ -4,3 +4,4 @@ implementation/Ollama
 .venv
 implementation/backend/models/
 implementation/observability
+implementation/storage
