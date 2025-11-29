@@ -52,3 +52,24 @@ class TaskStatusResponse(BaseModel):
     created_at: datetime | None = None
     updated_at: datetime | None = None
     events: list[OrchestratorEventModel] = Field(default_factory=list)
+
+
+class RecentTaskActivity(BaseModel):
+    task_id: str
+    summary: str
+    agent: str | None = None
+    status: str | None = None
+    confidence: float | None = None
+    timestamp: datetime | None = None
+
+
+class TranscriptMessage(BaseModel):
+    role: str
+    content: str
+    timestamp: str | None = None
+    agent: str | None = None
+
+
+class TranscriptUpdate(BaseModel):
+    messages: list[TranscriptMessage] = Field(default_factory=list)
+

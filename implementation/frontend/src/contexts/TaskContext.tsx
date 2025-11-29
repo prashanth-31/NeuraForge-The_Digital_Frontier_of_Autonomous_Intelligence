@@ -5,17 +5,23 @@ import {
   createContext,
   useCallback,
   useContext,
+  useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 
 type ChatRole = "user" | "assistant" | "system";
+
+const isChatRoleValue = (value: unknown): value is ChatRole =>
+  value === "user" || value === "assistant" || value === "system";
 
 export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
   timestamp: string;
+  isoTimestamp?: string;
   agentName?: string;
   confidence?: number;
   confidenceBreakdown?: Record<string, number>;
@@ -115,6 +121,7 @@ interface TaskContextValue {
   isStreaming: boolean;
   submitTask: (prompt: string, metadata?: Record<string, unknown>) => Promise<void>;
   refreshHistory: (taskId: string) => Promise<void>;
+  loadTaskById: (taskId: string) => Promise<void>;
   resetSession: () => void;
   toolEvents: ToolEvent[];
   mcpDiagnostics: MCPDiagnostics | null;
@@ -134,6 +141,14 @@ const formatTimestamp = (iso?: string) => {
     return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   }
   return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+};
+
+const resolveTimestamps = (iso?: string) => {
+  const isoValue = typeof iso === "string" && iso ? iso : new Date().toISOString();
+  return {
+    iso: isoValue,
+    display: formatTimestamp(isoValue),
+  };
 };
 
 const isRecord = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -251,9 +266,27 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
   const [mcpDiagnostics, setMcpDiagnostics] = useState<MCPDiagnostics | null>(null);
   const [lifecycleEvents, setLifecycleEvents] = useState<LifecycleEvent[]>([]);
   const [taskStatus, setTaskStatus] = useState<TaskStatusState | null>(null);
+  const messagesRef = useRef<ChatMessage[]>([]);
+
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  const applyMessages = useCallback(
+    (updater: ChatMessage[] | ((previous: ChatMessage[]) => ChatMessage[])) => {
+      setMessages((previous) => {
+        const next = typeof updater === "function"
+          ? (updater as (prev: ChatMessage[]) => ChatMessage[])(previous)
+          : updater;
+        messagesRef.current = next;
+        return next;
+      });
+    },
+    [],
+  );
 
   const resetSession = useCallback(() => {
-    setMessages([]);
+    applyMessages([]);
     setHistory([]);
     setCurrentTaskId(null);
     setIsStreaming(false);
@@ -261,6 +294,75 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
     setMcpDiagnostics(null);
     setLifecycleEvents([]);
     setTaskStatus(null);
+  }, [applyMessages]);
+
+  const fetchTranscript = useCallback(async (taskId: string): Promise<ChatMessage[]> => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/history/${taskId}/transcript`);
+      if (!response.ok) {
+        if (response.status === 404) {
+          return [];
+        }
+        throw new Error(`Unable to fetch transcript (${response.status})`);
+      }
+      const payload = await response.json();
+      if (!Array.isArray(payload)) {
+        return [];
+      }
+      const normalized: ChatMessage[] = [];
+      for (const entry of payload) {
+        if (!isRecord(entry)) {
+          continue;
+        }
+        const role = entry.role;
+        const content = entry.content;
+        if (!isChatRoleValue(role) || typeof content !== "string") {
+          continue;
+        }
+        const timestampValue = typeof entry.timestamp === "string" ? entry.timestamp : undefined;
+        const { iso, display } = resolveTimestamps(timestampValue);
+        normalized.push({
+          id: randomId(),
+          role,
+          content,
+          timestamp: display,
+          isoTimestamp: iso,
+          agentName: typeof entry.agent === "string" ? entry.agent : undefined,
+        });
+      }
+      return normalized;
+    } catch (error) {
+      console.error("transcript_fetch_failed", error);
+      return [];
+    }
+  }, []);
+
+  const persistTranscript = useCallback(async (taskId: string, transcript: ChatMessage[]) => {
+    if (!taskId || transcript.length === 0) {
+      return;
+    }
+    const serialized = transcript
+      .filter((message) => isChatRoleValue(message.role))
+      .map((message) => ({
+        role: message.role,
+        content: message.content,
+        timestamp: message.isoTimestamp ?? new Date().toISOString(),
+        agent: message.agentName,
+      }));
+    if (serialized.length === 0) {
+      return;
+    }
+    try {
+      await fetch(`${API_BASE_URL}/api/v1/history/${taskId}/transcript`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ messages: serialized }),
+      });
+    } catch (error) {
+      console.error("transcript_persist_failed", error);
+    }
   }, []);
 
   const refreshHistory = useCallback(async (taskId: string) => {
@@ -389,6 +491,19 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
     }
   }, []);
 
+  const loadTaskById = useCallback(async (taskId: string) => {
+    const normalized = taskId?.trim();
+    if (!normalized) {
+      return;
+    }
+    setCurrentTaskId(normalized);
+    applyMessages([]);
+    const transcriptPromise = fetchTranscript(normalized);
+    await Promise.all([refreshHistory(normalized), refreshTaskStatus(normalized)]);
+    const transcriptMessages = await transcriptPromise;
+    applyMessages(transcriptMessages);
+  }, [applyMessages, fetchTranscript, refreshHistory, refreshTaskStatus]);
+
   const submitTask = useCallback(
     async (prompt: string, metadata: Record<string, unknown> = {}) => {
       const trimmed = prompt.trim();
@@ -398,15 +513,16 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
 
       const continuationTaskId = currentTaskId && typeof currentTaskId === "string" ? currentTaskId : null;
 
-      const timestamp = formatTimestamp();
+      const { iso: userIso, display: userTimestamp } = resolveTimestamps();
       const userMessage: ChatMessage = {
         id: randomId(),
         role: "user",
         content: trimmed,
-        timestamp,
+        timestamp: userTimestamp,
+        isoTimestamp: userIso,
       };
 
-      setMessages((prev) => [...prev, userMessage]);
+      applyMessages((prev) => [...prev, userMessage]);
       setIsStreaming(true);
       setHistory([]);
       setToolEvents([]);
@@ -548,6 +664,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
           if (eventName === "agent_failed") {
             const agentName = typeof payload.agent === "string" ? payload.agent : "unknown_agent";
             const timestampIso = eventTimestamp;
+            const { iso: failureIso, display: failureTimestamp } = resolveTimestamps(timestampIso);
             const latencySeconds = typeof payload.latency === "number" ? payload.latency : undefined;
             const latencyMsExplicit = typeof payload.latency_ms === "number" ? payload.latency_ms : undefined;
             const latencyMs = typeof latencyMsExplicit === "number"
@@ -561,20 +678,21 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               id: randomId(),
               type: "agent_failed",
               agent: agentName,
-              timestamp: formatTimestamp(timestampIso),
+              timestamp: failureTimestamp,
               latencyMs,
               error: errorMessage,
               stepId: typeof payload.step_id === "string" ? payload.step_id : undefined,
             });
 
             if (errorMessage) {
-              setMessages((prev) => [
+              applyMessages((prev) => [
                 ...prev,
                 {
                   id: randomId(),
                   role: "system",
                   content: `Agent ${agentName} reported an error: ${errorMessage}`,
-                  timestamp: formatTimestamp(timestampIso),
+                  timestamp: failureTimestamp,
+                  isoTimestamp: failureIso,
                 },
               ]);
             }
@@ -622,6 +740,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             const agentName = typeof payload.agent === "string" ? payload.agent : undefined;
             const confidenceBreakdown = extractConfidenceBreakdown(mergedMetadata);
             const toolMetadata = extractToolMetadata(mergedMetadata);
+            const { iso: agentIso, display: agentTimestamp } = resolveTimestamps(eventTimestamp);
 
             const message: ChatMessage = {
               id: randomId(),
@@ -632,7 +751,8 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               toolMetadata,
               metadata: mergedMetadata,
               content: toDisplayString(contentSource),
-              timestamp: formatTimestamp(eventTimestamp),
+              timestamp: agentTimestamp,
+              isoTimestamp: agentIso,
             };
 
             if (message.confidenceBreakdown) {
@@ -646,12 +766,12 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               });
             }
 
-            setMessages((prev) => [...prev, message]);
+            applyMessages((prev) => [...prev, message]);
             appendLifecycleEvent({
               id: randomId(),
               type: "agent_completed",
               agent: agentName,
-              timestamp: formatTimestamp(eventTimestamp),
+              timestamp: agentTimestamp,
               latencyMs:
                 typeof payload.latency_ms === "number"
                   ? payload.latency_ms
@@ -668,13 +788,15 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               typeof payload.error === "string"
                 ? (payload.error as string)
                 : "Automatic planner failed to route this task.";
-            setMessages((prev) => [
+            const { iso: plannerIso, display: plannerTimestamp } = resolveTimestamps(eventTimestamp);
+            applyMessages((prev) => [
               ...prev,
               {
                 id: randomId(),
                 role: "system",
                 content: errorMessage,
-                timestamp: formatTimestamp(eventTimestamp),
+                timestamp: plannerTimestamp,
+                isoTimestamp: plannerIso,
               },
             ]);
             return;
@@ -682,13 +804,15 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
 
           if (eventName === "task_failed") {
             const errorMessage = typeof payload.error === "string" ? payload.error : "Task failed";
+            const { iso: taskFailedIso, display: taskFailedTimestamp } = resolveTimestamps(eventTimestamp);
             const systemMessage: ChatMessage = {
               id: randomId(),
               role: "system",
               content: errorMessage,
-              timestamp: formatTimestamp(),
+              timestamp: taskFailedTimestamp,
+              isoTimestamp: taskFailedIso,
             };
-            setMessages((prev) => [...prev, systemMessage]);
+            applyMessages((prev) => [...prev, systemMessage]);
             return;
           }
 
@@ -775,25 +899,31 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
         }
 
         if (activeTaskId) {
-          await refreshHistory(activeTaskId);
-          await refreshTaskStatus(activeTaskId);
+          const transcriptSnapshot = [...messagesRef.current];
+          await Promise.all([
+            persistTranscript(activeTaskId, transcriptSnapshot),
+            refreshHistory(activeTaskId),
+            refreshTaskStatus(activeTaskId),
+          ]);
         }
       } catch (error) {
         console.error("task_stream_failed", error);
-        setMessages((prev) => [
+        const { iso: streamErrorIso, display: streamErrorTimestamp } = resolveTimestamps();
+        applyMessages((prev) => [
           ...prev,
           {
             id: randomId(),
             role: "system",
             content: "Sorry, something went wrong while processing your task.",
-            timestamp: formatTimestamp(),
+            timestamp: streamErrorTimestamp,
+            isoTimestamp: streamErrorIso,
           },
         ]);
       } finally {
         setIsStreaming(false);
       }
     },
-    [currentTaskId, isStreaming, refreshHistory, refreshTaskStatus],
+    [applyMessages, currentTaskId, isStreaming, persistTranscript, refreshHistory, refreshTaskStatus],
   );
 
   const value = useMemo(
@@ -804,6 +934,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       isStreaming,
       submitTask,
       refreshHistory,
+      loadTaskById,
       resetSession,
       toolEvents,
       mcpDiagnostics,
@@ -818,6 +949,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       isStreaming,
       submitTask,
       refreshHistory,
+      loadTaskById,
       resetSession,
       toolEvents,
       mcpDiagnostics,

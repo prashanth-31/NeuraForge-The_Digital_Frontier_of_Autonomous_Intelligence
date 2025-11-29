@@ -1,6 +1,58 @@
+import { useCallback } from "react";
+import { useNavigate } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { Activity, Brain, Zap, Users, Loader2 } from "lucide-react";
+
 import AppLayout from "@/components/AppLayout";
 import { Card } from "@/components/ui/card";
-import { Activity, Brain, Zap, Users } from "lucide-react";
+import { useTaskContext } from "@/contexts/TaskContext";
+import { API_BASE_URL } from "@/lib/api";
+
+interface RecentActivityItem {
+  task_id: string;
+  summary: string;
+  agent?: string | null;
+  status?: string | null;
+  confidence?: number | null;
+  timestamp?: string | null;
+}
+
+const RECENT_ACTIVITY_LIMIT = 5;
+
+const fetchRecentActivity = async (limit: number): Promise<RecentActivityItem[]> => {
+  const response = await fetch(`${API_BASE_URL}/api/v1/history/recent?limit=${limit}`);
+  if (!response.ok) {
+    throw new Error(`Failed to load recent activity (${response.status})`);
+  }
+  return response.json() as Promise<RecentActivityItem[]>;
+};
+
+const formatRelativeTime = (iso?: string | null) => {
+  if (!iso) {
+    return "Unknown";
+  }
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return "Unknown";
+  }
+  const diffMs = Date.now() - date.getTime();
+  const diffMinutes = Math.max(0, Math.floor(diffMs / 60000));
+  if (diffMinutes < 1) return "Just now";
+  if (diffMinutes < 60) return `${diffMinutes}m ago`;
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  return `${diffDays}d ago`;
+};
+
+const getStatusAccent = (status?: string | null) => {
+  if (!status) return "bg-muted";
+  const normalized = status.toLowerCase();
+  if (normalized.includes("fail")) return "bg-destructive";
+  if (normalized.includes("progress") || normalized.includes("running")) return "bg-amber-500";
+  if (normalized.includes("complete")) return "bg-emerald-500";
+  return "bg-primary";
+};
 
 const stats = [
   { label: "Active Sessions", value: "12", icon: Activity, color: "text-primary" },
@@ -10,6 +62,20 @@ const stats = [
 ];
 
 const Dashboard = () => {
+  const navigate = useNavigate();
+  const { loadTaskById } = useTaskContext();
+
+  const { data: recentActivity = [], isLoading, isError } = useQuery({
+    queryKey: ["recent-history", RECENT_ACTIVITY_LIMIT],
+    queryFn: () => fetchRecentActivity(RECENT_ACTIVITY_LIMIT),
+    staleTime: 30_000,
+  });
+
+  const handleActivitySelect = useCallback(async (taskId: string) => {
+    await loadTaskById(taskId);
+    navigate("/");
+  }, [loadTaskById, navigate]);
+
   return (
     <AppLayout>
       <div className="flex-1 overflow-auto p-6">
@@ -34,19 +100,51 @@ const Dashboard = () => {
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-16">
             <Card className="p-6">
               <h3 className="text-lg font-semibold mb-4 text-foreground">Recent Activity</h3>
-              <div className="space-y-4">
-                {[1, 2, 3].map((i) => (
-                  <div key={i} className="flex items-start gap-3 pb-4 border-b border-border last:border-0 last:pb-0">
-                    <div className="w-2 h-2 rounded-full bg-primary mt-2" />
-                    <div>
-                      <p className="text-sm font-medium text-foreground">Agent collaboration completed</p>
-                      <p className="text-xs text-muted-foreground mt-1">
-                        {i} hour{i > 1 ? "s" : ""} ago
-                      </p>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              {isLoading && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading activity…
+                </div>
+              )}
+              {isError && (
+                <p className="text-sm text-destructive">Unable to load recent activity. Try again soon.</p>
+              )}
+              {!isLoading && !isError && recentActivity.length === 0 && (
+                <p className="text-sm text-muted-foreground">No recent tasks have been recorded yet.</p>
+              )}
+              {!isLoading && !isError && recentActivity.length > 0 && (
+                <div className="space-y-3 max-h-72 overflow-y-auto pr-2">
+                  {recentActivity.map((activity) => (
+                    <button
+                      key={activity.task_id}
+                      type="button"
+                      onClick={() => handleActivitySelect(activity.task_id)}
+                      className="w-full text-left"
+                    >
+                      <div className="flex items-start gap-3 pb-4 border-b border-border last:border-0 last:pb-0">
+                        <div className={`w-2 h-2 rounded-full ${getStatusAccent(activity.status)} mt-2`} />
+                        <div className="flex-1">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-sm font-medium text-foreground line-clamp-2">{activity.summary}</p>
+                            <span className="text-xs text-muted-foreground whitespace-nowrap">
+                              {formatRelativeTime(activity.timestamp)}
+                            </span>
+                          </div>
+                          <p className="text-xs text-muted-foreground mt-1">
+                            {activity.agent ?? "Unknown agent"}
+                            {activity.status ? ` • ${activity.status.replace(/_/g, " ")}` : ""}
+                          </p>
+                          {typeof activity.confidence === "number" && (
+                            <p className="text-[11px] font-semibold text-primary mt-1">
+                              Confidence {(activity.confidence * 100).toFixed(0)}%
+                            </p>
+                          )}
+                        </div>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              )}
             </Card>
 
             <Card className="p-6">

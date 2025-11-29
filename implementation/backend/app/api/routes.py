@@ -50,7 +50,16 @@ from ..schemas.reviews import (
     ReviewTicketModel,
     ReviewMetricsResponse,
 )
-from ..schemas.tasks import TaskRequest, TaskResponse, TaskResult, TaskStatusMetrics, TaskStatusResponse
+from ..schemas.tasks import (
+    TaskRequest,
+    TaskResponse,
+    TaskResult,
+    TaskStatusMetrics,
+    TaskStatusResponse,
+    RecentTaskActivity,
+    TranscriptMessage,
+    TranscriptUpdate,
+)
 from ..schemas.documents import DocumentAnalysisResponse, DocumentMetadata, DocumentIngestionInfo
 from ..schemas.orchestrator import OrchestratorEventModel, OrchestratorRunDetail
 from ..services.document_ingestion import DocumentIngestionService, IngestedDocument
@@ -202,6 +211,112 @@ def _parse_datetime(value: Any) -> datetime | None:
         except ValueError:
             return None
     return None
+
+
+async def _fetch_episode_payload(
+    task_id: str,
+    *,
+    memory: HybridMemoryService,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    payload = await memory.fetch_ephemeral_memory(task_id)
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task not found")
+    result_state = payload.get("result")
+    if not isinstance(result_state, dict):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Task result unavailable")
+    return payload, result_state
+
+
+def _extract_text_value(candidate: Any) -> str | None:
+    if isinstance(candidate, str):
+        normalized = candidate.strip()
+        return normalized or None
+    if isinstance(candidate, Mapping):
+        for key in ("text", "summary", "content", "value"):
+            nested = candidate.get(key)
+            if isinstance(nested, str) and nested.strip():
+                return nested.strip()
+    return None
+
+
+def _summarize_output(output: Mapping[str, Any]) -> str | None:
+    for key in ("summary", "content", "text", "message"):
+        value = output.get(key)
+        text = _extract_text_value(value)
+        if text:
+            return text
+    return None
+
+
+def _extract_confidence(output: Mapping[str, Any]) -> float | None:
+    confidence_value = output.get("confidence")
+    if isinstance(confidence_value, (int, float)):
+        return float(confidence_value)
+    metadata = output.get("metadata")
+    if isinstance(metadata, Mapping):
+        meta_conf = metadata.get("confidence")
+        if isinstance(meta_conf, (int, float)):
+            return float(meta_conf)
+    return None
+
+
+def _pick_recent_timestamp(*candidates: Any) -> datetime | None:
+    for candidate in candidates:
+        parsed = _parse_datetime(candidate)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _truncate_summary(value: str, *, limit: int = 360) -> str:
+    if len(value) <= limit:
+        return value
+    trimmed = value[: limit - 1].rstrip()
+    return f"{trimmed}…"
+
+
+def _build_recent_activity(task_id: str, episode: Mapping[str, Any] | None) -> RecentTaskActivity | None:
+    if not isinstance(episode, Mapping):
+        return None
+    result_state = episode.get("result")
+    if not isinstance(result_state, Mapping):
+        return None
+    outputs = result_state.get("outputs")
+    if not isinstance(outputs, Sequence):
+        return None
+    latest_output = next((entry for entry in reversed(outputs) if isinstance(entry, Mapping)), None)
+    if latest_output is None:
+        return None
+
+    summary = _summarize_output(latest_output)
+    if not summary:
+        report_block = result_state.get("report")
+        if isinstance(report_block, Mapping):
+            summary = _extract_text_value(report_block.get("headline")) or _extract_text_value(report_block)
+    if not summary:
+        summary = _extract_text_value(result_state.get("prompt"))
+    if not summary:
+        summary = f"Task {task_id}"
+
+    timestamp = _pick_recent_timestamp(
+        latest_output.get("timestamp"),
+        result_state.get("updated_at"),
+        result_state.get("timestamp"),
+    )
+    confidence = _extract_confidence(latest_output)
+    agent_value = latest_output.get("agent")
+    agent = agent_value.strip() if isinstance(agent_value, str) else None
+    status_value = result_state.get("status")
+    status = status_value.strip() if isinstance(status_value, str) else None
+
+    return RecentTaskActivity(
+        task_id=task_id,
+        summary=_truncate_summary(summary),
+        agent=agent,
+        status=status,
+        confidence=confidence,
+        timestamp=timestamp,
+    )
 
 
 def _scrub_outputs(value: Any) -> list[dict[str, Any]]:
@@ -1361,12 +1476,31 @@ async def get_orchestrator_run(
     return OrchestratorRunDetail.from_domain(run_record, events)
 
 
+@router.get("/history/recent", response_model=list[RecentTaskActivity], tags=["tasks"])
+async def list_recent_history(
+    limit: int = Query(5, ge=1, le=25),
+    memory: HybridMemoryService = Depends(get_hybrid_memory),
+) -> list[RecentTaskActivity]:
+    task_ids = await memory.enumerate_recent_task_ids(limit=limit)
+    activities: list[RecentTaskActivity] = []
+    for task_id in task_ids:
+        try:
+            episode = await memory.fetch_ephemeral_memory(task_id)
+        except Exception:  # pragma: no cover - defensive guard
+            continue
+        activity = _build_recent_activity(task_id=task_id, episode=episode)
+        if activity is not None:
+            activities.append(activity)
+    return activities
+
+
 @router.get("/history/{task_id}", response_model=list[TaskResult], tags=["tasks"])
 async def get_task_history(
-    task_id: str,
+    task_id: uuid.UUID,
     memory: HybridMemoryService = Depends(get_hybrid_memory),
 ) -> list[TaskResult]:
-    result_state = await _fetch_result_state(task_id, memory=memory)
+    task_id_str = str(task_id)
+    result_state = await _fetch_result_state(task_id_str, memory=memory)
     outputs = result_state.get("outputs", []) if isinstance(result_state, dict) else []
     if not outputs:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No results available")
@@ -1379,7 +1513,7 @@ async def get_task_history(
 
         formatted.append(
             TaskResult(
-                task_id=task_id,
+                task_id=task_id_str,
                 agent=item.get("agent", "unknown"),
                 content=content,
                 confidence=float(item.get("confidence", 0.0)),
@@ -1387,6 +1521,48 @@ async def get_task_history(
         )
 
     return formatted
+
+
+@router.get("/history/{task_id}/transcript", response_model=list[TranscriptMessage], tags=["tasks"])
+async def get_task_transcript(
+    task_id: uuid.UUID,
+    memory: HybridMemoryService = Depends(get_hybrid_memory),
+) -> list[TranscriptMessage]:
+    task_id_str = str(task_id)
+    _, result_state = await _fetch_episode_payload(task_id_str, memory=memory)
+    transcript_block = result_state.get("transcript")
+    if not isinstance(transcript_block, Sequence):
+        return []
+    normalized: list[TranscriptMessage] = []
+    for entry in transcript_block:
+        if not isinstance(entry, Mapping):
+            continue
+        role = entry.get("role")
+        content = entry.get("content")
+        if not isinstance(role, str) or not isinstance(content, str):
+            continue
+        message = TranscriptMessage(
+            role=role,
+            content=content,
+            timestamp=entry.get("timestamp") if isinstance(entry.get("timestamp"), str) else None,
+            agent=entry.get("agent") if isinstance(entry.get("agent"), str) else None,
+        )
+        normalized.append(message)
+    return normalized
+
+
+@router.put("/history/{task_id}/transcript", response_model=list[TranscriptMessage], tags=["tasks"])
+async def upsert_task_transcript(
+    task_id: uuid.UUID,
+    update: TranscriptUpdate,
+    memory: HybridMemoryService = Depends(get_hybrid_memory),
+) -> list[TranscriptMessage]:
+    task_id_str = str(task_id)
+    payload, result_state = await _fetch_episode_payload(task_id_str, memory=memory)
+    result_state["transcript"] = [message.model_dump() for message in update.messages]
+    payload["result"] = result_state
+    await memory.store_ephemeral_memory(task_id_str, payload)
+    return update.messages
 
 
 @router.get("/reports/{task_id}/dossier.json", tags=["tasks"])

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
+import uuid
 from typing import Any
 
 import pytest
@@ -76,6 +78,82 @@ def test_submit_task_executes_agents_and_persists_results(submit_client):
     assert len(results) == 4
     assert all(entry["task_id"] == task_id for entry in results)
     assert all("text" in entry["content"] for entry in results)
+
+
+def test_recent_history_endpoint_returns_latest_summary() -> None:
+    memory = StubMemoryService()
+    task_id = "task-recent"
+    now_iso = datetime.now(timezone.utc).isoformat()
+    memory.ephemeral[task_id] = {
+        "result": {
+            "status": "completed",
+            "updated_at": now_iso,
+            "prompt": "Summarize recent launch",
+            "outputs": [
+                {
+                    "agent": "research_agent",
+                    "summary": "Launch analysis ready",
+                    "confidence": 0.92,
+                    "timestamp": now_iso,
+                }
+            ],
+        }
+    }
+
+    async def override_memory():
+        yield memory
+
+    app.dependency_overrides[get_hybrid_memory] = override_memory
+    client = TestClient(app)
+    try:
+        response = client.get("/api/v1/history/recent?limit=3")
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload, "expected at least one recent history entry"
+        entry = payload[0]
+        assert entry["task_id"] == task_id
+        assert entry["summary"] == "Launch analysis ready"
+        assert entry["status"] == "completed"
+        assert entry["agent"] == "research_agent"
+        assert entry["confidence"] == 0.92
+        assert entry["timestamp"]
+    finally:
+        app.dependency_overrides.clear()
+
+
+def test_transcript_roundtrip_endpoints() -> None:
+    memory = StubMemoryService()
+    task_uuid = uuid.uuid4()
+    task_id = str(task_uuid)
+    memory.ephemeral[task_id] = {"result": {"status": "completed", "outputs": []}}
+
+    async def override_memory():
+        yield memory
+
+    app.dependency_overrides[get_hybrid_memory] = override_memory
+    client = TestClient(app)
+    try:
+        put_response = client.put(
+            f"/api/v1/history/{task_uuid}/transcript",
+            json={
+                "messages": [
+                    {"role": "user", "content": "Plan launch", "timestamp": "2025-11-29T12:00:00Z"},
+                    {"role": "assistant", "content": "On it", "timestamp": "2025-11-29T12:00:05Z", "agent": "general_agent"},
+                ]
+            },
+        )
+        assert put_response.status_code == 200
+        payload = memory.ephemeral[task_id]
+        assert payload["result"].get("transcript")
+
+        get_response = client.get(f"/api/v1/history/{task_uuid}/transcript")
+        assert get_response.status_code == 200
+        body = get_response.json()
+        assert len(body) == 2
+        assert body[0]["role"] == "user"
+        assert body[1]["agent"] == "general_agent"
+    finally:
+        app.dependency_overrides.clear()
 
 
 def test_submit_task_handles_simple_greeting(submit_client):
