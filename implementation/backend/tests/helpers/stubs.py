@@ -158,11 +158,18 @@ class ImmediateQueue:
 
 
 class StubToolInvocationResult:
-    def __init__(self, tool: str, payload: dict[str, Any]) -> None:
+    def __init__(
+        self,
+        tool: str,
+        payload: dict[str, Any],
+        *,
+        response: dict[str, Any] | None = None,
+        resolved_tool: str | None = None,
+    ) -> None:
         self.tool = tool
-        self.resolved_tool = tool
+        self.resolved_tool = resolved_tool or tool
         self.payload = payload
-        self.response = {"status": "ok", "tool": tool}
+        self.response = response if response is not None else {"status": "ok", "tool": tool}
         self.cached = False
         self.latency = 0.0
 
@@ -173,12 +180,19 @@ class StubToolService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self._callback: Callable[[dict[str, Any]], Awaitable[None]] | None = None
+        self._responses: dict[str, dict[str, Any]] = {}
 
     async def invoke(self, tool: str, payload: dict[str, Any]) -> StubToolInvocationResult:
         self.calls.append((tool, payload))
         if self._callback is not None:
             await self._callback({"tool": tool, "payload": payload})
-        return StubToolInvocationResult(tool, payload)
+        response_cfg = self._responses.get(tool)
+        response_payload = None
+        resolved_alias = None
+        if response_cfg:
+            response_payload = response_cfg.get("response")
+            resolved_alias = response_cfg.get("resolved_tool")
+        return StubToolInvocationResult(tool, payload, response=response_payload, resolved_tool=resolved_alias)
 
     @asynccontextmanager
     async def instrument(self, callback: Callable[[dict[str, Any]], Awaitable[None]]):
@@ -187,6 +201,9 @@ class StubToolService:
             yield self
         finally:
             self._callback = None
+
+    def set_response(self, tool: str, response: dict[str, Any], *, resolved_tool: str | None = None) -> None:
+        self._responses[tool] = {"response": response, "resolved_tool": resolved_tool}
 
     def get_diagnostics(self) -> dict[str, str]:
         return {"status": "stubbed"}

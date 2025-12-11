@@ -1,0 +1,223 @@
+NEURAFORGE — UNIFIED DOCUMENT UPLOAD + PARSE + LLM PIPELINE
+
+Works for:
+✔ PDF
+✔ DOCX
+✔ TXT
+✔ CSV
+✔ JSON
+✔ Markdown
+
+🏗️ 1. Architecture Overview
+User → UI Upload Button → Backend API → Document Parser →
+      → Extracted Text → LLM → Output → UI
+
+Components:
+Component	Responsibility
+React Button	Upload file
+FastAPI Endpoint	Receive file, detect type
+Parser Engine	Parse PDF, DOCX, CSV, TXT
+LLM Engine	Send parsed text to LLM
+Formatter	Format as answer
+Optionally store in memory	(Redis/Postgres/Qdrant)
+🧩 2. React Frontend: Upload Button Component
+UploadDocument.jsx (React + Tailwind)
+import { useState } from "react";
+
+export default function UploadDocument() {
+  const [file, setFile] = useState(null);
+  const [output, setOutput] = useState("");
+
+  const handleUpload = async () => {
+    if (!file) return;
+
+    const formData = new FormData();
+    formData.append("document", file);
+
+    const res = await fetch("http://localhost:8000/api/v1/upload_document", {
+      method: "POST",
+      body: formData
+    });
+
+    const json = await res.json();
+    setOutput(json.output);
+  };
+
+  return (
+    <div className="p-6">
+      <input
+        type="file"
+        onChange={(e) => setFile(e.target.files[0])}
+        className="mb-4"
+      />
+      <button
+        onClick={handleUpload}
+        className="px-4 py-2 bg-blue-600 text-white rounded-lg"
+      >
+        Upload & Process
+      </button>
+
+      {output && (
+        <div className="mt-6 p-4 bg-gray-100 rounded-lg border">
+          <h2 className="font-bold mb-2">Result:</h2>
+          <pre>{output}</pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+🔥 3. FastAPI Backend: Unified Upload Endpoint
+routes/upload_document.py
+from fastapi import APIRouter, UploadFile, File
+from app.services.document_parser import parse_document
+from app.services.llm import call_llm
+
+router = APIRouter()
+
+@router.post("/upload_document")
+async def upload_doc(document: UploadFile = File(...)):
+    content = await parse_document(document)
+    llm_output = await call_llm(content)
+    return { "output": llm_output }
+
+📄 4. Document Parsing Service (Auto-detect format)
+services/document_parser.py
+import docx
+import pdfplumber
+import csv
+import json
+import io
+
+async def parse_document(file):
+    filename = file.filename.lower()
+
+    if filename.endswith(".pdf"):
+        return parse_pdf(file)
+
+    elif filename.endswith(".docx"):
+        return parse_docx(file)
+
+    elif filename.endswith(".txt"):
+        return (await file.read()).decode("utf-8")
+
+    elif filename.endswith(".csv"):
+        return parse_csv(file)
+
+    elif filename.endswith(".json"):
+        return json.dumps(json.load(file.file), indent=2)
+
+    else:
+        raise ValueError("Unsupported file type")
+
+
+def parse_pdf(file):
+    text = ""
+    with pdfplumber.open(file.file) as pdf:
+        for page in pdf.pages:
+            text += page.extract_text() + "\n"
+    return text
+
+
+def parse_docx(file):
+    doc = docx.Document(file.file)
+    return "\n".join([p.text for p in doc.paragraphs])
+
+
+def parse_csv(file):
+    decoded = file.file.read().decode("utf-8").splitlines()
+    reader = csv.reader(decoded)
+    return "\n".join([", ".join(row) for row in reader])
+
+🤖 5. LLM Service (OpenAI / Local Model / MCP)
+services/llm.py
+import openai
+
+async def call_llm(text: str):
+    response = openai.ChatCompletion.create(
+        model="gpt-4o",
+        messages=[
+            {"role": "system", "content": "You are a document analysis assistant."},
+            {"role": "user", "content": f"Analyze this document:\n\n{text}"}
+        ]
+    )
+    return response["choices"][0]["message"]["content"]
+
+
+You can replace with:
+
+Local LLM
+
+MCP LLM
+
+OpenAI
+
+Groq
+
+Ollama
+
+🧠 Optional: 6. Add Memory Integration
+
+When a document is uploaded:
+
+✔ Store raw text → Redis (short-term)
+✔ Store structured output → Postgres (episodic)
+✔ Embed text + store → Qdrant (semantic memory)
+
+Example:
+
+memory.stm.save(task_id, "raw_text", text)
+memory.episodic.log(task_id, "document_upload", {"filename": file.filename})
+memory.semantic.store(text, embed_fn(text), metadata={"task_id": task_id})
+
+
+This turns document uploads into knowledge for future tasks.
+
+⚙️ 7. UI Enhancements (Optional)
+Add:
+
+Document type icon
+
+Loading spinner
+
+Automatic chunking for large files
+
+Progress bar
+
+“Send to agent” dropdown
+
+“Save to memory” switch
+
+🧪 8. Testing Plan
+Unit Tests
+
+PDF parser
+
+DOCX parser
+
+CSV parser
+
+TXT parser
+
+Integration Tests
+
+Upload → Parse → LLM → UI
+
+Negative Tests
+
+Unsupported file type
+
+Corrupted PDF
+
+Empty file
+
+🎯 9. What This Unlocks in NeuraForge
+
+After adding this:
+
+✔ Enterprise agent can analyze reports
+✔ Research agent can read papers
+✔ Finance agent can ingest CSV market data
+✔ Creative agent can rewrite content
+
+This becomes the core of your entire agentic system.

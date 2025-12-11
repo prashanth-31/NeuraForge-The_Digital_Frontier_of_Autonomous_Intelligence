@@ -966,6 +966,10 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
             ("EBITDA", "ebitda"),
             ("ProfitMargin", "profit_margin"),
             ("OperatingMarginTTM", "operating_margin"),
+            ("EPS", "eps"),
+            ("DilutedEPSTTM", "diluted_eps_ttm"),
+            ("QuarterlyRevenueGrowthYOY", "revenue_growth"),
+            ("QuarterlyEarningsGrowthYOY", "earnings_growth"),
         )
         for source_key, alias in numeric_fields:
             value = _safe_float(overview.get(source_key))

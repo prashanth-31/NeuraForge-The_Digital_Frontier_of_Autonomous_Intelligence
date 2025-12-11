@@ -199,9 +199,12 @@ async def test_tool_policy_randomized() -> None:
                 "browser.extract_text",
                 "pdf.extract_text",
                 "text.summarize",
+                "finance.snapshot",
+                "finance.snapshot.alpha",
+                "finance.snapshot.cached",
             ],
             "disallowed": [
-                "finance.snapshot",
+                "finance.indicators.rsi",
                 "creative.compose",
                 "terminal.execute",
             ],
@@ -241,3 +244,13 @@ async def test_tool_policy_randomized() -> None:
         disallowed_tool = rng.choice(disallowed_candidates)
         with pytest.raises(ToolPolicyViolationError):
             await session.proxy.invoke(disallowed_tool, {"seed": seed, "tool": disallowed_tool})
+
+
+def test_tool_policy_filter_tools() -> None:
+    policy = get_agent_tool_policy("finance_agent")
+    assert policy is not None
+
+    allowed, removed = policy.filter_tools(["finance.snapshot", "creative.compose", "finance.indicators.rsi"])
+
+    assert allowed == ["finance.snapshot", "finance.indicators.rsi"]
+    assert removed == ["creative.compose"]

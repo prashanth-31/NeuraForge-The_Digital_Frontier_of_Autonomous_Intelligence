@@ -250,7 +250,7 @@ class LLMOrchestrationPlanner:
         prior_outputs: Sequence[Mapping[str, Any]],
         agents: Sequence[BaseAgent],
         tool_aliases: Mapping[str, str] | None,
-        capabilities: Mapping[str, Mapping[str, Any]] | None,
+        capabilities: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> str:
         prompt = str(task.get("prompt") or "").strip()
         metadata = task.get("metadata") if isinstance(task.get("metadata"), Mapping) else {}

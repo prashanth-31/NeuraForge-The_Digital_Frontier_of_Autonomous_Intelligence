@@ -1,0 +1,376 @@
+A. Existing Core Tools (Present in Your Repo)
+📁 File Tools
+file.read
+file.list
+file.search
+
+🌐 HTTP Tools
+http.fetch
+
+📦 JSON Tools
+json.parse
+json.pointer
+
+📝 Text Tools
+text.split
+text.summarize
+text.extract
+text.extract_entities
+text.sentiment
+text.compare
+
+📄 Document & PDF Tools
+document.summarize
+document.detect_language
+document.extract_entities
+pdf.extract_text
+pdf.extract_tables
+
+🔍 Search Tools
+search.web
+search.academic
+
+🧠 Vector Tools
+vector.embed
+vector.search
+
+💻 Code Tools
+code.explain
+code.search
+
+🖥 Process & Shell Tools
+terminal.execute (sandbox)
+shell.execute (sandbox)
+process.list
+process.info
+
+📚 MASTER LIST: TOOLS THAT EXIST TODAY
+file.read
+file.list
+file.search
+http.fetch
+json.parse
+json.pointer
+text.split
+text.summarize
+text.extract
+text.extract_entities
+text.sentiment
+text.compare
+document.summarize
+document.detect_language
+document.extract_entities
+pdf.extract_text
+pdf.extract_tables
+search.web
+search.academic
+vector.embed
+vector.search
+code.explain
+code.search
+terminal.execute
+shell.execute
+process.list
+process.info
+
+
+TOTAL EXISTING TOOLS = 26
+
+🚀 2. ALL NEW TOOLS YOU SHOULD ADD (Future Tools)
+
+(You asked for a combined master list of ALL tools recommended earlier.)
+
+🧰 A. Enterprise Agent – New Tools to Add
+enterprise.email.generate
+enterprise.meeting_minutes.extract
+enterprise.table.extract
+enterprise.browser_summary
+enterprise.csv.clean
+enterprise.excel.read
+enterprise.excel.write
+enterprise.kpi.generate
+browser.open
+browser.extract_text
+dataframe.load_csv
+dataframe.describe
+dataframe.plot
+
+🧰 B. Finance Agent – New Tools to Add
+finance.indicators.rsi
+finance.indicators.macd
+finance.indicators.sma
+finance.indicators.ema
+finance.portfolio.optimize_modern
+finance.portfolio.sharpe_ratio
+finance.portfolio.correlation_matrix
+finance.forecast.simple
+finance.volatility.historical
+dataframe.load_csv
+dataframe.describe
+dataframe.plot
+
+🧰 C. Research Agent – New Tools to Add
+research.citations.extract
+research.paper.qa
+research.paper.section_summarize
+research.dataset.load_remote
+research.dataset.clean
+research.experiment.compare
+research.vector_search
+research.embedding.create
+browser.open
+browser.extract_text
+dataframe.load_csv
+dataframe.describe
+dataframe.plot
+
+🧰 D. Creative Agent – New Tools to Add
+creative.text.rewrite
+creative.text.expand
+creative.text.style_transfer
+creative.image.generate
+creative.image.edit
+creative.image.upscale
+creative.audio.generate
+creative.audio.transcribe
+creative.brand.palette
+creative.idea.brainstorm
+
+🧠 E. Memory Tools (Universal, Required)
+memory.store
+memory.retrieve
+memory.timeline
+memory.vector_search
+memory.search_recent
+memory.clear
+
+🔧 F. Cross-Agent Utility Tools
+utils.hash
+utils.timestamp
+utils.uuid
+utils.sanitize_html
+utils.merge_json
+utils.compare_json
+
+🧪 G. Testing Tools
+test.echo
+test.delay
+test.fail
+test.random_error
+
+📦 MASTER LIST: TOOLS TO ADD
+
+(Combined list of all new tools)
+
+enterprise.email.generate
+enterprise.meeting_minutes.extract
+enterprise.table.extract
+enterprise.browser_summary
+enterprise.csv.clean
+enterprise.excel.read
+enterprise.excel.write
+enterprise.kpi.generate
+browser.open
+browser.extract_text
+dataframe.load_csv
+dataframe.describe
+dataframe.plot
+
+finance.indicators.rsi
+finance.indicators.macd
+finance.indicators.sma
+finance.indicators.ema
+finance.portfolio.optimize_modern
+finance.portfolio.sharpe_ratio
+finance.portfolio.correlation_matrix
+finance.forecast.simple
+finance.volatility.historical
+
+research.citations.extract
+research.paper.qa
+research.paper.section_summarize
+research.dataset.load_remote
+research.dataset.clean
+research.experiment.compare
+research.vector_search
+research.embedding.create
+
+creative.text.rewrite
+creative.text.expand
+creative.text.style_transfer
+creative.image.generate
+creative.image.edit
+creative.image.upscale
+creative.audio.generate
+creative.audio.transcribe
+creative.brand.palette
+creative.idea.brainstorm
+
+memory.store
+memory.retrieve
+memory.timeline
+memory.vector_search
+memory.search_recent
+memory.clear
+
+utils.hash
+utils.timestamp
+utils.uuid
+utils.sanitize_html
+utils.merge_json
+utils.compare_json
+
+test.echo
+test.delay
+test.fail
+test.random_error
+
+
+TOTAL TOOLS TO ADD = 60
+
+🧠 3. WHICH AGENT CAN ACCESS WHICH TOOL? (Final Allowlist)
+
+This is THE COMPLETE AND FINAL AGENT–TOOL MATRIX.
+
+1️⃣ ENTERPRISE AGENT – Allowed Tools
+✔ Existing Tools
+file.*
+http.fetch
+json.*
+text.*
+pdf.*
+document.*
+terminal.execute
+shell.execute
+process.*
+search.web
+
+✔ New Tools Allowed
+enterprise.*
+browser.*
+dataframe.*
+
+🚫 Not Allowed
+finance.*
+research.vector_search
+research.embedding.create
+creative.*
+
+2️⃣ FINANCE AGENT – Allowed Tools
+✔ Existing Tools
+http.fetch
+file.read
+json.*
+text.summarize
+pdf.extract_text
+pdf.extract_tables
+
+✔ New Tools Allowed
+finance.*
+dataframe.*
+
+🚫 Not Allowed
+terminal.execute
+shell.execute
+process.*
+creative.*
+research.vector_search
+code.*
+
+3️⃣ RESEARCH AGENT – Allowed Tools
+✔ Existing Tools
+search.web
+search.academic
+vector.*
+pdf.*
+document.*
+file.*
+text.*
+json.*
+code.*
+
+✔ New Tools Allowed
+research.*
+browser.*
+dataframe.*
+
+🚫 Not Allowed
+terminal.execute
+shell.execute
+process.*
+finance.*
+creative.*
+
+4️⃣ CREATIVE AGENT – Allowed Tools
+✔ Existing Tools
+file.read
+text.*
+json.*
+
+✔ New Tools Allowed
+creative.*
+browser.*
+
+🚫 Not Allowed
+terminal.execute
+shell.execute
+process.*
+finance.*
+research.*
+vector.*
+code.*
+
+⭐ 5. FULL CAPABILITY LIST FOR EACH AGENT
+🧩 ENTERPRISE AGENT – Capabilities
+document_analysis
+pdf_extraction
+kpi_generation
+workflow_automation
+table_extraction
+email_generation
+business_summary
+browser_scraping
+spreadsheet_operations
+csv_cleaning
+task_planning
+entity_extraction
+sentiment_analysis
+
+🧩 FINANCE AGENT – Capabilities
+market_data_analysis
+indicator_calculation
+portfolio_optimization
+risk_modeling
+financial_forecasting
+correlation_analysis
+volatility_estimation
+csv_market_ingestion
+pdf_finance_parsing
+quantitative_evaluation
+
+🧩 RESEARCH AGENT – Capabilities
+web_search
+academic_search
+citation_extraction
+paper_qa
+dataset_loading
+dataset_cleaning
+statistics
+semantic_search
+embedding_generation
+document_summarization
+pdf_table_extraction
+code_understanding
+experiment_comparison
+
+🧩 CREATIVE AGENT – Capabilities
+text_rewriting
+text_expansion
+style_transfer
+image_generation
+image_editing
+audio_generation
+audio_transcription
+brand_palette_generation
+idea_brainstorming
+creative_copywriting

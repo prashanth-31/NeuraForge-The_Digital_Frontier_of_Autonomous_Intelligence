@@ -4,15 +4,85 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Mapping, Sequence
 
 from ..agents.base import AgentContext
 from ..core.logging import get_logger
 from ..core.metrics import observe_confidence_component
 from ..schemas.agents import AgentCapability, AgentExchange, AgentInput, AgentOutput
 from ..services.tools import ToolDisabledError, ToolInvocationError, ToolInvocationResult
+from ..mcp.symbols import extract_symbols_from_text
 
 logger = get_logger(name=__name__)
+
+FINANCE_CONTEXT_KEYWORDS: tuple[str, ...] = (
+    "finance",
+    "financial",
+    "market",
+    "stock",
+    "equity",
+    "earnings",
+    "invest",
+    "valuation",
+)
+
+FINANCE_METRIC_KEYWORDS: dict[str, str] = {
+    "market cap": "market_cap",
+    "market capitalization": "market_cap",
+    "market-cap": "market_cap",
+    "share price": "price",
+    "stock price": "price",
+    "price": "price",
+    "eps": "eps",
+    "earnings per share": "eps",
+    "volume": "volume",
+    "trading volume": "volume",
+    "revenue": "revenue",
+    "revenue growth": "revenue_growth",
+    "growth rate": "revenue_growth",
+}
+
+CRITICAL_FINANCE_FIELDS: tuple[str, ...] = ("price", "market_cap", "volume")
+DEFAULT_FINANCE_METRICS: tuple[str, ...] = CRITICAL_FINANCE_FIELDS + ("eps", "revenue", "revenue_growth")
+
+DEFAULT_METRIC_ALIASES: dict[str, tuple[str, ...]] = {
+    "price": ("price", "current_price", "regularMarketPrice", "last_price"),
+    "market_cap": ("market_cap", "marketCap", "marketCapitalization"),
+    "market_capitalization": ("market_cap", "marketCap", "marketCapitalization"),
+    "eps": (
+        "eps",
+        "earnings_per_share",
+        "fundamentals.guidance.forward_eps",
+        "fundamentals.eps",
+        "fundamentals.diluted_eps_ttm",
+    ),
+    "earnings_per_share": (
+        "eps",
+        "earnings_per_share",
+        "fundamentals.guidance.forward_eps",
+        "fundamentals.eps",
+        "fundamentals.diluted_eps_ttm",
+    ),
+    "revenue": (
+        "revenue",
+        "fundamentals.trailing.revenue",
+        "fundamentals.quarterly.0.total_revenue",
+        "fundamentals.revenue_ttm",
+    ),
+    "revenue_growth": (
+        "fundamentals.guidance.revenue_growth",
+        "guidance.revenue_growth",
+        "fundamentals.revenue_growth",
+    ),
+    "revenue_growth_rate": (
+        "fundamentals.guidance.revenue_growth",
+        "guidance.revenue_growth",
+        "fundamentals.revenue_growth",
+    ),
+    "volume": ("volume", "regularMarketVolume", "averageDailyVolume10Day"),
+    "day_high": ("day_high", "regularMarketDayHigh"),
+    "day_low": ("day_low", "regularMarketDayLow"),
+}
 
 
 @dataclass
@@ -35,6 +105,13 @@ class ResearchAgent:
     )
     fallback_agent: str | None = "enterprise_agent"
     confidence_bias: float = 0.9
+    finance_tool_candidates: tuple[str, ...] = (
+        "finance.snapshot",
+        "finance.snapshot.alpha",
+        "finance.snapshot.cached",
+    )
+    default_required_metrics: tuple[str, ...] = DEFAULT_FINANCE_METRICS
+    metric_aliases: dict[str, tuple[str, ...]] = field(default_factory=lambda: DEFAULT_METRIC_ALIASES.copy())
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("research_agent_task", task=task.model_dump())
@@ -44,10 +121,39 @@ class ResearchAgent:
             context_section = bundle.as_prompt_section()
 
         tool_result = await self._maybe_invoke_tool(task, context=context)
-        tool_section = self._format_tool_response(tool_result)
+        requested_metrics = self._requested_metrics_from_prompt(task)
+        resolved_metrics = self._collect_metrics_from_tool(tool_result, requested_metrics)
+        missing_metrics = [metric for metric in requested_metrics if metric not in resolved_metrics]
+
+        enrichment: dict[str, Any] | None = None
+        finance_context = self._should_attempt_finance_enrichment(
+            task.metadata if isinstance(task.metadata, Mapping) else None,
+            task.prompt,
+        )
+        should_enrich = bool(missing_metrics) and (finance_context or bool(requested_metrics))
+        if should_enrich:
+            enrichment = await self._enrich_financial_metrics(
+                task,
+                context=context,
+                requested_metrics=missing_metrics,
+            )
+            if enrichment is not None:
+                resolved_metrics.update(enrichment.get("metrics", {}))
+                remaining = [metric for metric in requested_metrics if metric not in resolved_metrics]
+                enrichment["missing"] = remaining
+                if tool_result is not None and enrichment.get("metrics"):
+                    self._inject_metrics_into_tool_payload(tool_result, enrichment)
+        tool_section = self._format_tool_response(
+            tool_result,
+            resolved_metrics if resolved_metrics else None,
+            self._build_metrics_context(tool_result, enrichment, resolved_metrics) if resolved_metrics else None,
+        )
         prompt = self._build_prompt(task, context_section=context_section)
+        compiled_prompt = f"{prompt}\n\nTool Findings:\n{tool_section}"
+        if enrichment is not None and (enrichment.get("missing") or enrichment.get("reason")):
+            compiled_prompt += f"\n\nSupplemental Metrics:\n{self._format_enrichment_section(enrichment)}"
         summary = await context.llm.generate(
-            prompt=f"{prompt}\n\nTool Findings:\n{tool_section}",
+            prompt=compiled_prompt,
             system_prompt=self.system_prompt,
             temperature=0.1,
         )
@@ -77,8 +183,12 @@ class ResearchAgent:
         metadata: dict[str, Any] = {"type": "research_summary"}
         if tool_result is not None:
             metadata["tool"] = self._tool_metadata(tool_result)
+        if resolved_metrics:
+            metadata["resolved_metrics"] = resolved_metrics
         if confidence_breakdown is not None:
             metadata["confidence_breakdown"] = confidence_breakdown
+        if enrichment is not None:
+            metadata["enriched_metrics"] = enrichment
 
         return AgentOutput(
             agent=self.name,
@@ -116,6 +226,385 @@ class ResearchAgent:
         except (ToolDisabledError, ToolInvocationError) as exc:
             logger.warning("research_tool_failure", error=str(exc))
             return None
+
+    def _requested_metrics_from_prompt(self, task: AgentInput) -> list[str]:
+        metadata = task.metadata if isinstance(task.metadata, Mapping) else {}
+        metrics: list[str] = []
+
+        def _add_metric(raw: str | None) -> None:
+            normalized = self._normalize_metric_name(raw)
+            if normalized:
+                metrics.append(normalized)
+
+        requested = metadata.get("required_metrics")
+        if isinstance(requested, Sequence):
+            for item in requested:
+                if isinstance(item, str):
+                    _add_metric(item)
+        elif isinstance(requested, str):
+            _add_metric(requested)
+
+        def _scan_metadata_values(payload: Mapping[str, Any]) -> None:
+            for value in payload.values():
+                if isinstance(value, str):
+                    metrics.extend(self._metrics_from_text(value))
+                elif isinstance(value, Mapping):
+                    _scan_metadata_values(value)
+                elif isinstance(value, Sequence):
+                    for item in value:
+                        if isinstance(item, str):
+                            metrics.extend(self._metrics_from_text(item))
+
+        if metadata:
+            _scan_metadata_values(metadata)
+
+        metrics.extend(self._metrics_from_text(task.prompt))
+        for exchange in task.prior_exchanges:
+            metrics.extend(self._metrics_from_text(exchange.content))
+
+        normalized = [self._normalize_metric_name(metric) for metric in metrics if metric]
+        deduped = [metric for metric in normalized if metric]
+        deduped = list(dict.fromkeys(deduped))
+
+        if not deduped and self._should_attempt_finance_enrichment(metadata, task.prompt):
+            deduped = list(self.default_required_metrics)
+
+        return deduped
+
+    def _collect_metrics_from_tool(
+        self,
+        tool_result: ToolInvocationResult | None,
+        requested_metrics: Sequence[str],
+    ) -> dict[str, Any]:
+        if tool_result is None or not requested_metrics:
+            return {}
+        candidates: list[Mapping[str, Any]] = []
+        items = self._extract_tool_items(tool_result)
+        candidates.extend(item for item in items if isinstance(item, Mapping))
+        if isinstance(tool_result.response, Mapping):
+            candidates.append(tool_result.response)
+        collected: dict[str, Any] = {}
+        for metric in requested_metrics:
+            for source in candidates:
+                value = self._lookup_metric_value(source, metric)
+                if value is not None:
+                    collected[metric] = value
+                    break
+        return collected
+
+    def _should_attempt_finance_enrichment(
+        self,
+        metadata: Mapping[str, Any] | None,
+        prompt: str | None,
+    ) -> bool:
+        prompt_text = (prompt or "").lower()
+        if any(keyword in prompt_text for keyword in FINANCE_CONTEXT_KEYWORDS):
+            return True
+        metadata = metadata or {}
+        topic_fields = (metadata.get("category"), metadata.get("topic"), metadata.get("domain"))
+        for field in topic_fields:
+            if isinstance(field, str) and any(keyword in field.lower() for keyword in FINANCE_CONTEXT_KEYWORDS):
+                return True
+        return self._has_symbol_hint(metadata, prompt)
+
+    def _has_symbol_hint(self, metadata: Mapping[str, Any], prompt: str | None) -> bool:
+        keys = ("symbol", "ticker", "entity", "company")
+        list_keys = ("symbols", "tickers", "companies")
+        for key in keys:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+        for key in list_keys:
+            value = metadata.get(key)
+            if isinstance(value, Sequence) and any(isinstance(item, str) and item.strip() for item in value):
+                return True
+        if extract_symbols_from_text(prompt):
+            return True
+        prompt_str = prompt or ""
+        return bool(re.search(r"\b[A-Z]{2,5}\b", prompt_str))
+
+    def _metrics_from_text(self, text: str | None) -> list[str]:
+        if not text:
+            return []
+        lower = text.lower()
+        results: list[str] = []
+        for phrase, metric in FINANCE_METRIC_KEYWORDS.items():
+            if phrase in lower:
+                results.append(metric)
+        return results
+
+    @staticmethod
+    def _normalize_metric_name(value: str | None) -> str | None:
+        if not value:
+            return None
+        cleaned = value.strip().lower().replace(" ", "_")
+        return cleaned or None
+
+    async def _enrich_financial_metrics(
+        self,
+        task: AgentInput,
+        *,
+        context: AgentContext,
+        requested_metrics: Sequence[str],
+    ) -> dict[str, Any] | None:
+        if not requested_metrics:
+            return None
+        enrichment: dict[str, Any] = {"metrics": {}, "missing": list(requested_metrics)}
+        if context.tools is None:
+            enrichment["reason"] = "tool_service_unavailable"
+            return enrichment
+        payload = self._build_finance_payload(task)
+        if payload is None:
+            enrichment["reason"] = "finance_payload_unavailable"
+            return enrichment
+
+        for alias in self.finance_tool_candidates:
+            try:
+                result = await context.tools.invoke(alias, payload)
+            except (ToolDisabledError, ToolInvocationError) as exc:
+                logger.debug("research_finance_tool_attempt_failed", tool=alias, error=str(exc))
+                continue
+
+            metrics = self._extract_finance_metrics(result)
+            if not metrics:
+                continue
+            snapshot = metrics[0]
+            collected = self._summarize_required_metrics(snapshot, requested_metrics)
+            if collected:
+                enrichment["metrics"].update(collected)
+
+            timestamp_value = snapshot.get("updated_at")
+            if isinstance(timestamp_value, datetime):
+                timestamp_value = timestamp_value.isoformat()
+            elif not isinstance(timestamp_value, str) and isinstance(result.response, Mapping):
+                generated_at = result.response.get("generated_at")
+                timestamp_value = generated_at if isinstance(generated_at, str) else None
+
+            enrichment.update(
+                {
+                    "source": result.resolved_tool or alias,
+                    "symbol": snapshot.get("symbol"),
+                    "timestamp": timestamp_value,
+                }
+            )
+
+            enrichment["missing"] = [metric for metric in requested_metrics if metric not in enrichment["metrics"]]
+
+            if not enrichment["missing"]:
+                enrichment.pop("reason", None)
+                return enrichment
+
+        if enrichment["metrics"]:
+            enrichment.setdefault("reason", "partial_metrics_available")
+        else:
+            enrichment.setdefault("reason", "finance_tool_unavailable")
+        return enrichment
+
+    def _build_finance_payload(self, task: AgentInput) -> dict[str, Any] | None:
+        metadata = task.metadata if isinstance(task.metadata, Mapping) else {}
+        symbols = self._extract_symbols(metadata)
+        if not symbols:
+            symbols = self._infer_symbols_from_prompt(task.prompt)
+        unique = self._unique_upper(symbols)
+        if unique:
+            return {"symbols": unique[:3]}
+        for key in ("entity", "company"):
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                return {"query": value.strip()[:120]}
+        prompt_text = (task.prompt or "").strip()
+        symbols_from_prompt = extract_symbols_from_text(prompt_text)
+        if symbols_from_prompt:
+            return {"symbols": symbols_from_prompt[:3]}
+        return {"query": prompt_text[:120]} if prompt_text else None
+
+    def _extract_symbols(self, metadata: Mapping[str, Any]) -> list[str]:
+        symbols: list[str] = []
+        list_keys = ("symbols", "tickers", "companies")
+        for key in list_keys:
+            entries = metadata.get(key)
+            if isinstance(entries, Sequence):
+                for item in entries:
+                    if isinstance(item, str) and item.strip():
+                        symbols.append(item.strip())
+        single_keys = ("symbol", "ticker", "entity", "company")
+        for key in single_keys:
+            value = metadata.get(key)
+            if isinstance(value, str) and value.strip():
+                symbols.append(value.strip())
+        return symbols
+
+    def _infer_symbols_from_prompt(self, prompt: str | None) -> list[str]:
+        if not prompt:
+            return []
+        inferred = extract_symbols_from_text(prompt)
+        regex_matches = re.findall(r"\b[A-Z]{2,5}\b", prompt)
+        combined: list[str] = []
+        for symbol in inferred + regex_matches:
+            candidate = symbol.upper()
+            if candidate and candidate not in combined:
+                combined.append(candidate)
+        return combined
+
+    @staticmethod
+    def _unique_upper(symbols: Sequence[str]) -> list[str]:
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for symbol in symbols:
+            candidate = symbol.upper()
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                ordered.append(candidate)
+        return ordered
+
+    def _extract_finance_metrics(self, tool_result: ToolInvocationResult) -> list[dict[str, Any]]:
+        response = tool_result.response if isinstance(tool_result.response, Mapping) else {}
+        metrics = response.get("metrics") if isinstance(response, Mapping) else None
+        if isinstance(metrics, list):
+            return [item for item in metrics if isinstance(item, dict)]
+        return []
+
+    def _summarize_required_metrics(self, snapshot: Mapping[str, Any], required: Sequence[str]) -> dict[str, Any]:
+        collected: dict[str, Any] = {}
+        for metric in required:
+            value = self._lookup_metric_value(snapshot, metric)
+            if value is not None:
+                collected[metric] = value
+        return collected
+
+    def _lookup_metric_value(self, snapshot: Mapping[str, Any], metric: str) -> Any:
+        candidates = self.metric_aliases.get(metric) or self.metric_aliases.get(metric.lower()) or (metric,)
+        for candidate in candidates:
+            value = self._get_nested_value(snapshot, candidate)
+            if value is not None:
+                return value
+        normalized = metric.lower().replace(" ", "_")
+        if normalized != metric:
+            candidates = self.metric_aliases.get(normalized)
+            if candidates:
+                for candidate in candidates:
+                    value = self._get_nested_value(snapshot, candidate)
+                    if value is not None:
+                        return value
+        return None
+
+    def _get_nested_value(self, payload: Any, path: str) -> Any:
+        if not path:
+            return None
+        current: Any = payload
+        tokens = [token for token in path.replace("[", ".").replace("]", "").split(".") if token]
+        for token in tokens:
+            if isinstance(current, Mapping):
+                if token in current:
+                    current = current[token]
+                    continue
+                return None
+            if isinstance(current, Sequence):
+                if token.isdigit():
+                    index = int(token)
+                    if 0 <= index < len(current):
+                        current = current[index]
+                        continue
+                return None
+            return None
+        return current
+
+    def _inject_metrics_into_tool_payload(
+        self,
+        tool_result: ToolInvocationResult,
+        enrichment: Mapping[str, Any],
+    ) -> None:
+        response = tool_result.response
+        if not isinstance(response, dict):
+            return
+        finance_block = response.setdefault("finance_metrics", {})
+        if not isinstance(finance_block, dict):
+            return
+        metrics_block = finance_block.setdefault("metrics", {})
+        if not isinstance(metrics_block, dict):
+            return
+        source = enrichment.get("source")
+        timestamp = enrichment.get("timestamp")
+        if self._is_newer_timestamp(timestamp, finance_block.get("timestamp")):
+            if timestamp:
+                finance_block["timestamp"] = timestamp
+            if source:
+                finance_block["source"] = source
+        for key, value in enrichment.get("metrics", {}).items():
+            metrics_block[key] = value
+
+    @staticmethod
+    def _is_newer_timestamp(candidate: Any, existing: Any) -> bool:
+        if candidate is None:
+            return False
+        if existing is None:
+            return True
+        try:
+            candidate_dt = datetime.fromisoformat(candidate) if isinstance(candidate, str) else candidate
+            existing_dt = datetime.fromisoformat(existing) if isinstance(existing, str) else existing
+            if isinstance(candidate_dt, datetime) and isinstance(existing_dt, datetime):
+                return candidate_dt > existing_dt
+        except Exception:  # pragma: no cover - defensive
+            return True
+        return False
+
+    def _build_metrics_context(
+        self,
+        tool_result: ToolInvocationResult | None,
+        enrichment: Mapping[str, Any] | None,
+        resolved_metrics: Mapping[str, Any],
+    ) -> dict[str, Any] | None:
+        if not resolved_metrics:
+            return None
+        source = None
+        timestamp = None
+        if enrichment and enrichment.get("metrics"):
+            source = enrichment.get("source")
+            timestamp = enrichment.get("timestamp")
+        if not source and tool_result is not None:
+            source = tool_result.resolved_tool or tool_result.tool
+        context_block = {"source": source, "timestamp": timestamp}
+        if not source and not timestamp:
+            return None
+        return context_block
+
+    def _format_enrichment_section(self, enrichment: dict[str, Any] | None) -> str:
+        if enrichment is None:
+            return "(supplemental metrics not requested)"
+        metrics = enrichment.get("metrics") if isinstance(enrichment, Mapping) else None
+        missing = enrichment.get("missing") if isinstance(enrichment, Mapping) else None
+        reason = enrichment.get("reason") if isinstance(enrichment, Mapping) else None
+        if isinstance(metrics, Mapping) and metrics:
+            lines = [f"- {key}: {self._stringify_metric(value)}" for key, value in metrics.items()]
+            source = enrichment.get("source") if isinstance(enrichment, Mapping) else None
+            if source:
+                lines.append(f"source: {source}")
+            timestamp = enrichment.get("timestamp") if isinstance(enrichment, Mapping) else None
+            if timestamp:
+                lines.append(f"timestamp: {timestamp}")
+            if missing:
+                lines.append(f"missing: {', '.join(missing)}")
+            return "\n".join(lines)
+        if missing:
+            line = f"missing: {', '.join(missing)}"
+            if reason:
+                return f"{line} (reason: {reason})"
+            return line
+        return reason or "(no supplemental metrics available)"
+
+    @staticmethod
+    def _stringify_metric(value: Any) -> str:
+        if isinstance(value, (int, float)):
+            if abs(value) >= 1_000_000_000_000:
+                return f"{value / 1_000_000_000_000:.2f}T"
+            if abs(value) >= 1_000_000_000:
+                return f"{value / 1_000_000_000:.2f}B"
+            if abs(value) >= 1_000_000:
+                return f"{value / 1_000_000:.2f}M"
+            return f"{value:,.2f}"
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
 
     def _build_search_payload(self, task: AgentInput) -> dict[str, Any] | None:
         prompt_text = (task.prompt or "").strip()
@@ -156,27 +645,52 @@ class ResearchAgent:
         current_year = datetime.now(UTC).year
         return f"{query} {current_year}".strip()
 
-    def _format_tool_response(self, tool_result: ToolInvocationResult | None) -> str:
+    def _format_tool_response(
+        self,
+        tool_result: ToolInvocationResult | None,
+        resolved_metrics: Mapping[str, Any] | None = None,
+        metrics_context: Mapping[str, Any] | None = None,
+    ) -> str:
         if tool_result is None:
-            return "(tool unavailable)"
-        items = self._extract_tool_items(tool_result)
-        if not items:
-            return json.dumps(tool_result.response, indent=2, sort_keys=True)
-        lines = []
-        for item in items:
-            summary = item.get("summary") or item.get("title") or item.get("content", "(no summary)")
-            source = item.get("source")
-            if source:
-                lines.append(f"- {summary} [{source}]")
+            base_lines = ["(tool unavailable)"]
+        else:
+            items = self._extract_tool_items(tool_result)
+            if not items:
+                payload = tool_result.response
+                try:
+                    serialized = json.dumps(payload, indent=2, sort_keys=True)
+                except TypeError:
+                    serialized = str(payload)
+                base_lines = [serialized]
             else:
-                lines.append(f"- {summary}")
-        return "\n".join(lines)
+                base_lines = []
+                for item in items:
+                    summary = item.get("summary") or item.get("title") or item.get("content", "(no summary)")
+                    source = item.get("source")
+                    line = f"- {summary}"
+                    if source:
+                        line = f"{line} [{source}]"
+                    base_lines.append(line)
+        if resolved_metrics:
+            base_lines.append("Finance metrics:")
+            for key, value in resolved_metrics.items():
+                base_lines.append(f"- {key}: {self._stringify_metric(value)}")
+            if metrics_context:
+                source = metrics_context.get("source")
+                timestamp = metrics_context.get("timestamp")
+                if source:
+                    base_lines.append(f"  source: {source}")
+                if timestamp:
+                    base_lines.append(f"  timestamp: {timestamp}")
+        return "\n".join(base_lines)
 
     @staticmethod
     def _extract_tool_items(tool_result: ToolInvocationResult) -> list[dict[str, Any]]:
         response = tool_result.response
-        if "results" in response and isinstance(response["results"], list):
-            return [item for item in response["results"] if isinstance(item, dict)]
+        if isinstance(response, Mapping):
+            results = response.get("results")
+            if isinstance(results, list):
+                return [item for item in results if isinstance(item, dict)]
         if isinstance(response, list):
             return [item for item in response if isinstance(item, dict)]
         return []
