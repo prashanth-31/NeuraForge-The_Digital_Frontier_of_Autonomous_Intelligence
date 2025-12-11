@@ -8,15 +8,15 @@
         "dependencies": []
     },
     "finance": {
-        "description": "Performs quantitative analysis over market data, forecasts trends, and contextualizes financial risk for decisions.",
-        "dependencies": ["research"]
+        "description": "Fetches real-time stock quotes, market data, and performs quantitative analysis. Only use when actual market data is needed.",
+        "dependencies": []
     },
     "creative": {
-        "description": "Transforms insights into narratives, visual-ready summaries, and audience-tailored storytelling artifacts.",
-        "dependencies": ["research"]
+        "description": "Writes documents, proposals, narratives, and transforms insights into audience-tailored storytelling artifacts.",
+        "dependencies": []
     },
     "enterprise": {
-        "description": "Produces executive-ready recommendations, policy-aware action plans, and cross-functional alignment guidance.",
-        "dependencies": ["finance", "creative"]
+        "description": "Produces executive-ready recommendations, business proposals, policy-aware action plans, and cross-functional alignment guidance.",
+        "dependencies": ["creative"]
     }
 }

@@ -46,19 +46,19 @@ const formatRelativeTime = (iso?: string | null) => {
 };
 
 const getStatusAccent = (status?: string | null) => {
-  if (!status) return "bg-muted";
+  if (!status) return "bg-slate-300";
   const normalized = status.toLowerCase();
-  if (normalized.includes("fail")) return "bg-destructive";
+  if (normalized.includes("fail")) return "bg-rose-500";
   if (normalized.includes("progress") || normalized.includes("running")) return "bg-amber-500";
   if (normalized.includes("complete")) return "bg-emerald-500";
-  return "bg-primary";
+  return "bg-primary-500";
 };
 
 const stats = [
-  { label: "Active Sessions", value: "12", icon: Activity, color: "text-primary" },
-  { label: "Agents Deployed", value: "4", icon: Brain, color: "text-secondary" },
-  { label: "Tasks Completed", value: "47", icon: Zap, color: "text-accent" },
-  { label: "Collaborators", value: "3", icon: Users, color: "text-primary" },
+  { label: "Active Sessions", value: "12", icon: Activity, color: "text-primary-600", bg: "bg-primary-50" },
+  { label: "Agents Deployed", value: "4", icon: Brain, color: "text-violet-600", bg: "bg-violet-50" },
+  { label: "Tasks Completed", value: "47", icon: Zap, color: "text-amber-600", bg: "bg-amber-50" },
+  { label: "Collaborators", value: "3", icon: Users, color: "text-emerald-600", bg: "bg-emerald-50" },
 ];
 
 const Dashboard = () => {
@@ -78,55 +78,66 @@ const Dashboard = () => {
 
   return (
     <AppLayout>
-      <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-7xl mx-auto space-y-8">
-          <div>
-            <h1 className="text-3xl font-bold text-foreground mb-2">Dashboard</h1>
-            <p className="text-muted-foreground">Monitor your AI collaboration metrics</p>
+      <div className="flex-1 overflow-auto bg-gradient-to-b from-slate-50/50 to-white">
+        <div className="max-w-7xl mx-auto space-y-8 p-8">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h1 className="text-3xl font-bold text-foreground mb-1 tracking-tight">Dashboard</h1>
+              <p className="text-muted-foreground">Monitor your AI collaboration metrics</p>
+            </div>
+            <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 bg-white border border-slate-200/60 px-3 py-1.5 rounded-full shadow-xs">
+              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              <span>All systems operational</span>
+            </div>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+          {/* Stats Grid */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
             {stats.map((stat) => (
-              <Card key={stat.label} className="p-6 hover-lift transition-smooth">
+              <Card key={stat.label} className="p-6 hover:shadow-elevated transition-all duration-300 group cursor-pointer">
                 <div className="flex items-center justify-between mb-4">
-                  <stat.icon className={`h-8 w-8 ${stat.color}`} />
+                  <div className={`w-12 h-12 rounded-xl ${stat.bg} flex items-center justify-center transition-transform duration-300 group-hover:scale-110`}>
+                    <stat.icon className={`h-6 w-6 ${stat.color}`} />
+                  </div>
                 </div>
-                <div className="text-3xl font-bold text-foreground mb-1">{stat.value}</div>
+                <div className="text-3xl font-bold text-foreground mb-0.5 tracking-tight">{stat.value}</div>
                 <div className="text-sm text-muted-foreground">{stat.label}</div>
               </Card>
             ))}
           </div>
 
+          {/* Activity and Status Grid */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 pb-16">
             <Card className="p-6">
-              <h3 className="text-lg font-semibold mb-4 text-foreground">Recent Activity</h3>
+              <h3 className="text-lg font-semibold mb-5 text-foreground">Recent Activity</h3>
               {isLoading && (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" />
+                <div className="flex items-center gap-2 text-sm text-muted-foreground py-8 justify-center">
+                  <Loader2 className="h-4 w-4 animate-spin text-primary-500" />
                   Loading activity…
                 </div>
               )}
               {isError && (
-                <p className="text-sm text-destructive">Unable to load recent activity. Try again soon.</p>
+                <p className="text-sm text-rose-600 bg-rose-50 border border-rose-200/60 rounded-lg px-4 py-3">Unable to load recent activity. Try again soon.</p>
               )}
               {!isLoading && !isError && recentActivity.length === 0 && (
-                <p className="text-sm text-muted-foreground">No recent tasks have been recorded yet.</p>
+                <p className="text-sm text-muted-foreground text-center py-8">No recent tasks have been recorded yet.</p>
               )}
               {!isLoading && !isError && recentActivity.length > 0 && (
-                <div className="space-y-3 max-h-72 overflow-y-auto pr-2">
+                <div className="space-y-1 max-h-80 overflow-y-auto pr-2">
                   {recentActivity.map((activity) => (
                     <button
                       key={activity.task_id}
                       type="button"
                       onClick={() => handleActivitySelect(activity.task_id)}
-                      className="w-full text-left"
+                      className="w-full text-left hover:bg-slate-50 rounded-xl px-3 py-3 -mx-3 transition-colors duration-200"
                     >
-                      <div className="flex items-start gap-3 pb-4 border-b border-border last:border-0 last:pb-0">
-                        <div className={`w-2 h-2 rounded-full ${getStatusAccent(activity.status)} mt-2`} />
-                        <div className="flex-1">
-                          <div className="flex items-center justify-between gap-3">
+                      <div className="flex items-start gap-3">
+                        <div className={`w-2.5 h-2.5 rounded-full ${getStatusAccent(activity.status)} mt-1.5 flex-shrink-0`} />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-start justify-between gap-3">
                             <p className="text-sm font-medium text-foreground line-clamp-2">{activity.summary}</p>
-                            <span className="text-xs text-muted-foreground whitespace-nowrap">
+                            <span className="text-[11px] text-slate-400 whitespace-nowrap bg-slate-100 px-1.5 py-0.5 rounded">
                               {formatRelativeTime(activity.timestamp)}
                             </span>
                           </div>
@@ -135,9 +146,9 @@ const Dashboard = () => {
                             {activity.status ? ` • ${activity.status.replace(/_/g, " ")}` : ""}
                           </p>
                           {typeof activity.confidence === "number" && (
-                            <p className="text-[11px] font-semibold text-primary mt-1">
-                              Confidence {(activity.confidence * 100).toFixed(0)}%
-                            </p>
+                            <span className="inline-block text-[10px] font-semibold text-primary-600 bg-primary-50 px-1.5 py-0.5 rounded mt-1.5">
+                              {(activity.confidence * 100).toFixed(0)}% confidence
+                            </span>
                           )}
                         </div>
                       </div>
@@ -148,19 +159,24 @@ const Dashboard = () => {
             </Card>
 
             <Card className="p-6">
-              <h3 className="text-lg font-semibold mb-4 text-foreground">System Status</h3>
+              <h3 className="text-lg font-semibold mb-5 text-foreground">System Status</h3>
               <div className="space-y-4">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50/80">
                   <span className="text-sm text-muted-foreground">AI Processing</span>
-                  <span className="text-sm font-medium text-accent">Optimal</span>
+                  <span className="text-sm font-semibold text-emerald-600">Optimal</span>
                 </div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50/80">
                   <span className="text-sm text-muted-foreground">Memory Usage</span>
-                  <span className="text-sm font-medium text-foreground">68%</span>
+                  <div className="flex items-center gap-2">
+                    <div className="w-24 h-2 bg-slate-200 rounded-full overflow-hidden">
+                      <div className="w-[68%] h-full bg-gradient-to-r from-primary-400 to-primary-500 rounded-full" />
+                    </div>
+                    <span className="text-sm font-semibold text-foreground">68%</span>
+                  </div>
                 </div>
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between p-3 rounded-xl bg-slate-50/80">
                   <span className="text-sm text-muted-foreground">Response Time</span>
-                  <span className="text-sm font-medium text-accent">125ms</span>
+                  <span className="text-sm font-semibold text-primary-600">125ms</span>
                 </div>
               </div>
             </Card>

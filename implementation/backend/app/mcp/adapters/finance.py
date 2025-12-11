@@ -51,6 +51,17 @@ _FINBERT_MODEL_ID = "ProsusAI/finbert"
 logger = logging.getLogger(__name__)
 
 
+class HistoricalPricePoint(BaseModel):
+    """Single historical price data point."""
+    date: str = Field(..., description="Date in YYYY-MM-DD format.")
+    open: float | None = Field(default=None, description="Opening price.")
+    high: float | None = Field(default=None, description="Day's high price.")
+    low: float | None = Field(default=None, description="Day's low price.")
+    close: float | None = Field(default=None, description="Closing price.")
+    adjusted_close: float | None = Field(default=None, description="Adjusted closing price.")
+    volume: int | None = Field(default=None, description="Trading volume.")
+
+
 class YahooFinanceMetrics(BaseModel):
     symbol: str = Field(..., description="Ticker symbol requested.")
     company_name: str | None = Field(default=None, description="Long name provided by the data source.")
@@ -67,6 +78,10 @@ class YahooFinanceMetrics(BaseModel):
     fifty_two_week_high: float | None = Field(default=None)
     market_cap: float | None = Field(default=None)
     updated_at: datetime | None = Field(default=None, description="Timestamp of the market data, if provided.")
+    historical_prices: list[HistoricalPricePoint] | None = Field(
+        default=None,
+        description="Recent historical daily prices (last 30 trading days)."
+    )
 
 
 class YahooFinanceRequest(BaseModel):
@@ -932,6 +947,22 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
         company_name = overview.get("Name") if isinstance(overview, Mapping) else None
         market_cap = _safe_float(overview.get("MarketCapitalization")) if isinstance(overview, Mapping) else None
 
+        # Build historical prices from time series (last 30 trading days)
+        historical_prices: list[HistoricalPricePoint] = []
+        for date_str, values in ordered[:30]:  # Last 30 days
+            if not isinstance(values, Mapping):
+                continue
+            point = HistoricalPricePoint(
+                date=date_str,
+                open=_safe_float(values.get("1. open")),
+                high=_safe_float(values.get("2. high")),
+                low=_safe_float(values.get("3. low")),
+                close=_safe_float(values.get("4. close")),
+                adjusted_close=_safe_float(values.get("5. adjusted close")),
+                volume=_safe_int(values.get("6. volume")),
+            )
+            historical_prices.append(point)
+
         return YahooFinanceMetrics(
             symbol=symbol,
             company_name=company_name,
@@ -948,6 +979,7 @@ class AlphaVantageSnapshotAdapter(MCPToolAdapter):
             fifty_two_week_high=fifty_two_week_high,
             market_cap=market_cap,
             updated_at=updated_at,
+            historical_prices=historical_prices if historical_prices else None,
         )
 
     @staticmethod

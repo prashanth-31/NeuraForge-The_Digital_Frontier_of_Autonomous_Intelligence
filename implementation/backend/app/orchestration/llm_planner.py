@@ -273,10 +273,13 @@ class LLMOrchestrationPlanner:
             "include at least one tool when selected. enterprise_agent, creative_agent, and general_agent may omit tools when they "
             "are only greeting, triaging, or when no tool would materially improve the answer. Only assign tools each agent can "
             "reasonably invoke. Limit to at most 4 agents total. Use general_agent by itself only for greetings or vague prompts; when the user specifies concrete deliverables, assign the relevant specialists even if the request is multi-part. "
-            "If the prompt asks for financial performance, earnings, revenue, ratios, guidance, a ticker symbol, or contains finance-focused keywords (e.g., \"financial report\", \"earnings\", \"revenue\", \"profit\", \"loss\", \"forecast\", \"Netflix\", \"NFLX\"), include finance_agent with finance tools. "
-            "If the task calls for external research, comparisons, citations, or fact-finding, include research_agent with research tools. "
-            "If the user asks for storytelling, copywriting, slogans, creative briefs, or tone adjustments, include creative_agent with creative tools. "
-            "If the user needs business strategy, GTM planning, operational guidance, or executive-ready recommendations, include enterprise_agent with enterprise tools. "
+            "IMPORTANT AGENT SELECTION RULES:\n"
+            "- finance_agent: ONLY use when the prompt asks for real stock quotes, ticker lookups, current market prices, historical price data, or live financial metrics. DO NOT use for generic business proposals, strategy documents, or fictional financial projections.\n"
+            "- research_agent: Use for external research, fact-finding, citations, web searches, or comparative analysis requiring external data sources.\n"
+            "- creative_agent: Use for writing, drafting documents, proposals, storytelling, copywriting, slogans, creative briefs, or content creation. This is the primary agent for WRITING tasks.\n"
+            "- enterprise_agent: Use for business strategy, action plans, roadmaps, GTM planning, operational guidance, or executive-ready recommendations and synthesizing specialist outputs.\n"
+            "- general_agent: Use ONLY for simple greetings, clarifying questions, or when no specialist is appropriate.\n"
+            "For a task like 'write a business proposal', use creative_agent (for writing) and enterprise_agent (for strategy/structure). Do NOT use finance_agent unless actual stock/market data is needed. "
             "Only add specialist agents when their domain expertise is clearly required. Do not output a legacy \"agents\" array — you must use the steps structure shown above. "
             "\"metadata\" must be an object with short strings. Always include \"confidence\" as a float between 0.0 and 1.0 indicating how confident you are in the selected plan. "
             "Never return multiple JSON objects or extra commentary."
@@ -574,7 +577,14 @@ class LLMOrchestrationPlanner:
                 tools=enterprise_step.tools,
             )
 
+        # Build priority order - research comes first as it provides foundational data
         priority_order: list[str] = []
+        
+        # For research-focused queries, research_agent should run FIRST
+        if self._prompt_mentions_research(prompt):
+            priority_order.append("research_agent")
+        
+        # Then specialized domain agents
         if self._prompt_mentions_finance(prompt):
             priority_order.append("finance_agent")
         if self._prompt_mentions_enterprise(prompt):
@@ -599,6 +609,107 @@ class LLMOrchestrationPlanner:
 
         if added_agents:
             adjustments.setdefault("added_agents", added_agents)
+
+        # ────────────────────────────────────────────────────────────────────────
+        # Remove redundant general_agent when specialists can handle the task
+        # This prevents duplicate "triage" responses after specialist responses
+        # ────────────────────────────────────────────────────────────────────────
+        specialist_agents = {"finance_agent", "research_agent", "creative_agent", "enterprise_agent"}
+        has_specialist = any(step.agent in specialist_agents for step in updated_steps)
+        has_general = any(step.agent == "general_agent" for step in updated_steps)
+        
+        if has_specialist and has_general and len(updated_steps) > 1:
+            # Check if general_agent appears AFTER specialists - if so, remove it
+            specialist_indices = [i for i, s in enumerate(updated_steps) if s.agent in specialist_agents]
+            general_indices = [i for i, s in enumerate(updated_steps) if s.agent == "general_agent"]
+            
+            if specialist_indices and general_indices:
+                # Remove general_agent entries that come AFTER specialists
+                last_specialist = max(specialist_indices)
+                trailing_general = [i for i in general_indices if i > last_specialist]
+                
+                if trailing_general:
+                    removed_agents = []
+                    updated_steps = [
+                        step for i, step in enumerate(updated_steps)
+                        if i not in trailing_general
+                    ]
+                    removed_agents = ["general_agent"] * len(trailing_general)
+                    adjustments.setdefault("removed_redundant_general", {
+                        "reason": "specialists_handle_task",
+                        "removed_count": len(trailing_general),
+                    })
+                    logger.info(
+                        "planner_removed_trailing_general_agent",
+                        prompt=prompt[:100],
+                        specialists=[s.agent for s in updated_steps if s.agent in specialist_agents],
+                    )
+
+        # ────────────────────────────────────────────────────────────────────────
+        # Filter out agents with irrelevant reasons
+        # The LLM sometimes selects agents with mismatched reasons. Remove them.
+        # ────────────────────────────────────────────────────────────────────────
+        updated_steps, irrelevant_removed = self._filter_irrelevant_agents(prompt, updated_steps)
+        if irrelevant_removed:
+            adjustments.setdefault("removed_irrelevant_agents", irrelevant_removed)
+
+        # ────────────────────────────────────────────────────────────────────────
+        # For simple financial queries, keep only finance_agent
+        # This is the final filter for focused single-domain queries
+        # ────────────────────────────────────────────────────────────────────────
+        if self._is_pure_finance_query(prompt):
+            finance_only = [s for s in updated_steps if s.agent == "finance_agent"]
+            if finance_only:
+                removed_for_focus = [s.agent for s in updated_steps if s.agent != "finance_agent"]
+                if removed_for_focus:
+                    updated_steps = finance_only
+                    adjustments.setdefault("focused_on_specialist", {
+                        "domain": "finance",
+                        "removed_agents": removed_for_focus,
+                    })
+                    logger.info(
+                        "planner_focused_on_finance_only",
+                        prompt=prompt[:100],
+                        removed=removed_for_focus,
+                    )
+
+        # ────────────────────────────────────────────────────────────────────────
+        # For pure research queries, prioritize research_agent
+        # Creative can synthesize but shouldn't be the primary for research
+        # ────────────────────────────────────────────────────────────────────────
+        if self._is_pure_research_query(prompt):
+            # Keep research_agent primary, but allow creative for synthesis if present
+            research_first = [s for s in updated_steps if s.agent == "research_agent"]
+            other_agents = [s for s in updated_steps if s.agent != "research_agent" and s.agent != "creative_agent"]
+            creative_agents = [s for s in updated_steps if s.agent == "creative_agent"]
+            
+            if research_first and creative_agents:
+                # Keep both but ensure research is first
+                updated_steps = research_first + creative_agents
+                if other_agents:
+                    adjustments.setdefault("focused_on_research", {
+                        "domain": "research",
+                        "removed_agents": [s.agent for s in other_agents],
+                    })
+                    logger.info(
+                        "planner_focused_on_research",
+                        prompt=prompt[:100],
+                        removed=[s.agent for s in other_agents],
+                    )
+            elif research_first:
+                # Only research, remove others
+                removed_for_focus = [s.agent for s in updated_steps if s.agent != "research_agent"]
+                if removed_for_focus:
+                    updated_steps = research_first
+                    adjustments.setdefault("focused_on_specialist", {
+                        "domain": "research",
+                        "removed_agents": removed_for_focus,
+                    })
+                    logger.info(
+                        "planner_focused_on_research_only",
+                        prompt=prompt[:100],
+                        removed=removed_for_focus,
+                    )
 
         return updated_steps, adjustments
 
@@ -710,6 +821,146 @@ class LLMOrchestrationPlanner:
 
         return False
 
+    def _is_pure_finance_query(self, prompt: str) -> bool:
+        """
+        Check if this is a pure/focused financial query that should only
+        route to finance_agent without other agents.
+        """
+        if self._is_simple_greeting(prompt):
+            return False
+        normalized = (prompt or "").strip().lower()
+        if not normalized:
+            return False
+        
+        # Strong finance indicators
+        finance_phrases = {
+            "financial analysis",
+            "stock price",
+            "stock analysis",
+            "earnings report",
+            "financial report",
+            "investment analysis",
+            "portfolio analysis",
+            "market cap",
+            "pe ratio",
+            "dividend",
+            "revenue analysis",
+            "profit analysis",
+        }
+        
+        # Check for pure finance queries
+        if any(phrase in normalized for phrase in finance_phrases):
+            # Make sure it's NOT asking for creative/enterprise deliverables
+            non_finance_indicators = {
+                "proposal",
+                "presentation",
+                "pitch deck",
+                "marketing",
+                "campaign",
+                "story",
+                "creative",
+                "strategy document",
+                "playbook",
+            }
+            if not any(indicator in normalized for indicator in non_finance_indicators):
+                return True
+        
+        return False
+
+    def _is_pure_research_query(self, prompt: str) -> bool:
+        """
+        Check if this is a pure research query that should prioritize
+        research_agent as the primary handler.
+        """
+        if self._is_simple_greeting(prompt):
+            return False
+        normalized = (prompt or "").strip().lower()
+        if not normalized:
+            return False
+        
+        # Strong research indicators
+        research_phrases = {
+            "research the",
+            "research on",
+            "what are the latest",
+            "current trends",
+            "latest trends",
+            "analyze the trends",
+            "investigate",
+            "find out about",
+            "look into",
+            "search for information",
+            "study on",
+            "survey of",
+            "state of the art",
+            "what is happening",
+        }
+        
+        # Check for pure research queries
+        if any(phrase in normalized for phrase in research_phrases):
+            # Make sure it's NOT asking for something that needs other specialists
+            non_research_indicators = {
+                "write a",
+                "create a",
+                "draft a",
+                "proposal",
+                "stock price",
+                "ticker",
+                "financial report",
+                "earnings",
+            }
+            if not any(indicator in normalized for indicator in non_research_indicators):
+                return True
+        
+        return False
+
+    def _filter_irrelevant_agents(
+        self, prompt: str, steps: list[PlannedAgentStep]
+    ) -> tuple[list[PlannedAgentStep], list[dict[str, Any]]]:
+        """
+        Filter out agents that were selected with irrelevant reasons.
+        The LLM sometimes hallucinates agent selections - this is a safety net.
+        """
+        removed: list[dict[str, Any]] = []
+        normalized = (prompt or "").strip().lower()
+        
+        # Define reason-to-domain mappings
+        irrelevant_reason_patterns = {
+            # If the reason mentions these but prompt doesn't, remove the agent
+            "business proposal": lambda p: "proposal" not in p and "business plan" not in p,
+            "creative deliverable": lambda p: not self._prompt_mentions_creative(prompt),
+            "marketing campaign": lambda p: "marketing" not in p and "campaign" not in p,
+            "story": lambda p: "story" not in p and "narrative" not in p,
+        }
+        
+        filtered_steps = []
+        for step in steps:
+            reason = (step.reason or "").lower()
+            should_remove = False
+            
+            # Check if this agent's reason is irrelevant to the prompt
+            for pattern, check_fn in irrelevant_reason_patterns.items():
+                if pattern in reason and check_fn(normalized):
+                    should_remove = True
+                    removed.append({
+                        "agent": step.agent,
+                        "reason": step.reason,
+                        "filter_reason": f"'{pattern}' not relevant to prompt",
+                    })
+                    logger.info(
+                        "planner_filtered_irrelevant_agent",
+                        agent=step.agent,
+                        agent_reason=step.reason,
+                        filter_reason=f"'{pattern}' not relevant to prompt",
+                        prompt=prompt[:100],
+                    )
+                    break
+            
+            if not should_remove:
+                filtered_steps.append(step)
+        
+        return filtered_steps, removed
+
     def _needs_research_agent(self, prompt: str, steps: Sequence[PlannedAgentStep]) -> bool:
         if any(step.agent == "research_agent" for step in steps):
             return False
@@ -718,31 +969,43 @@ class LLMOrchestrationPlanner:
         if not normalized:
             return False
 
+        # If finance_agent is already in the plan, don't add research for overlapping terms
+        has_finance = any(step.agent == "finance_agent" for step in steps)
+        if has_finance:
+            # For finance queries, only add research if explicitly requested
+            explicit_research_keywords = {
+                "research paper",
+                "academic",
+                "whitepaper",
+                "white paper",
+                "search the web",
+                "web search",
+                "find sources",
+                "find citations",
+            }
+            return any(keyword in normalized for keyword in explicit_research_keywords)
+
+        # General research keywords (when no specialist is handling it)
         research_keywords = {
             "research",
-            "analyze",
-            "analysis",
             "compare",
             "comparison",
             "benchmark",
             "study",
-            "report",
             "citation",
             "sources",
             "market size",
-            "industry",
+            "industry analysis",
             "whitepaper",
-            "search",
-            "web",
-            "news",
-            "trend",
-            "trends",
+            "web search",
+            "search the web",
+            "trend analysis",
         }
 
         if any(keyword in normalized for keyword in research_keywords):
             return True
 
-        return "search the web" in normalized
+        return False
 
     def _needs_creative_agent(self, prompt: str, steps: Sequence[PlannedAgentStep]) -> bool:
         if any(step.agent == "creative_agent" for step in steps):
@@ -844,6 +1107,49 @@ class LLMOrchestrationPlanner:
             return True
 
         return "operational insight" in normalized or "operational insights" in normalized
+
+    def _prompt_mentions_research(self, prompt: str) -> bool:
+        """Check if the prompt explicitly mentions research activities."""
+        if self._is_simple_greeting(prompt):
+            return False
+        normalized = (prompt or "").strip().lower()
+        if not normalized:
+            return False
+
+        research_keywords = {
+            "research",
+            "investigate",
+            "investigation",
+            "study",
+            "analyze",
+            "analysis",
+            "compare",
+            "comparison",
+            "benchmark",
+            "benchmarking",
+            "explore",
+            "find out",
+            "look into",
+            "search for",
+            "survey",
+            "review",
+            "examine",
+            "trends",
+            "latest",
+            "current state",
+            "state of",
+            "what is",
+            "what are",
+        }
+
+        # Check for direct research keywords
+        if any(keyword in normalized for keyword in research_keywords):
+            # Exclude pure finance queries - they have their own agent
+            if self._is_pure_finance_query(prompt):
+                return False
+            return True
+
+        return False
 
     @staticmethod
     def _reorder_by_priority(

@@ -16,9 +16,9 @@ const AppLayout = ({ children, rightPanel, showHistory = false, mainClassName }:
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
+    <div className="h-screen bg-white flex flex-col overflow-hidden">
       <Navbar />
-      <div className="flex flex-1 pt-16 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden">
         <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed((prev) => !prev)} />
         <div className="flex flex-1 overflow-hidden">
           <main className={cn("flex-1 flex flex-col overflow-hidden", mainClassName)}>

@@ -280,6 +280,57 @@ class Orchestrator:
             return False
         return confidence < self._low_confidence_threshold
 
+    def _should_early_exit(
+        self,
+        executed_agent: BaseAgent,
+        latest_output: dict[str, Any] | None,
+        execution_plan: list[tuple[int, PlannedAgentStep | None, BaseAgent]],
+        current_step_index: int,
+    ) -> bool:
+        """
+        Determine if we should skip subsequent general_agent calls after
+        a specialist agent has provided a high-confidence response.
+        
+        This prevents redundant/duplicate responses where general_agent
+        repeats triage after a specialist has already handled the task.
+        """
+        # Only consider specialist agents (not general_agent)
+        specialist_agents = {"finance_agent", "research_agent", "creative_agent", "enterprise_agent"}
+        if executed_agent.name not in specialist_agents:
+            return False
+        
+        # Check if output has high confidence
+        if latest_output is None:
+            return False
+        
+        confidence = latest_output.get("confidence")
+        if confidence is None:
+            return False
+        
+        # High confidence threshold for early exit
+        # Lowered to 0.75 to allow specialist agents to trigger early exit more often
+        HIGH_CONFIDENCE_THRESHOLD = 0.75
+        if confidence < HIGH_CONFIDENCE_THRESHOLD:
+            return False
+        
+        # Check if there's a general_agent still pending in the plan
+        remaining_general = any(
+            agent.name == "general_agent" 
+            for idx, _, agent in execution_plan 
+            if idx > current_step_index
+        )
+        
+        if remaining_general:
+            logger.info(
+                "early_exit_triggered",
+                specialist=executed_agent.name,
+                confidence=confidence,
+                threshold=HIGH_CONFIDENCE_THRESHOLD,
+            )
+            return True
+        
+        return False
+
     def _begin_run(self, run_tracker: _RunTracker | None, *, task: Mapping[str, Any]) -> _RunTracker:
         tracker = run_tracker
         if tracker is None:
@@ -1128,7 +1179,14 @@ class Orchestrator:
                     agents=[agent.name for agent in skipped_agents],
                 )
 
+            # Track indices to skip due to early exit
+            early_exit_skipped_indices: set[int] = set()
+
             for step_index, plan_step, planned_agent in execution_plan:
+                # Skip this step if it was marked for early exit
+                if step_index in early_exit_skipped_indices:
+                    continue
+                
                 self._enforce_run_time_budget(run_tracker)
                 executed_agent = planned_agent
                 resolved_step = plan_step
@@ -1406,6 +1464,51 @@ class Orchestrator:
                 )
                 await self._update_state(run_tracker, state)
                 self._enforce_run_time_budget(run_tracker)
+                
+                # ────────────────────────────────────────────────────────────────
+                # Early Exit: Skip general_agent if specialist already responded
+                # with high confidence to avoid duplicate/redundant responses
+                # ────────────────────────────────────────────────────────────────
+                if self._should_early_exit(
+                    executed_agent=executed_agent,
+                    latest_output=latest_output,
+                    execution_plan=execution_plan,
+                    current_step_index=step_index,
+                ):
+                    skipped_remaining = [
+                        (idx, step, agent)
+                        for idx, step, agent in execution_plan
+                        if idx > step_index and agent.name == "general_agent"
+                    ]
+                    for skip_idx, skip_step, skip_agent in skipped_remaining:
+                        # Mark this index for skipping in subsequent iterations
+                        early_exit_skipped_indices.add(skip_idx)
+                        await self._record_event(
+                            run_tracker,
+                            "agent_skipped",
+                            agent=skip_agent.name,
+                            payload={"reason": "early_exit_high_confidence_specialist"},
+                        )
+                        await self._notify(
+                            progress_cb,
+                            self._ensure_run_id(
+                                run_tracker,
+                                {
+                                    "event": "agent_skipped",
+                                    "agent": skip_agent.name,
+                                    "task_id": task.get("id"),
+                                    "reason": "Specialist agent provided high-confidence response",
+                                },
+                            ),
+                        )
+                        logger.info(
+                            "agent_skipped_early_exit",
+                            task=task.get("id"),
+                            skipped_agent=skip_agent.name,
+                            reason="specialist_high_confidence",
+                            specialist=executed_agent.name,
+                            confidence=latest_output.get("confidence") if isinstance(latest_output, dict) else None,
+                        )
 
             self._enforce_run_time_budget(run_tracker)
             if state.get("status") != "failed":

@@ -6,10 +6,16 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Mapping, Sequence
 
-from ..agents.base import AgentContext
+from ..agents.base import AgentContext, ReasoningBuilder
 from ..core.logging import get_logger
 from ..core.metrics import observe_confidence_component
-from ..schemas.agents import AgentCapability, AgentExchange, AgentInput, AgentOutput
+from ..schemas.agents import (
+    AgentCapability,
+    AgentExchange,
+    AgentInput,
+    AgentOutput,
+    ReasoningStepType,
+)
 from ..services.tools import ToolDisabledError, ToolInvocationError, ToolInvocationResult
 from ..mcp.symbols import extract_symbols_from_text
 
@@ -115,15 +121,71 @@ class ResearchAgent:
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("research_agent_task", task=task.model_dump())
+        
+        # Initialize reasoning builder for tracking thought process
+        reasoning = ReasoningBuilder(agent_name=self.name, context=context)
+        
+        # Step 1: Analyze the research request
+        await reasoning.think(
+            f"Analyzing research request: '{task.prompt[:100]}...'",
+            step_type=ReasoningStepType.OBSERVATION,
+        )
+        
+        # Step 2: Gather context
         context_section = task.context
         if context_section is None and context.context is not None:
+            await reasoning.think(
+                "Assembling context from knowledge base and prior conversations",
+                step_type=ReasoningStepType.ANALYSIS,
+            )
             bundle = await context.context.build(task=_serialize_agent_input(task), agent=self.name)
             context_section = bundle.as_prompt_section()
 
-        tool_result = await self._maybe_invoke_tool(task, context=context)
+        # Step 3: Evaluate and invoke tools
+        await reasoning.think(
+            "Evaluating available research tools for data gathering",
+            step_type=ReasoningStepType.TOOL_SELECTION,
+        )
+        
+        # Check for tool availability
+        if context.tools is None:
+            await reasoning.consider_tool(
+                tool_name="research.search",
+                reason="Primary research tool for gathering external information",
+                selected=False,
+                rejection_reason="Tool service not available",
+            )
+            tool_result = None
+        else:
+            await reasoning.consider_tool(
+                tool_name="research.search",
+                reason="Can search for factual information and recent data",
+                selected=True,
+            )
+            tool_result = await self._maybe_invoke_tool(task, context=context)
+            if tool_result:
+                await reasoning.add_finding(
+                    claim=f"Research tool returned {len(self._extract_tool_items(tool_result))} results",
+                    evidence=[str(tool_result.payload)[:200] + "..."] if tool_result.payload else [],
+                    confidence=0.8,
+                    source="research.search",
+                )
+        
+        # Step 4: Check for financial metrics
         requested_metrics = self._requested_metrics_from_prompt(task)
+        if requested_metrics:
+            await reasoning.think(
+                f"Identified {len(requested_metrics)} requested financial metrics: {', '.join(requested_metrics[:5])}",
+                step_type=ReasoningStepType.ANALYSIS,
+            )
+        
         resolved_metrics = self._collect_metrics_from_tool(tool_result, requested_metrics)
         missing_metrics = [metric for metric in requested_metrics if metric not in resolved_metrics]
+        
+        if missing_metrics:
+            await reasoning.note_uncertainty(
+                f"Could not resolve all requested metrics. Missing: {', '.join(missing_metrics[:5])}"
+            )
 
         enrichment: dict[str, Any] | None = None
         finance_context = self._should_attempt_finance_enrichment(
@@ -132,6 +194,10 @@ class ResearchAgent:
         )
         should_enrich = bool(missing_metrics) and (finance_context or bool(requested_metrics))
         if should_enrich:
+            await reasoning.think(
+                f"Attempting finance enrichment for {len(missing_metrics)} missing metrics",
+                step_type=ReasoningStepType.DECISION,
+            )
             enrichment = await self._enrich_financial_metrics(
                 task,
                 context=context,
@@ -143,6 +209,20 @@ class ResearchAgent:
                 enrichment["missing"] = remaining
                 if tool_result is not None and enrichment.get("metrics"):
                     self._inject_metrics_into_tool_payload(tool_result, enrichment)
+                    
+                await reasoning.add_finding(
+                    claim=f"Finance enrichment provided {len(enrichment.get('metrics', {}))} additional metrics",
+                    evidence=list(enrichment.get("metrics", {}).keys()),
+                    confidence=0.75,
+                    source="finance_enrichment",
+                )
+        
+        # Step 5: Synthesize findings
+        await reasoning.think(
+            "Synthesizing all gathered information into comprehensive research summary",
+            step_type=ReasoningStepType.SYNTHESIS,
+        )
+        
         tool_section = self._format_tool_response(
             tool_result,
             resolved_metrics if resolved_metrics else None,
@@ -160,6 +240,7 @@ class ResearchAgent:
 
         await context.memory.store_working_memory(task.task_id, summary)
 
+        # Step 6: Calculate confidence
         evidence_count = len(task.prior_exchanges)
         if context_section:
             evidence_count += 1
@@ -180,6 +261,12 @@ class ResearchAgent:
             for component, value in confidence_breakdown.items():
                 observe_confidence_component(agent=self.name, component=component, value=value)
 
+        await reasoning.think(
+            f"Final confidence assessment: {confidence:.2f} based on {evidence_count} evidence sources",
+            step_type=ReasoningStepType.EVALUATION,
+            confidence=confidence,
+        )
+
         metadata: dict[str, Any] = {"type": "research_summary"}
         if tool_result is not None:
             metadata["tool"] = self._tool_metadata(tool_result)
@@ -197,6 +284,11 @@ class ResearchAgent:
             confidence=confidence,
             rationale="Stack-ranked findings consolidated from retrieved context.",
             metadata=metadata,
+            # Include reasoning transparency
+            reasoning_steps=reasoning.steps,
+            key_findings=reasoning.findings,
+            tools_considered=reasoning.tools_considered,
+            uncertainties=reasoning.uncertainties,
         )
 
     def _build_prompt(self, task: AgentInput, context_section: str | None = None) -> str:
@@ -209,7 +301,8 @@ class ResearchAgent:
             f"Known metadata:\n{metadata}\n\n"
             f"Prior agent outputs (if any):\n{history}\n\n"
             f"Retrieved context:\n{retrieved}\n\n"
-            "Summarize credible research-backed insights, cite sources inline, and call out missing data. "
+            "Summarize credible research-backed insights, cite sources inline. "
+            "Only mention missing information if it's directly relevant to the research question being asked. "
             "If tools uncovered a remarkable historical pattern, append a short 'Historical Insight' note "
             "that references the relevant year and source."
         )

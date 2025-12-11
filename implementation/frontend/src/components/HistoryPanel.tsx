@@ -20,9 +20,10 @@ import { Badge } from "./ui/badge";
 
 interface HistoryPanelProps {
   className?: string;
+  embedded?: boolean;
 }
 
-const HistoryPanel = ({ className }: HistoryPanelProps) => {
+const HistoryPanel = ({ className, embedded = false }: HistoryPanelProps) => {
   const {
     history,
     currentTaskId,
@@ -147,16 +148,27 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
   return (
     <aside
       className={cn(
-        "hidden lg:flex w-80 xl:w-96 flex-col border-l border-border bg-card shadow-soft sticky top-16 h-[calc(100vh-4rem)]",
+        embedded
+          ? "flex flex-col h-full overflow-hidden"
+          : "hidden lg:flex w-80 xl:w-96 flex-col border-l border-slate-200/60 bg-white/95 backdrop-blur-sm shadow-soft sticky top-16 h-[calc(100vh-4rem)]",
         className,
       )}
     >
-      <div className="p-4 border-b border-border">
-        <h2 className="font-semibold text-sm text-foreground">History</h2>
-        <p className="text-xs text-muted-foreground mt-1">
-          {currentTaskId ? `Task ${currentTaskId.slice(0, 8)}…` : "Past conversations"}
-        </p>
-      </div>
+      {!embedded && (
+        <div className="p-4 border-b border-slate-200/60 bg-gradient-to-r from-slate-50 to-white">
+          <div className="flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-primary-100 to-primary-200 flex items-center justify-center">
+              <History className="h-4 w-4 text-primary-600" />
+            </div>
+            <div>
+              <h2 className="font-semibold text-sm text-foreground">History</h2>
+              <p className="text-xs text-muted-foreground">
+                {currentTaskId ? `Task ${currentTaskId.slice(0, 8)}…` : "Past conversations"}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       <Tabs value={tabValue} onValueChange={setTabValue} className="flex-1 flex flex-col overflow-hidden">
         <div className="px-3 pt-3">
@@ -176,12 +188,12 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
             {hasHistory ? (
               <div className="space-y-3">
                 {history.map((entry, index) => (
-                  <div key={`${entry.agent}-${index}`} className="p-3 rounded-lg border border-border/40 bg-muted/30">
+                  <div key={`${entry.agent}-${index}`} className="p-4 rounded-xl border border-slate-200/60 bg-gradient-to-br from-white to-slate-50/50 shadow-xs hover:shadow-soft transition-shadow duration-200">
                     <div className="flex items-center justify-between mb-2">
-                      <span className="text-sm font-medium text-foreground">{entry.agent}</span>
+                      <span className="text-sm font-semibold text-foreground">{entry.agent}</span>
                       {typeof entry.confidence === "number" && (
-                        <span className="text-[11px] font-semibold text-primary">
-                          {(entry.confidence * 100).toFixed(0)}% confidence
+                        <span className="text-[11px] font-semibold text-primary-600 bg-primary-50 px-2 py-0.5 rounded-md">
+                          {(entry.confidence * 100).toFixed(0)}%
                         </span>
                       )}
                     </div>
@@ -189,7 +201,7 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
                       {entry.content}
                     </p>
                     {entry.confidenceBreakdown && (
-                      <div className="flex flex-wrap gap-2 mt-2">
+                      <div className="flex flex-wrap gap-1.5 mt-3">
                         {Object.entries(entry.confidenceBreakdown)
                           .sort((a, b) => {
                             const left = componentOrder.indexOf(a[0]);
@@ -200,7 +212,7 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
                           .map(([key, value]) => (
                             <span
                               key={key}
-                              className="text-[10px] uppercase tracking-wide bg-background/70 border border-border px-2 py-0.5 rounded-full text-muted-foreground"
+                              className="text-[10px] uppercase tracking-wider font-medium bg-slate-100 border border-slate-200/60 px-2 py-0.5 rounded-md text-slate-600"
                             >
                               {`${key.replace(/_/g, " ")}: ${(value * 100).toFixed(0)}%`}
                             </span>
@@ -209,19 +221,19 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
                     )}
                     {entry.toolMetadata && (
                       <div className="flex flex-wrap gap-2 text-[11px] text-muted-foreground mt-2">
-                        {entry.toolMetadata.name && <span>Tool: {entry.toolMetadata.name}</span>}
+                        {entry.toolMetadata.name && <span className="bg-slate-50 px-1.5 py-0.5 rounded">Tool: {entry.toolMetadata.name}</span>}
                         {entry.toolMetadata.resolved && entry.toolMetadata.resolved !== entry.toolMetadata.name && (
-                          <span>Target: {entry.toolMetadata.resolved}</span>
+                          <span className="bg-slate-50 px-1.5 py-0.5 rounded">Target: {entry.toolMetadata.resolved}</span>
                         )}
                         {typeof entry.toolMetadata.latency === "number" && (
-                          <span>Latency: {(entry.toolMetadata.latency * 1000).toFixed(0)} ms</span>
+                          <span className="bg-slate-50 px-1.5 py-0.5 rounded">Latency: {(entry.toolMetadata.latency * 1000).toFixed(0)} ms</span>
                         )}
                         {typeof entry.toolMetadata.cached === "boolean" && (
-                          <span>{entry.toolMetadata.cached ? "Cached result" : "Live result"}</span>
+                          <span className="bg-slate-50 px-1.5 py-0.5 rounded">{entry.toolMetadata.cached ? "Cached result" : "Live result"}</span>
                         )}
                       </div>
                     )}
-                    <div className="flex items-center gap-1 text-[11px] text-muted-foreground mt-2">
+                    <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mt-3">
                       <Clock className="h-3 w-3" />
                       <span>{entry.timestamp}</span>
                     </div>
@@ -252,12 +264,12 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
                     ? event.guardrail.decision.replace(/_/g, " ")
                     : undefined;
                   return (
-                    <div key={event.id} className="p-3 rounded-lg border border-border/40 bg-muted/20">
+                    <div key={event.id} className="p-4 rounded-xl border border-slate-200/60 bg-gradient-to-br from-white to-slate-50/50 shadow-xs hover:shadow-soft transition-shadow duration-200">
                       <div className="flex items-start justify-between gap-2">
-                        <div className="flex items-start gap-2">
-                          <div className="mt-0.5">{renderTimelineIcon(event.type)}</div>
+                        <div className="flex items-start gap-2.5">
+                          <div className="mt-0.5 w-7 h-7 rounded-lg bg-slate-100 flex items-center justify-center">{renderTimelineIcon(event.type)}</div>
                           <div>
-                            <p className="text-sm font-medium text-foreground capitalize">
+                            <p className="text-sm font-semibold text-foreground capitalize">
                               {event.type.replace(/_/g, " ")}
                             </p>
                             <p className="text-[11px] text-muted-foreground">
@@ -266,19 +278,19 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
                             </p>
                           </div>
                         </div>
-                        <span className="text-[11px] text-muted-foreground">{event.timestamp}</span>
+                        <span className="text-[10px] text-slate-400 bg-slate-50 px-1.5 py-0.5 rounded">{event.timestamp}</span>
                       </div>
-                      <div className="mt-2 text-[11px] text-muted-foreground space-y-1">
-                        {latency && <div>Latency: {latency}</div>}
+                      <div className="mt-3 text-[11px] text-muted-foreground space-y-1.5">
+                        {latency && <div className="bg-slate-50 inline-block px-1.5 py-0.5 rounded">Latency: {latency}</div>}
                         {event.error && (
-                          <div className="text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
+                          <div className="text-rose-600 bg-rose-50 border border-rose-200/60 rounded-lg px-3 py-2">
                             {event.error}
                           </div>
                         )}
                         {event.guardrail && (
-                          <div className="space-y-1">
+                          <div className="space-y-1.5">
                             {decisionLabel && (
-                              <Badge variant="destructive" className="text-[10px] uppercase tracking-wide">
+                              <Badge variant="destructive" className="text-[10px] uppercase tracking-wider">
                                 {decisionLabel}
                               </Badge>
                             )}
@@ -313,38 +325,40 @@ const HistoryPanel = ({ className }: HistoryPanelProps) => {
             {hasToolEvents ? (
               <div className="space-y-3">
                 {toolEvents.map((event) => (
-                  <div key={event.id} className="p-3 rounded-lg border border-border/40 bg-muted/20">
+                  <div key={event.id} className="p-4 rounded-xl border border-slate-200/60 bg-gradient-to-br from-white to-slate-50/50 shadow-xs hover:shadow-soft transition-shadow duration-200">
                     <div className="flex items-start justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        {event.status === "success" ? (
-                          <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-                        ) : (
-                          <AlertTriangle className="h-4 w-4 text-destructive" />
-                        )}
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-7 h-7 rounded-lg flex items-center justify-center" style={{ backgroundColor: event.status === "success" ? "rgb(236 253 245)" : "rgb(255 241 242)" }}>
+                          {event.status === "success" ? (
+                            <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                          ) : (
+                            <AlertTriangle className="h-4 w-4 text-rose-500" />
+                          )}
+                        </div>
                         <div>
-                          <p className="text-sm font-medium text-foreground break-all">{event.tool}</p>
+                          <p className="text-sm font-semibold text-foreground break-all">{event.tool}</p>
                           {event.resolvedTool && event.resolvedTool !== event.tool && (
                             <p className="text-[11px] text-muted-foreground break-all">→ {event.resolvedTool}</p>
                           )}
                         </div>
                       </div>
-                      <Badge variant={event.status === "success" ? "secondary" : "destructive"}>
+                      <Badge variant={event.status === "success" ? "success" : "destructive"} className="text-[10px]">
                         {event.status === "success" ? "Success" : "Error"}
                       </Badge>
                     </div>
-                    <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-muted-foreground">
-                      <span>{event.timestamp}</span>
+                    <div className="mt-3 flex flex-wrap gap-1.5 text-[11px] text-muted-foreground">
+                      <span className="bg-slate-50 px-1.5 py-0.5 rounded">{event.timestamp}</span>
                       {typeof event.latencyMs === "number" && (
-                        <span>Latency: {event.latencyMs.toFixed(0)} ms</span>
+                        <span className="bg-slate-50 px-1.5 py-0.5 rounded">Latency: {event.latencyMs.toFixed(0)} ms</span>
                       )}
-                      {typeof event.cached === "boolean" && <span>{event.cached ? "Cached" : "Live"}</span>}
-                      {event.composite && <span>Composite flow</span>}
+                      {typeof event.cached === "boolean" && <span className="bg-slate-50 px-1.5 py-0.5 rounded">{event.cached ? "Cached" : "Live"}</span>}
+                      {event.composite && <span className="bg-primary-50 text-primary-600 px-1.5 py-0.5 rounded">Composite flow</span>}
                       {event.payloadKeys && event.payloadKeys.length > 0 && (
-                        <span>Payload: {event.payloadKeys.join(", ")}</span>
+                        <span className="bg-slate-50 px-1.5 py-0.5 rounded">Payload: {event.payloadKeys.join(", ")}</span>
                       )}
                     </div>
                     {event.error && (
-                      <p className="mt-2 text-[11px] text-destructive bg-destructive/10 border border-destructive/30 rounded-md px-2 py-1">
+                      <p className="mt-2 text-[11px] text-rose-600 bg-rose-50 border border-rose-200/60 rounded-lg px-3 py-2">
                         {event.error}
                       </p>
                     )}

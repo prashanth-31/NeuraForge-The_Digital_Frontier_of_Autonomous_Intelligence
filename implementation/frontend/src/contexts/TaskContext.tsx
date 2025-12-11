@@ -16,6 +16,38 @@ type ChatRole = "user" | "assistant" | "system";
 const isChatRoleValue = (value: unknown): value is ChatRole =>
   value === "user" || value === "assistant" || value === "system";
 
+export interface ReasoningStep {
+  step_type: string;
+  thought: string;
+  evidence?: string;
+  confidence?: number;
+  timestamp?: string;
+}
+
+export interface KeyFinding {
+  claim: string;
+  evidence?: string[];
+  confidence?: number;
+  source?: string;
+  contradictions?: string[];
+}
+
+export interface ToolConsideration {
+  tool_name: string;
+  reason?: string;
+  selected?: boolean;
+  rejection_reason?: string;
+}
+
+export interface ReasoningData {
+  reasoning_steps?: ReasoningStep[];
+  key_findings?: KeyFinding[];
+  tools_considered?: ToolConsideration[];
+  uncertainties?: string[];
+  suggested_followup?: string;
+  rationale?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
@@ -27,6 +59,7 @@ export interface ChatMessage {
   confidenceBreakdown?: Record<string, number>;
   toolMetadata?: ToolMetadata;
   metadata?: Record<string, unknown>;
+  reasoning?: ReasoningData;
 }
 
 export interface HistoryEntry {
@@ -82,6 +115,52 @@ export interface LifecycleEvent {
   guardrail?: GuardrailDecisionEvent;
 }
 
+// ────────────────────────────────────────────────────────────────────────────────
+// Agent Thinking Events (NEW)
+// ────────────────────────────────────────────────────────────────────────────────
+
+export type ThinkingEventType =
+  | "agent_thinking"
+  | "agent_planning"
+  | "agent_tool_deciding"
+  | "agent_tool_progress"
+  | "agent_evaluating"
+  | "agent_finding"
+  | "agent_uncertainty"
+  | "agent_collaboration"
+  | "agent_handoff"
+  | "parallel_start"
+  | "parallel_complete"
+  | "replan_triggered";
+
+const isThinkingEventType = (value: string): value is ThinkingEventType =>
+  [
+    "agent_thinking",
+    "agent_planning",
+    "agent_tool_deciding",
+    "agent_tool_progress",
+    "agent_evaluating",
+    "agent_finding",
+    "agent_uncertainty",
+    "agent_collaboration",
+    "agent_handoff",
+    "parallel_start",
+    "parallel_complete",
+    "replan_triggered",
+  ].includes(value);
+
+export interface ThinkingEvent {
+  id: string;
+  eventType: ThinkingEventType;
+  agent: string;
+  thought: string;
+  stepIndex?: number;
+  timestamp: string;
+  metadata?: Record<string, unknown>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────────
+
 export interface TaskStatusMetricsState {
   agentsCompleted: number;
   agentsFailed: number;
@@ -126,6 +205,7 @@ interface TaskContextValue {
   toolEvents: ToolEvent[];
   mcpDiagnostics: MCPDiagnostics | null;
   lifecycleEvents: LifecycleEvent[];
+  thinkingEvents: ThinkingEvent[];
   taskStatus: TaskStatusState | null;
   refreshTaskStatus: (taskId: string) => Promise<void>;
 }
@@ -265,6 +345,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
   const [toolEvents, setToolEvents] = useState<ToolEvent[]>([]);
   const [mcpDiagnostics, setMcpDiagnostics] = useState<MCPDiagnostics | null>(null);
   const [lifecycleEvents, setLifecycleEvents] = useState<LifecycleEvent[]>([]);
+  const [thinkingEvents, setThinkingEvents] = useState<ThinkingEvent[]>([]);
   const [taskStatus, setTaskStatus] = useState<TaskStatusState | null>(null);
   const messagesRef = useRef<ChatMessage[]>([]);
 
@@ -293,6 +374,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
     setToolEvents([]);
     setMcpDiagnostics(null);
     setLifecycleEvents([]);
+    setThinkingEvents([]);
     setTaskStatus(null);
   }, [applyMessages]);
 
@@ -528,6 +610,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       setToolEvents([]);
       setMcpDiagnostics(null);
       setLifecycleEvents([]);
+      setThinkingEvents([]);
       setTaskStatus(null);
 
       try {
@@ -647,6 +730,27 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             return;
           }
 
+          // Handle agent thinking/reasoning events
+          if (isThinkingEventType(eventName)) {
+            const agent = typeof payload.agent === "string" ? payload.agent : "unknown_agent";
+            const thought = typeof payload.thought === "string" ? payload.thought : "";
+            const stepIndex = typeof payload.step_index === "number" ? payload.step_index : undefined;
+            const metadata = isRecord(payload.metadata) ? (payload.metadata as Record<string, unknown>) : undefined;
+
+            const thinkingEvent: ThinkingEvent = {
+              id: randomId(),
+              eventType: eventName,
+              agent,
+              thought,
+              stepIndex,
+              timestamp: formatTimestamp(eventTimestamp),
+              metadata,
+            };
+
+            setThinkingEvents((previous) => [thinkingEvent, ...previous].slice(0, 200));
+            return;
+          }
+
           if (eventName === "agent_started") {
             const agentName = typeof payload.agent === "string" ? payload.agent : undefined;
             const stepId = typeof payload.step_id === "string" ? payload.step_id : undefined;
@@ -742,6 +846,37 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
             const toolMetadata = extractToolMetadata(mergedMetadata);
             const { iso: agentIso, display: agentTimestamp } = resolveTimestamps(eventTimestamp);
 
+            // Extract reasoning data from output
+            const reasoning: ReasoningData = {};
+            if (outputRecord) {
+              if (Array.isArray(outputRecord.reasoning_steps)) {
+                reasoning.reasoning_steps = outputRecord.reasoning_steps as ReasoningStep[];
+              }
+              if (Array.isArray(outputRecord.key_findings)) {
+                reasoning.key_findings = outputRecord.key_findings as KeyFinding[];
+              }
+              if (Array.isArray(outputRecord.tools_considered)) {
+                reasoning.tools_considered = outputRecord.tools_considered as ToolConsideration[];
+              }
+              if (Array.isArray(outputRecord.uncertainties)) {
+                reasoning.uncertainties = outputRecord.uncertainties as string[];
+              }
+              if (typeof outputRecord.suggested_followup === "string") {
+                reasoning.suggested_followup = outputRecord.suggested_followup;
+              }
+              if (typeof outputRecord.rationale === "string") {
+                reasoning.rationale = outputRecord.rationale;
+              }
+            }
+
+            const hasReasoning =
+              (reasoning.reasoning_steps && reasoning.reasoning_steps.length > 0) ||
+              (reasoning.key_findings && reasoning.key_findings.length > 0) ||
+              (reasoning.tools_considered && reasoning.tools_considered.length > 0) ||
+              (reasoning.uncertainties && reasoning.uncertainties.length > 0) ||
+              reasoning.suggested_followup ||
+              reasoning.rationale;
+
             const message: ChatMessage = {
               id: randomId(),
               role: "assistant",
@@ -753,6 +888,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               content: toDisplayString(contentSource),
               timestamp: agentTimestamp,
               isoTimestamp: agentIso,
+              reasoning: hasReasoning ? reasoning : undefined,
             };
 
             if (message.confidenceBreakdown) {
@@ -939,6 +1075,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       toolEvents,
       mcpDiagnostics,
       lifecycleEvents,
+      thinkingEvents,
       taskStatus,
       refreshTaskStatus,
     }),
@@ -954,6 +1091,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
       toolEvents,
       mcpDiagnostics,
       lifecycleEvents,
+      thinkingEvents,
       taskStatus,
       refreshTaskStatus,
     ],

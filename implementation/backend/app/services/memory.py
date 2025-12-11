@@ -442,7 +442,6 @@ class QdrantRepository:
                         "id": vector.payload.get("id"),
                         "vector": vector.vector,
                         "payload": vector.payload,
-                        "score": vector.score,
                     }
                 ],
             )
@@ -471,7 +470,6 @@ class QdrantRepository:
                     "id": vec.payload.get("id"),
                     "vector": vec.vector,
                     "payload": vec.payload,
-                    "score": vec.score,
                 }
                 for vec in vectors
             ]

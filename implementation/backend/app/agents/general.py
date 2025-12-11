@@ -3,10 +3,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..agents.base import AgentContext
+from ..agents.base import AgentContext, ReasoningBuilder
 from ..core.logging import get_logger
 from ..core.metrics import observe_confidence_component
-from ..schemas.agents import AgentCapability, AgentExchange, AgentInput, AgentOutput
+from ..schemas.agents import (
+    AgentCapability,
+    AgentExchange,
+    AgentInput,
+    AgentOutput,
+    ReasoningStepType,
+)
 
 logger = get_logger(name=__name__)
 
@@ -16,9 +22,11 @@ class GeneralistAgent:
     name: str = "general_agent"
     capability: AgentCapability = AgentCapability.GENERAL
     system_prompt: str = (
-        "You are NeuraForge's Generalist Agent. Provide a concise, confident response that triages the "
-        "request, highlights immediate next steps, and captures any clarifying questions. Keep it under "
-        "200 words while sounding professional and action-oriented."
+        "You are NeuraForge's Generalist Agent. Your primary role is to greet users, handle simple questions, "
+        "and route complex work to specialists. IMPORTANT: If prior exchanges show specialist agents (finance_agent, "
+        "research_agent, creative_agent, enterprise_agent) have already provided comprehensive responses, DO NOT "
+        "repeat their work or ask clarifying questions they've already answered. Instead, provide a brief summary "
+        "or acknowledge the specialists have handled the request. Keep responses under 200 words, professional and action-oriented."
     )
     description: str = "First-responder agent that greets users, answers simple prompts, and routes work to specialists."
     tool_preference: list[str] = field(default_factory=list)
@@ -27,11 +35,47 @@ class GeneralistAgent:
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("general_agent_task", task=task.model_dump())
+        
+        # Initialize reasoning builder for tracking thought process
+        reasoning = ReasoningBuilder(agent_name=self.name, context=context)
+        
+        # Step 1: Analyze the incoming request
+        await reasoning.think(
+            f"Received request: '{task.prompt[:100]}...' - analyzing for intent and complexity",
+            step_type=ReasoningStepType.OBSERVATION,
+        )
+        
+        # Step 2: Check for prior context
         context_section = task.context
         if context_section is None and context.context is not None:
+            await reasoning.think(
+                "No immediate context provided, assembling context from memory and retrieval services",
+                step_type=ReasoningStepType.ANALYSIS,
+            )
             bundle = await context.context.build(task=_serialize_agent_input(task), agent=self.name)
             context_section = bundle.as_prompt_section()
+            if context_section:
+                await reasoning.add_finding(
+                    claim="Retrieved relevant context from knowledge base",
+                    evidence=[context_section[:200] + "..."] if len(context_section) > 200 else [context_section],
+                    confidence=0.7,
+                    source="context_assembler",
+                )
 
+        # Step 3: Check for prior exchanges
+        if task.prior_exchanges:
+            await reasoning.think(
+                f"Found {len(task.prior_exchanges)} prior agent exchanges - incorporating into response",
+                step_type=ReasoningStepType.ANALYSIS,
+                evidence=f"Agents involved: {', '.join(set(e.agent for e in task.prior_exchanges))}",
+            )
+
+        # Step 4: Generate response
+        await reasoning.think(
+            "Formulating response using LLM with assembled context and history",
+            step_type=ReasoningStepType.SYNTHESIS,
+        )
+        
         prompt = self._build_prompt(task, context_section=context_section)
         summary = await context.llm.generate(
             prompt=prompt,
@@ -41,6 +85,7 @@ class GeneralistAgent:
 
         await context.memory.store_working_memory(task.task_id, summary)
 
+        # Step 5: Calculate confidence
         evidence_count = len(task.prior_exchanges)
         if context_section:
             evidence_count += 1
@@ -59,6 +104,18 @@ class GeneralistAgent:
             for component, value in confidence_breakdown.items():
                 observe_confidence_component(agent=self.name, component=component, value=value)
 
+        await reasoning.think(
+            f"Calculated confidence score: {confidence:.2f} based on {evidence_count} evidence sources",
+            step_type=ReasoningStepType.EVALUATION,
+            confidence=confidence,
+        )
+
+        # Step 6: Assess if handoff is needed
+        if confidence < 0.5:
+            await reasoning.note_uncertainty(
+                "Low confidence response - may require specialist agent review"
+            )
+        
         metadata: dict[str, Any] = {
             "type": "general_brief",
             "audience": task.metadata.get("audience"),
@@ -74,19 +131,41 @@ class GeneralistAgent:
             confidence=confidence,
             rationale="Initial triage summary prepared without tool usage.",
             metadata=metadata,
+            # Include reasoning transparency
+            reasoning_steps=reasoning.steps,
+            key_findings=reasoning.findings,
+            tools_considered=reasoning.tools_considered,
+            uncertainties=reasoning.uncertainties,
         )
 
     def _build_prompt(self, task: AgentInput, *, context_section: str | None = None) -> str:
         metadata_repr = self._format_metadata(task.metadata)
         history = _format_history(task.prior_exchanges)
         retrieved = context_section or "(no retrieved context)"
-        return (
-            f"User prompt:\n{task.prompt}\n\n"
-            f"Metadata:\n{metadata_repr}\n\n"
-            f"Prior agent outputs:\n{history}\n\n"
-            f"Retrieved context:\n{retrieved}\n\n"
-            "Answer directly when possible, flag missing info, and suggest the next specialist step if needed."
-        )
+        
+        # Check if specialists have already handled this
+        specialist_agents = {"finance_agent", "research_agent", "creative_agent", "enterprise_agent"}
+        specialist_responses = [ex for ex in task.prior_exchanges if ex.agent in specialist_agents]
+        
+        if specialist_responses:
+            # Specialists have already responded - don't ask for clarification
+            return (
+                f"User prompt:\n{task.prompt}\n\n"
+                f"Metadata:\n{metadata_repr}\n\n"
+                f"Prior specialist responses:\n{history}\n\n"
+                f"Retrieved context:\n{retrieved}\n\n"
+                "IMPORTANT: Specialist agents have already provided comprehensive responses above. "
+                "Do NOT ask clarifying questions or repeat their work. Either provide a brief acknowledgment "
+                "that the request has been handled, or synthesize key points if helpful. Keep it very brief."
+            )
+        else:
+            return (
+                f"User prompt:\n{task.prompt}\n\n"
+                f"Metadata:\n{metadata_repr}\n\n"
+                f"Prior agent outputs:\n{history}\n\n"
+                f"Retrieved context:\n{retrieved}\n\n"
+                "Answer directly when possible, flag missing info, and suggest the next specialist step if needed."
+            )
 
     @staticmethod
     def _format_metadata(metadata: dict[str, Any]) -> str:

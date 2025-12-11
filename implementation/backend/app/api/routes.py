@@ -19,6 +19,7 @@ from ..agents.enterprise import EnterpriseAgent
 from ..agents.finance import FinanceAgent
 from ..agents.general import GeneralistAgent
 from ..agents.research import ResearchAgent
+from ..schemas.agents import ThinkingEvent
 from ..core.config import Settings, get_settings
 from ..core.logging import get_logger
 from ..core.rate_limit import rate_limit_dependency
@@ -767,7 +768,9 @@ async def _build_orchestration_pipeline(
         context_contract = ContextAssemblyContract(assembler=context_assembler, stage_overrides=overrides)
 
     meta_agent = None
-    if settings.meta_agent.enabled and settings.environment == "production":
+    # Enable meta_agent for synthesis in all environments when enabled
+    # The meta_agent synthesizes outputs from multiple agents into a coherent response
+    if settings.meta_agent.enabled:
         meta_agent = MetaAgent(
             llm_service=llm_service,
             settings=settings.meta_agent,
@@ -1296,6 +1299,20 @@ async def submit_task_stream(
                                     event_payload.setdefault("run_id", active_run_id)
                                 await emit("tool_invoked", event_payload)
 
+                            async def thinking_emitter(event: ThinkingEvent) -> None:
+                                """Emit agent thinking/reasoning events to the SSE stream."""
+                                event_payload = {
+                                    "task_id": task_id,
+                                    "timestamp": _now_iso(),
+                                    "agent": event.agent,
+                                    "thought": event.thought,
+                                    "step_index": event.step_index,
+                                    "metadata": event.metadata,
+                                }
+                                if active_run_id:
+                                    event_payload["run_id"] = active_run_id
+                                await emit(event.event_type.value, event_payload)
+
                             async def run_agents(active_tools: Any | None) -> dict[str, Any]:
                                 agent_context = AgentContext(
                                     memory=memory,
@@ -1303,6 +1320,7 @@ async def submit_task_stream(
                                     context=context_assembler,
                                     tools=active_tools,
                                     scorer=ConfidenceScorer(settings.scoring),
+                                    thinking_emitter=thinking_emitter,
                                 )
                                 return await orchestrator.route_task(state, context=agent_context, progress_cb=progress)
 

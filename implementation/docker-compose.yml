@@ -71,7 +71,7 @@ services:
       retries: 5
 
   qdrant:
-    image: qdrant/qdrant:v1.12.3
+    image: qdrant/qdrant:v1.15.1
     container_name: neuraforge-qdrant
     ports:
       - "16333:6333"

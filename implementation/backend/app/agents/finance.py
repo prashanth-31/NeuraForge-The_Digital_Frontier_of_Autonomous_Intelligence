@@ -27,6 +27,9 @@ class FinanceAgent:
         " next steps using available context. Respond with structured bullet points. When live tool"
         " metrics are available, treat them as the source of truth, cite their timestamps, and avoid"
         " repeating stale historical figures unless you explicitly flag them as legacy context."
+        " The finance tools provide real-time quotes, fundamentals data (PE ratio, revenue, EPS, etc.),"
+        " and up to 30 days of historical daily prices. Use historical data to describe price trends,"
+        " calculate returns, and provide context on recent price movements."
     )
     description: str = "Performs financial analysis, forecasting, and headline metric synthesis."
     tool_preference: list[str] = field(default_factory=lambda: ["finance.snapshot"])
@@ -655,6 +658,10 @@ class FinanceAgent:
             fundamentals_summary = self._summarize_fundamentals(metric.get("fundamentals"), metric.get("currency"))
             if fundamentals_summary:
                 lines.append(f"  {fundamentals_summary}")
+            # Add historical price summary
+            historical_summary = self._summarize_historical_prices(metric.get("historical_prices"), metric.get("currency"))
+            if historical_summary:
+                lines.append(f"  {historical_summary}")
         return "\n".join(lines)
 
     def _format_tool_json(self, tool_result: ToolInvocationResult | None) -> str:
@@ -815,6 +822,63 @@ class FinanceAgent:
                 parts.append("Guidance: " + "; ".join(guidance_parts))
 
         return "; ".join(parts)
+
+    def _summarize_historical_prices(self, historical_prices: Any, currency: str | None) -> str:
+        """Summarize historical price data for the LLM context."""
+        if not isinstance(historical_prices, list) or not historical_prices:
+            return ""
+        
+        currency_str = currency or "USD"
+        valid_prices: list[tuple[str, float]] = []
+        
+        for entry in historical_prices:
+            if not isinstance(entry, dict):
+                continue
+            date = entry.get("date")
+            close = entry.get("close") or entry.get("adjusted_close")
+            if date and close is not None:
+                try:
+                    valid_prices.append((str(date), float(close)))
+                except (TypeError, ValueError):
+                    continue
+        
+        if len(valid_prices) < 2:
+            return ""
+        
+        # Sort by date (most recent first, should already be sorted)
+        valid_prices.sort(key=lambda x: x[0], reverse=True)
+        
+        latest_date, latest_price = valid_prices[0]
+        oldest_date, oldest_price = valid_prices[-1]
+        
+        # Calculate period return
+        period_change = latest_price - oldest_price
+        period_change_pct = (period_change / oldest_price * 100) if oldest_price else 0.0
+        
+        # Find high and low in period
+        all_prices = [p[1] for p in valid_prices]
+        period_high = max(all_prices)
+        period_low = min(all_prices)
+        
+        # Recent trend (last 5 days vs previous 5 days)
+        trend_desc = ""
+        if len(valid_prices) >= 10:
+            recent_5 = sum([p[1] for p in valid_prices[:5]]) / 5
+            prev_5 = sum([p[1] for p in valid_prices[5:10]]) / 5
+            if recent_5 > prev_5 * 1.01:
+                trend_desc = ", trending up"
+            elif recent_5 < prev_5 * 0.99:
+                trend_desc = ", trending down"
+            else:
+                trend_desc = ", relatively flat"
+        
+        return (
+            f"Historical ({oldest_date} to {latest_date}): "
+            f"{len(valid_prices)} days, "
+            f"{self._format_price(period_change, currency_str, prefix='Δ')} ({period_change_pct:+.1f}%), "
+            f"range {self._format_price(period_low, currency_str)}-{self._format_price(period_high, currency_str)}"
+            f"{trend_desc}"
+        )
 
     @staticmethod
     def _format_amount(value: Any, currency: str | None) -> str:
