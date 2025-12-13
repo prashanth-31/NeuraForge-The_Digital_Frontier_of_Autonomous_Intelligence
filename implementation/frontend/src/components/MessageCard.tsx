@@ -430,21 +430,7 @@ const MessageCard = ({
           </ReactMarkdown>
         </div>
 
-        {/* Confidence Breakdown */}
-        {breakdownEntries && (
-          <div className="mt-4 flex flex-wrap gap-2">
-            {breakdownEntries.map(([key, value]) => (
-              <span
-                key={key}
-                className="text-[10px] uppercase tracking-wider font-medium bg-white/80 border border-slate-200 px-2.5 py-1 rounded-lg text-slate-600 shadow-xs"
-              >
-                {`${key.replace(/_/g, " ")}: ${(value * 100).toFixed(0)}%`}
-              </span>
-            ))}
-          </div>
-        )}
-
-        {/* Tool Metadata */}
+        {/* Tool Metadata - only show tool name and latency, hide debug info */}
         {toolMetadata && (
           <div className="mt-3 flex flex-wrap items-center gap-3 text-[11px] text-muted-foreground">
             {toolMetadata.name && (
@@ -473,6 +459,25 @@ const MessageCard = ({
         {/* Expandable Reasoning Section */}
         {hasReasoning && isExpanded && (
           <div className="mt-4 pt-4 border-t border-slate-200/60 space-y-4">
+            {/* Confidence Breakdown - only visible in expanded view */}
+            {breakdownEntries && (
+              <div className="space-y-2">
+                <h4 className="text-xs font-semibold text-slate-600 uppercase tracking-wider">
+                  Confidence Breakdown
+                </h4>
+                <div className="flex flex-wrap gap-2">
+                  {breakdownEntries.map(([key, value]) => (
+                    <span
+                      key={key}
+                      className="text-[10px] uppercase tracking-wider font-medium bg-white/80 border border-slate-200 px-2.5 py-1 rounded-lg text-slate-600 shadow-xs"
+                    >
+                      {`${key.replace(/_/g, " ")}: ${(value * 100).toFixed(0)}%`}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            
             {reasoning.rationale && (
               <div className="text-xs text-slate-600 italic bg-slate-50 p-2.5 rounded-lg border border-slate-100">
                 <span className="font-medium not-italic">Rationale:</span> {reasoning.rationale}

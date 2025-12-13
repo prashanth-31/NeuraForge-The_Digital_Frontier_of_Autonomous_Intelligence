@@ -1,22 +1,56 @@
 {
     "general": {
-        "description": "Handles broad questions, clarifications, and triage before engaging specialized agents.",
-        "dependencies": []
+        "description": "FIRST CHOICE for: greetings ('hi','hello','hey'), capability questions ('what can you do'), simple explanations ('explain X', 'how does X work'), unit conversions, basic calculations. Does NOT need external tools - handles conversational tasks directly.",
+        "keywords": ["hi", "hello", "help", "what can you do", "explain", "how to", "convert", "calculate"],
+        "negative_keywords": ["research", "papers", "stock", "write a", "create"],
+        "dependencies": [],
+        "tools": {
+            "memory.retrieve": "Retrieve previous conversation context - use for follow-up questions"
+        }
     },
     "research": {
-        "description": "Investigates source material, synthesizes findings with citations, and extracts key signals from noisy corpora.",
-        "dependencies": []
+        "description": "For EXTERNAL INFORMATION RETRIEVAL: academic papers (arxiv), web search (news/current events), Wikipedia (factual/historical). ⛔ NEVER USE FOR WRITING TASKS - use creative_agent instead!",
+        "keywords": ["research", "papers", "academic", "scientific", "search for", "find information", "news", "history of"],
+        "negative_keywords": ["write", "create", "poem", "story", "explain", "stock price", "ticker", "brainstorm", "slogan", "blog"],
+        "dependencies": [],
+        "tools": {
+            "research.arxiv": "ONLY FOR: 'papers', 'academic', 'scientific literature', 'preprints', 'journal articles'",
+            "research.search": "FOR: news, current events, recent developments, general web info",
+            "research.wikipedia": "FOR: 'history of', 'what is', definitions, factual knowledge",
+            "research.summarizer": "FOR: 'summarize', 'key points', 'tldr' - text condensation",
+            "research.vector_search": "FOR: searching previously stored documents"
+        }
     },
     "finance": {
-        "description": "Fetches real-time stock quotes, market data, and performs quantitative analysis. Only use when actual market data is needed.",
-        "dependencies": []
+        "description": "ONLY for REAL MARKET DATA: stock prices, ticker symbols ($TSLA, AAPL), P/E ratios, earnings reports, market trends with actual data. Do NOT use for general info about finance concepts.",
+        "keywords": ["stock price", "ticker", "$", "P/E ratio", "earnings", "market data", "TSLA", "AAPL", "NVDA", "shares"],
+        "negative_keywords": ["research papers", "academic", "explain", "write about", "history of stocks"],
+        "dependencies": [],
+        "tools": {
+            "finance.snapshot": "Real-time stock quotes and market data - use for current prices",
+            "finance.analytics": "Financial ratio calculations - use for P/E, EPS analysis",
+            "finance.news": "Stock-related news and sentiment"
+        }
     },
     "creative": {
-        "description": "Writes documents, proposals, narratives, and transforms insights into audience-tailored storytelling artifacts.",
-        "dependencies": []
+        "description": "🎨 FOR ALL WRITING/CONTENT CREATION: poems, stories, blog posts, slogans, taglines, marketing copy, brainstorming ideas. ⚡ PRIORITY: If user says 'write', 'create', 'compose', 'draft', 'brainstorm' → USE THIS AGENT!",
+        "keywords": ["write", "poem", "story", "creative", "slogan", "tagline", "blog post", "marketing", "brainstorm", "ideas", "compose", "draft", "lyrics", "song"],
+        "negative_keywords": ["research papers", "stock price", "explain how", "what is"],
+        "dependencies": [],
+        "tools": {
+            "creative.tonecheck": "PRIMARY TOOL - Use for ALL writing: poems, stories, slogans, blogs, marketing copy, brainstorming",
+            "creative.stylizer": "Transform text into different styles (formal, casual, poetic)"
+        }
     },
     "enterprise": {
-        "description": "Produces executive-ready recommendations, business proposals, policy-aware action plans, and cross-functional alignment guidance.",
-        "dependencies": ["creative"]
+        "description": "For BUSINESS DOCUMENTS: proposals, strategy documents, SWOT analysis, quarterly reports, executive summaries, policy documents. Professional business context.",
+        "keywords": ["business proposal", "strategy", "SWOT", "quarterly report", "executive summary", "policy", "business plan"],
+        "negative_keywords": ["poem", "story", "stock price", "academic papers"],
+        "dependencies": ["creative"],
+        "tools": {
+            "enterprise.playbook": "Generate business playbooks, strategies, operational plans",
+            "enterprise.policy": "Policy and compliance document generation",
+            "enterprise.report": "Business reports and executive summaries"
+        }
     }
 }

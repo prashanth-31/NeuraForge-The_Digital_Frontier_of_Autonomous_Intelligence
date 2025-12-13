@@ -47,6 +47,14 @@ class OllamaSettings(BaseModel):
     host: str = Field("http://localhost", description="Base URL where Ollama is running.")
     port: int = Field(11434, ge=1, le=65535)
     model: str = Field("llama3", description="Default model served via Ollama.")
+    num_ctx: int = Field(
+        8192,
+        ge=256,
+        description=(
+            "Default context window (num_ctx) to request from Ollama. "
+            "Keeping this modest avoids large KV-cache allocations that can crash the runner."
+        ),
+    )
 
 
 class PlannerLLMSettings(BaseModel):

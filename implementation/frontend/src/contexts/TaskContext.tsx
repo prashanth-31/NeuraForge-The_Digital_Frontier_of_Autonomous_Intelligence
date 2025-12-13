@@ -841,6 +841,34 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
                   : undefined;
 
             const contentSource = outputRecord?.content ?? outputRecord?.summary ?? outputRaw ?? payload.output;
+            
+            // Skip creating a message if there's no actual content
+            // This can happen if the agent failed silently or output wasn't recorded
+            const contentText = toDisplayString(contentSource);
+            if (!contentText || contentText.trim() === "") {
+              console.warn("[TaskContext] agent_completed with empty content, skipping message", {
+                agent: payload.agent,
+                hasOutput: !!payload.output,
+                hasOutputRecord: !!outputRecord,
+              });
+              // Still record the lifecycle event
+              appendLifecycleEvent({
+                id: randomId(),
+                type: "agent_completed",
+                agent: typeof payload.agent === "string" ? payload.agent : undefined,
+                timestamp: resolveTimestamps(eventTimestamp).display,
+                latencyMs:
+                  typeof payload.latency_ms === "number"
+                    ? payload.latency_ms
+                    : typeof payload.latency === "number"
+                      ? payload.latency * 1000
+                      : undefined,
+                stepId: typeof payload.step_id === "string" ? payload.step_id : undefined,
+                details: "No output content",
+              });
+              return;
+            }
+            
             const agentName = typeof payload.agent === "string" ? payload.agent : undefined;
             const confidenceBreakdown = extractConfidenceBreakdown(mergedMetadata);
             const toolMetadata = extractToolMetadata(mergedMetadata);
@@ -885,7 +913,7 @@ export const TaskProvider = ({ children }: PropsWithChildren) => {
               confidenceBreakdown,
               toolMetadata,
               metadata: mergedMetadata,
-              content: toDisplayString(contentSource),
+              content: contentText,  // Use pre-computed contentText
               timestamp: agentTimestamp,
               isoTimestamp: agentIso,
               reasoning: hasReasoning ? reasoning : undefined,

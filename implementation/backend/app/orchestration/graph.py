@@ -1,5 +1,6 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
+import asyncio
 import copy
 import math
 import time
@@ -32,6 +33,7 @@ from ..core.metrics import (
     record_sla_event,
 )
 from ..schemas.agents import AgentInput, AgentOutput
+from ..services.scoring import OutputQualityScorer
 from ..tools.exceptions import ToolError, ToolPolicyViolationError
 from ..tools.registry import normalize_tool_name, tool_registry
 from .context import ContextAssemblyContract, ContextSnapshot, ContextSnapshotStore, ContextStage
@@ -185,6 +187,11 @@ class _ToolSession:
             "planner_reason": self.planner_reason,
         }
 
+    @property
+    def used_tools(self) -> list[str]:
+        """Return list of successfully used tools."""
+        return [tool for tool, _ in self.invocations]
+
 
 class _ToolProxy:
     def __init__(self, session: _ToolSession) -> None:
@@ -229,6 +236,7 @@ class Orchestrator:
         orchestration_planner: LLMOrchestrationPlanner | None = None,
         planning_settings: PlanningSettings | None = None,
         agent_router: DynamicAgentRouter | None = None,
+        output_quality_scorer: OutputQualityScorer | None = None,
     ):
         self.agents = agents
         self._state_store = state_store
@@ -258,6 +266,7 @@ class Orchestrator:
         self._agent_router = agent_router
         self._low_confidence_threshold = self._resolve_low_confidence_threshold()
         self._agent_tool_catalog: dict[str, set[str]] = {}
+        self._output_quality_scorer = output_quality_scorer or OutputQualityScorer()
 
     def _reset_plan_state(self) -> None:
         self._active_plan_steps = None
@@ -330,6 +339,456 @@ class Orchestrator:
             return True
         
         return False
+
+    async def _try_dynamic_replan(
+        self,
+        state: dict[str, Any],
+        failed_agent: BaseAgent,
+        error: Exception,
+        context: AgentContext,
+        run_tracker: _RunTracker | None,
+        progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None,
+        roster_index: dict[str, BaseAgent],
+    ) -> dict[str, Any] | None:
+        """
+        Attempt dynamic re-planning after an agent failure.
+        
+        Tries to find an alternative agent that can handle the task.
+        Returns recovery info if successful, None if re-planning failed.
+        """
+        # Don't re-plan for safety limit violations or tool policy errors
+        if isinstance(error, (SafetyLimitExceeded, ToolFirstPolicyViolation)):
+            logger.info(
+                "dynamic_replan_skipped",
+                task=state.get("id"),
+                failed_agent=failed_agent.name,
+                reason="non_recoverable_error",
+                error_type=type(error).__name__,
+            )
+            return None
+        
+        # Check if we have a fallback agent defined
+        fallback_name = getattr(failed_agent, "fallback_agent", None)
+        if fallback_name and fallback_name in roster_index:
+            fallback_agent = roster_index[fallback_name]
+            
+            logger.info(
+                "dynamic_replan_attempting",
+                task=state.get("id"),
+                failed_agent=failed_agent.name,
+                fallback_agent=fallback_name,
+            )
+            
+            await self._record_event(
+                run_tracker,
+                "dynamic_replan_started",
+                agent=failed_agent.name,
+                payload={
+                    "failed_error": str(error),
+                    "fallback_agent": fallback_name,
+                },
+            )
+            
+            await self._notify(
+                progress_cb,
+                self._ensure_run_id(
+                    run_tracker,
+                    {
+                        "event": "dynamic_replan",
+                        "failed_agent": failed_agent.name,
+                        "recovery_agent": fallback_name,
+                        "task_id": state.get("id"),
+                        "error": str(error),
+                    },
+                ),
+            )
+            
+            # Try to execute the fallback agent
+            try:
+                tool_session = self._start_tool_session(
+                    agent=fallback_agent,
+                    base_context=context,
+                    plan_step=None,
+                    run_tracker=run_tracker,
+                )
+                agent_context = self._clone_context(
+                    context,
+                    tool_session,
+                    None,
+                    agent_name=fallback_agent.name,
+                )
+                agent_input = await self._prepare_agent_input(
+                    state, agent=fallback_agent, context=agent_context
+                )
+                result = await fallback_agent.handle(agent_input, context=agent_context)
+                self._record_output(state, agent=fallback_agent, result=result, planner_step=None)
+                
+                # Get the latest output to include in the agent_completed event
+                latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
+                
+                logger.info(
+                    "dynamic_replan_completed",
+                    task=state.get("id"),
+                    failed_agent=failed_agent.name,
+                    recovery_agent=fallback_name,
+                )
+                
+                await self._record_event(
+                    run_tracker,
+                    "dynamic_replan_success",
+                    agent=fallback_name,
+                    payload={
+                        "original_failed_agent": failed_agent.name,
+                        "original_error": str(error),
+                    },
+                )
+                
+                # Send agent_completed event for the recovery agent
+                await self._notify(
+                    progress_cb,
+                    self._ensure_run_id(
+                        run_tracker,
+                        {
+                            "event": "agent_completed",
+                            "agent": fallback_name,
+                            "task_id": state.get("id"),
+                            "output": latest_output,
+                            "is_recovery": True,
+                            "original_failed_agent": failed_agent.name,
+                        },
+                    ),
+                )
+                
+                return {
+                    "recovery_agent": fallback_name,
+                    "recovery_result": result,
+                }
+            except Exception as fallback_exc:
+                logger.warning(
+                    "dynamic_replan_fallback_failed",
+                    task=state.get("id"),
+                    failed_agent=failed_agent.name,
+                    fallback_agent=fallback_name,
+                    error=str(fallback_exc),
+                )
+                return None
+        
+        # No fallback agent available
+        logger.info(
+            "dynamic_replan_no_fallback",
+            task=state.get("id"),
+            failed_agent=failed_agent.name,
+        )
+        return None
+
+    async def _handle_collaboration(
+        self,
+        target_agent_name: str,
+        request: str,
+        context_data: dict[str, Any],
+        *,
+        base_context: AgentContext,
+        run_tracker: _RunTracker | None,
+        roster_index: dict[str, BaseAgent],
+        state: dict[str, Any],
+    ) -> AgentOutput:
+        """
+        Handle a collaboration request from one agent to another.
+        
+        This is called when an agent needs help from a specialist during execution.
+        It runs the target agent synchronously and returns its output.
+        """
+        if target_agent_name not in roster_index:
+            raise ValueError(f"Unknown collaboration target: {target_agent_name}")
+        
+        target_agent = roster_index[target_agent_name]
+        
+        logger.info(
+            "agent_collaboration_request",
+            target_agent=target_agent_name,
+            request_preview=request[:100],
+            task_id=state.get("id"),
+        )
+        
+        await self._record_event(
+            run_tracker,
+            "collaboration_request",
+            agent=target_agent_name,
+            payload={
+                "request": request,
+                "context_data": context_data,
+            },
+        )
+        
+        # Create a tool session for the target agent
+        tool_session = self._start_tool_session(
+            agent=target_agent,
+            base_context=base_context,
+            plan_step=None,
+            run_tracker=run_tracker,
+        )
+        
+        # Clone context for the target agent (without collaboration handler to prevent recursion)
+        collab_context = AgentContext(
+            memory=base_context.memory,
+            llm=base_context.llm,
+            context=base_context.context,
+            tools=tool_session.proxy if tool_session else base_context.tools,
+            scorer=base_context.scorer,
+            planned_tools=None,  # Let the agent decide
+            fallback_tools=None,
+            planner_reason=f"Collaboration request: {request[:200]}",
+            thinking_emitter=base_context.thinking_emitter,
+            _tool_chain_executor=base_context._tool_chain_executor,
+            _collaboration_handler=None,  # Prevent nested collaboration
+        )
+        
+        # Create agent input from the collaboration request
+        collab_input = AgentInput(
+            request=request,
+            context=context_data.get("context", {}),
+            routing=context_data.get("routing", {}),
+            session_id=state.get("session_id"),
+            conversation_id=context_data.get("conversation_id"),
+        )
+        
+        # Execute the target agent
+        result = await target_agent.handle(collab_input, context=collab_context)
+        
+        logger.info(
+            "agent_collaboration_completed",
+            target_agent=target_agent_name,
+            confidence=result.confidence,
+        )
+        
+        await self._record_event(
+            run_tracker,
+            "collaboration_completed",
+            agent=target_agent_name,
+            payload={
+                "confidence": result.confidence,
+                "response_preview": (getattr(result, "response", None) or result.summary or "")[:200],
+            },
+        )
+        
+        return result
+
+    async def _execute_single_agent(
+        self,
+        state: dict[str, Any],
+        step_index: int,
+        plan_step: PlannedAgentStep | None,
+        planned_agent: BaseAgent,
+        context: AgentContext,
+        run_tracker: _RunTracker | None,
+        progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None,
+        roster_index: dict[str, BaseAgent],
+        task_id: str,
+        using_plan_steps: bool,
+    ) -> dict[str, Any]:
+        """
+        Execute a single agent in the plan (used for parallel execution).
+        
+        Returns a dict with execution results:
+        - early_exit_skipped: set of indices to skip due to early exit
+        - agent: name of the executed agent
+        - success: whether execution succeeded
+        """
+        task = state
+        executed_agent = planned_agent
+        resolved_step = plan_step
+        fallback_agent: BaseAgent | None = None
+        fallback_reason: str | None = None
+        step_router_metadata: dict[str, Any] | None = None
+        step_confidence = 1.0
+        
+        if plan_step is not None:
+            step_confidence = self._coerce_plan_confidence(getattr(plan_step, "confidence", 1.0))
+            plan_step.confidence = step_confidence
+            
+            if self._is_low_confidence(step_confidence):
+                exclude = {plan_step.agent}
+                router_candidate, router_meta = await self._router_pick_agent(
+                    task,
+                    list(roster_index.values()),
+                    exclude=exclude,
+                )
+                candidate = router_candidate or roster_index.get("general_agent")
+                if candidate is not None and candidate.name != planned_agent.name:
+                    fallback_agent = candidate
+                    fallback_reason = (
+                        f"Planner confidence {step_confidence:.2f} below threshold "
+                        f"{self._low_confidence_threshold:.2f}; rerouting to {candidate.name}."
+                    )
+                    executed_agent = candidate
+                    resolved_step = PlannedAgentStep(
+                        agent=candidate.name,
+                        tools=[],
+                        fallback_tools=list(plan_step.fallback_tools),
+                        reason=(
+                            f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}"
+                        ).strip(),
+                        confidence=step_confidence,
+                    )
+                    step_router_metadata = router_meta if router_candidate is not None else None
+        
+        step_id = f"step_{step_index}"
+        step_context = resolved_step
+        step_metadata = self._build_planner_step_metadata(
+            index=step_index,
+            planned_step=plan_step,
+            resolved_step=resolved_step,
+            executed_agent=executed_agent,
+            fallback_agent=fallback_agent,
+            fallback_reason=fallback_reason,
+            router_metadata=step_router_metadata,
+        )
+        event_step_metadata = step_metadata if using_plan_steps else None
+        
+        # Check early exit
+        if self._should_early_exit(step_index, plan_step, state):
+            return {"early_exit_skipped": {step_index}, "agent": executed_agent.name, "success": True}
+        
+        await self._notify(
+            progress_cb,
+            self._ensure_run_id(
+                run_tracker,
+                {
+                    "event": "agent_started",
+                    "agent": executed_agent.name,
+                    "task_id": task.get("id"),
+                    "step_id": step_id,
+                    "planner_step": event_step_metadata,
+                },
+            ),
+        )
+        increment_agent_event(agent=executed_agent.name, event="started")
+        logger.info("agent_started", agent=executed_agent.name, task=task.get("id"))
+        start_time = time.perf_counter()
+        
+        await self._record_lifecycle(
+            run_tracker,
+            task_id=task_id,
+            step_id=step_id,
+            event_type="agent_started",
+            status=LifecycleStatus.IN_PROGRESS,
+            agent=executed_agent.name,
+        )
+        
+        try:
+            tool_session = self._start_tool_session(
+                agent=executed_agent,
+                base_context=context,
+                plan_step=step_context,
+                run_tracker=run_tracker,
+            )
+            
+            # Build collaboration handler for this agent
+            async def collab_handler(target: str, request: str, ctx_data: dict[str, Any]) -> AgentOutput:
+                return await self._handle_collaboration(
+                    target_agent_name=target,
+                    request=request,
+                    context_data=ctx_data,
+                    base_context=context,
+                    run_tracker=run_tracker,
+                    roster_index=roster_index,
+                    state=state,
+                )
+            
+            agent_context = self._clone_context(
+                context,
+                tool_session,
+                step_context,
+                agent_name=executed_agent.name,
+                collaboration_handler=collab_handler,
+            )
+            agent_input = await self._prepare_agent_input(state, agent=executed_agent, context=agent_context)
+            result = await executed_agent.handle(agent_input, context=agent_context)
+            
+            # Evaluate output quality
+            tools_used = list(tool_session.used_tools) if tool_session else None
+            tools_expected = list(plan_step.tools) if plan_step and plan_step.tools else None
+            quality_acceptable, quality_info = await self._evaluate_output_quality(
+                state=state,
+                agent=executed_agent,
+                result=result,
+                tools_used=tools_used,
+                tools_expected=tools_expected,
+                run_tracker=run_tracker,
+                progress_cb=progress_cb,
+            )
+            
+            # Add quality info to result metadata
+            if hasattr(result, 'metadata') and isinstance(result.metadata, dict):
+                result.metadata["quality_score"] = quality_info.get("score")
+                result.metadata["quality_breakdown"] = quality_info.get("breakdown")
+            
+            self._record_output(state, agent=executed_agent, result=result, planner_step=step_metadata)
+            
+            await self._enforce_tool_first_policy(
+                tool_session,
+                agent=executed_agent,
+                state=state,
+                run_tracker=run_tracker,
+                progress_cb=progress_cb,
+            )
+            
+            duration = time.perf_counter() - start_time
+            observe_agent_latency(agent=executed_agent.name, latency=duration)
+            increment_agent_event(agent=executed_agent.name, event="completed")
+            
+            await self._record_lifecycle(
+                run_tracker,
+                task_id=task_id,
+                step_id=step_id,
+                event_type="agent_completed",
+                status=LifecycleStatus.COMPLETED,
+                agent=executed_agent.name,
+                latency_ms=duration * 1000,
+            )
+            
+            # Get the latest output to include in the agent_completed event
+            latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
+            
+            await self._notify(
+                progress_cb,
+                self._ensure_run_id(
+                    run_tracker,
+                    {
+                        "event": "agent_completed",
+                        "agent": executed_agent.name,
+                        "task_id": task.get("id"),
+                        "step_id": step_id,
+                        "planner_step": event_step_metadata,
+                        "latency_ms": duration * 1000,
+                        "output": latest_output,
+                    },
+                ),
+            )
+            
+            return {"early_exit_skipped": set(), "agent": executed_agent.name, "success": True}
+            
+        except Exception as exc:
+            duration = time.perf_counter() - start_time
+            observe_agent_latency(agent=executed_agent.name, latency=duration)
+            increment_agent_event(agent=executed_agent.name, event="failed")
+            
+            # Try dynamic re-planning
+            replan_result = await self._try_dynamic_replan(
+                state=state,
+                failed_agent=executed_agent,
+                error=exc,
+                context=context,
+                run_tracker=run_tracker,
+                progress_cb=progress_cb,
+                roster_index=roster_index,
+            )
+            
+            if replan_result is not None:
+                return {"early_exit_skipped": set(), "agent": executed_agent.name, "success": True}
+            
+            # Re-raise the exception to be caught by the parallel execution handler
+            raise
 
     def _begin_run(self, run_tracker: _RunTracker | None, *, task: Mapping[str, Any]) -> _RunTracker:
         tracker = run_tracker
@@ -668,6 +1127,7 @@ class Orchestrator:
         plan_step: PlannedAgentStep | None,
         *,
         agent_name: str,
+        collaboration_handler: Callable[[str, str, dict[str, Any]], Awaitable[AgentOutput]] | None = None,
     ) -> AgentContext:
         planned_list = None
         fallback_list = None
@@ -692,6 +1152,9 @@ class Orchestrator:
             planned_tools=planned_list,
             fallback_tools=fallback_list,
             planner_reason=planner_reason,
+            thinking_emitter=base_context.thinking_emitter,
+            _tool_chain_executor=base_context._tool_chain_executor,
+            _collaboration_handler=collaboration_handler,
         )
 
     def _register_abort(self, tracker: _RunTracker | None, *, reason: str) -> None:
@@ -1181,334 +1644,487 @@ class Orchestrator:
 
             # Track indices to skip due to early exit
             early_exit_skipped_indices: set[int] = set()
-
-            for step_index, plan_step, planned_agent in execution_plan:
-                # Skip this step if it was marked for early exit
-                if step_index in early_exit_skipped_indices:
+            
+            # Group steps by parallel_group for concurrent execution
+            parallel_groups: dict[int | None, list[tuple[int, PlannedAgentStep | None, BaseAgent]]] = {}
+            for step_info in execution_plan:
+                step_index, plan_step, planned_agent = step_info
+                group_id = getattr(plan_step, "parallel_group", None) if plan_step else None
+                parallel_groups.setdefault(group_id, []).append(step_info)
+            
+            # Track completed agents for dependency checking
+            completed_agents: set[str] = set()
+            
+            # Process each group
+            sorted_group_ids = sorted(
+                [g for g in parallel_groups.keys() if g is not None],
+                key=lambda x: x if x is not None else float('inf')
+            )
+            # Add None group at the end (non-parallelizable steps)
+            if None in parallel_groups:
+                sorted_group_ids.append(None)
+            
+            for group_id in sorted_group_ids:
+                group_steps = parallel_groups[group_id]
+                
+                # Filter out skipped steps and SORT BY INDEX to ensure correct order
+                active_steps = sorted(
+                    [(idx, step, agent) for idx, step, agent in group_steps
+                     if idx not in early_exit_skipped_indices],
+                    key=lambda x: x[0]  # Sort by step_index
+                )
+                
+                if not active_steps:
                     continue
                 
-                self._enforce_run_time_budget(run_tracker)
-                executed_agent = planned_agent
-                resolved_step = plan_step
-                fallback_agent: BaseAgent | None = None
-                fallback_reason: str | None = None
-                step_router_metadata: dict[str, Any] | None = None
-                step_confidence = 1.0
-                if plan_step is not None:
-                    step_confidence = self._coerce_plan_confidence(getattr(plan_step, "confidence", 1.0))
-                    plan_step.confidence = step_confidence
-                    if self._is_low_confidence(step_confidence):
-                        exclude = {plan_step.agent}
-                        router_candidate, router_meta = await self._router_pick_agent(
-                            task,
-                            list(roster_index.values()),
-                            exclude=exclude,
+                # Check if all dependencies are met for this group
+                if group_id is not None and len(active_steps) > 1:
+                    # Run in parallel
+                    logger.info(
+                        "parallel_execution_started",
+                        task=task.get("id"),
+                        group_id=group_id,
+                        agents=[agent.name for _, _, agent in active_steps],
+                    )
+                    
+                    # Create tasks for parallel execution
+                    parallel_tasks = []
+                    for step_index, plan_step, planned_agent in active_steps:
+                        task_coro = self._execute_single_agent(
+                            state=state,
+                            step_index=step_index,
+                            plan_step=plan_step,
+                            planned_agent=planned_agent,
+                            context=context,
+                            run_tracker=run_tracker,
+                            progress_cb=progress_cb,
+                            roster_index=roster_index,
+                            task_id=task_id,
+                            using_plan_steps=using_plan_steps,
                         )
-                        candidate = router_candidate or roster_index.get("general_agent")
-                        if candidate is not None and candidate.name != planned_agent.name:
-                            fallback_agent = candidate
-                            fallback_reason = (
-                                f"Planner confidence {step_confidence:.2f} below threshold "
-                                f"{self._low_confidence_threshold:.2f}; rerouting to {candidate.name}."
+                        parallel_tasks.append(task_coro)
+                    
+                    # Execute all agents in this group in parallel
+                    results = await asyncio.gather(*parallel_tasks, return_exceptions=True)
+                    
+                    # Process results and check for failures
+                    for i, result in enumerate(results):
+                        step_index, plan_step, planned_agent = active_steps[i]
+                        if isinstance(result, Exception):
+                            logger.error(
+                                "parallel_agent_failed",
+                                task=task.get("id"),
+                                agent=planned_agent.name,
+                                error=str(result),
                             )
-                            executed_agent = candidate
-                            resolved_step = PlannedAgentStep(
-                                agent=candidate.name,
-                                tools=[],
-                                fallback_tools=list(plan_step.fallback_tools),
-                                reason=(
-                                    f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}"
-                                ).strip(),
-                                confidence=step_confidence,
+                            failure = result
+                            state["status"] = "failed"
+                            state["error"] = str(result)
+                            if not isinstance(result, SafetyLimitExceeded):
+                                await self._finalize_run(run_tracker, state, status=OrchestratorStatus.FAILED, error=str(result))
+                            raise result
+                        else:
+                            # Result contains the executed agent and any early exit info
+                            exec_result = result or {}
+                            if exec_result.get("early_exit_skipped"):
+                                early_exit_skipped_indices.update(exec_result["early_exit_skipped"])
+                            completed_agents.add(planned_agent.name)
+                    
+                    logger.info(
+                        "parallel_execution_completed",
+                        task=task.get("id"),
+                        group_id=group_id,
+                        agents=[agent.name for _, _, agent in active_steps],
+                    )
+                else:
+                    # Run sequentially (either single step or no parallel group)
+                    for step_index, plan_step, planned_agent in active_steps:
+                        # Skip this step if it was marked for early exit
+                        if step_index in early_exit_skipped_indices:
+                            continue
+                        
+                        self._enforce_run_time_budget(run_tracker)
+                        executed_agent = planned_agent
+                        resolved_step = plan_step
+                        fallback_agent: BaseAgent | None = None
+                        fallback_reason: str | None = None
+                        step_router_metadata: dict[str, Any] | None = None
+                        step_confidence = 1.0
+                        if plan_step is not None:
+                            step_confidence = self._coerce_plan_confidence(getattr(plan_step, "confidence", 1.0))
+                            plan_step.confidence = step_confidence
+                            if self._is_low_confidence(step_confidence):
+                                exclude = {plan_step.agent}
+                                router_candidate, router_meta = await self._router_pick_agent(
+                                    task,
+                                    list(roster_index.values()),
+                                    exclude=exclude,
+                                )
+                                candidate = router_candidate or roster_index.get("general_agent")
+                                if candidate is not None and candidate.name != planned_agent.name:
+                                    fallback_agent = candidate
+                                    fallback_reason = (
+                                        f"Planner confidence {step_confidence:.2f} below threshold "
+                                        f"{self._low_confidence_threshold:.2f}; rerouting to {candidate.name}."
+                                    )
+                                    executed_agent = candidate
+                                    resolved_step = PlannedAgentStep(
+                                        agent=candidate.name,
+                                        tools=[],
+                                        fallback_tools=list(plan_step.fallback_tools),
+                                        reason=(
+                                            f"{fallback_reason} Original agent: {plan_step.agent}. {plan_step.reason}"
+                                        ).strip(),
+                                        confidence=step_confidence,
+                                    )
+                                    step_router_metadata = router_meta if router_candidate is not None else None
+                                    logger.warning(
+                                        "planner_step_low_confidence_fallback",
+                                        task=task.get("id"),
+                                        step_index=step_index,
+                                        planned_agent=plan_step.agent,
+                                        fallback_agent=candidate.name,
+                                        confidence=step_confidence,
+                                        threshold=self._low_confidence_threshold,
+                                        router=step_router_metadata,
+                                    )
+                                else:
+                                    resolved_step = replace(
+                                        plan_step,
+                                        confidence=step_confidence,
+                                        tools=list(plan_step.tools),
+                                        fallback_tools=list(plan_step.fallback_tools),
+                                    )
+                            else:
+                                resolved_step = replace(
+                                    plan_step,
+                                    confidence=step_confidence,
+                                    tools=list(plan_step.tools),
+                                    fallback_tools=list(plan_step.fallback_tools),
+                                )
+                        step_context = resolved_step or plan_step
+                        step_id = f"agent::{executed_agent.name}"
+                        if using_plan_steps:
+                            step_id = f"{step_id}::{step_index}"
+                        step_metadata: dict[str, Any] | None = None
+                        if plan_step is not None or step_context is not None:
+                            step_metadata = self._build_planner_step_metadata(
+                                index=step_index,
+                                planned_step=plan_step,
+                                resolved_step=step_context,
+                                executed_agent=executed_agent,
+                                fallback_agent=fallback_agent,
+                                fallback_reason=fallback_reason,
+                                router_metadata=step_router_metadata,
                             )
-                            step_router_metadata = router_meta if router_candidate is not None else None
-                            logger.warning(
-                                "planner_step_low_confidence_fallback",
+                            step_metadata.setdefault("step_id", step_id)
+                            self._append_step_metadata(state, step_metadata)
+                            if fallback_agent is not None:
+                                self._record_step_override(state, step_metadata)
+                            logger.info(
+                                "planner_step_started",
                                 task=task.get("id"),
                                 step_index=step_index,
-                                planned_agent=plan_step.agent,
-                                fallback_agent=candidate.name,
-                                confidence=step_confidence,
-                                threshold=self._low_confidence_threshold,
-                                router=step_router_metadata,
+                                planned_agent=step_metadata.get("planned_agent"),
+                                executed_agent=step_metadata.get("executed_agent"),
+                                reason=step_metadata.get("executed_reason") or step_metadata.get("planned_reason"),
+                                tools=step_metadata.get("executed_tools") or step_metadata.get("planned_tools"),
+                                fallback_applied=step_metadata.get("fallback_applied"),
                             )
-                        else:
-                            resolved_step = replace(
-                                plan_step,
-                                confidence=step_confidence,
-                                tools=list(plan_step.tools),
-                                fallback_tools=list(plan_step.fallback_tools),
-                            )
-                    else:
-                        resolved_step = replace(
-                            plan_step,
-                            confidence=step_confidence,
-                            tools=list(plan_step.tools),
-                            fallback_tools=list(plan_step.fallback_tools),
-                        )
-                step_context = resolved_step or plan_step
-                step_id = f"agent::{executed_agent.name}"
-                if using_plan_steps:
-                    step_id = f"{step_id}::{step_index}"
-                step_metadata: dict[str, Any] | None = None
-                if plan_step is not None or step_context is not None:
-                    step_metadata = self._build_planner_step_metadata(
-                        index=step_index,
-                        planned_step=plan_step,
-                        resolved_step=step_context,
-                        executed_agent=executed_agent,
-                        fallback_agent=fallback_agent,
-                        fallback_reason=fallback_reason,
-                        router_metadata=step_router_metadata,
-                    )
-                    step_metadata.setdefault("step_id", step_id)
-                    self._append_step_metadata(state, step_metadata)
-                    if fallback_agent is not None:
-                        self._record_step_override(state, step_metadata)
-                    logger.info(
-                        "planner_step_started",
-                        task=task.get("id"),
-                        step_index=step_index,
-                        planned_agent=step_metadata.get("planned_agent"),
-                        executed_agent=step_metadata.get("executed_agent"),
-                        reason=step_metadata.get("executed_reason") or step_metadata.get("planned_reason"),
-                        tools=step_metadata.get("executed_tools") or step_metadata.get("planned_tools"),
-                        fallback_applied=step_metadata.get("fallback_applied"),
-                    )
-                event_step_metadata = dict(step_metadata) if step_metadata is not None else None
-                if event_step_metadata is not None:
-                    event_step_metadata["status"] = "started"
-                await self._record_event(
-                    run_tracker,
-                    "agent_started",
-                    agent=executed_agent.name,
-                    payload={"task_id": task.get("id"), "planner_step": event_step_metadata},
-                )
-                await self._notify(
-                    progress_cb,
-                    self._ensure_run_id(
-                        run_tracker,
-                        {
-                            "event": "agent_started",
-                            "agent": executed_agent.name,
-                            "task_id": task.get("id"),
-                            "step_id": step_id,
-                            "planner_step": event_step_metadata,
-                        },
-                    ),
-                )
-                increment_agent_event(agent=executed_agent.name, event="started")
-                logger.info("agent_started", agent=executed_agent.name, task=task.get("id"))
-                start_time = time.perf_counter()
-                await self._record_lifecycle(
-                    run_tracker,
-                    task_id=task_id,
-                    step_id=step_id,
-                    event_type="agent_started",
-                    status=LifecycleStatus.IN_PROGRESS,
-                    agent=executed_agent.name,
-                )
-                await self._capture_snapshot(
-                    run_tracker,
-                    ContextStage.EXECUTION,
-                    state,
-                    agent=executed_agent.name,
-                    extra={"event": "agent_started", "planner_step": event_step_metadata},
-                )
-                try:
-                    tool_session = self._start_tool_session(
-                        agent=executed_agent,
-                        base_context=context,
-                        plan_step=step_context,
-                        run_tracker=run_tracker,
-                    )
-                    agent_context = self._clone_context(
-                        context,
-                        tool_session,
-                        step_context,
-                        agent_name=executed_agent.name,
-                    )
-                    agent_input = await self._prepare_agent_input(state, agent=executed_agent, context=agent_context)
-                    result = await executed_agent.handle(agent_input, context=agent_context)
-                    self._record_output(state, agent=executed_agent, result=result, planner_step=step_metadata)
-                    await self._enforce_tool_first_policy(
-                        tool_session,
-                        agent=executed_agent,
-                        state=state,
-                        run_tracker=run_tracker,
-                        progress_cb=progress_cb,
-                    )
-                except Exception as exc:
-                    duration = time.perf_counter() - start_time
-                    observe_agent_latency(agent=executed_agent.name, latency=duration)
-                    increment_agent_event(agent=executed_agent.name, event="failed")
-                    failure = exc
-                    failed_step_metadata = dict(step_metadata) if step_metadata is not None else None
-                    if failed_step_metadata is not None:
-                        failed_step_metadata["status"] = "failed"
-                    await self._record_lifecycle(
-                        run_tracker,
-                        task_id=task_id,
-                        step_id=step_id,
-                        event_type="agent_failed",
-                        status=LifecycleStatus.FAILED,
-                        agent=executed_agent.name,
-                        latency_ms=duration * 1000,
-                    )
-                    await self._notify(
-                        progress_cb,
-                        self._ensure_run_id(
-                            run_tracker,
-                            {
-                                "event": "agent_failed",
-                                "agent": executed_agent.name,
-                                "task_id": task.get("id"),
-                                "error": str(exc),
-                                "latency": duration,
-                                "step_id": step_id,
-                                "planner_step": failed_step_metadata,
-                            },
-                        ),
-                    )
-                    logger.exception(
-                        "agent_failed",
-                        agent=executed_agent.name,
-                        task=task.get("id"),
-                        duration=duration,
-                    )
-                    if step_metadata is not None:
-                        logger.error(
-                            "planner_step_failed",
-                            task=task.get("id"),
-                            step_index=step_index,
-                            executed_agent=executed_agent.name,
-                            error=str(exc),
-                        )
-                    state["status"] = "failed"
-                    state["error"] = str(exc)
-                    await self._record_event(
-                        run_tracker,
-                        "agent_failed",
-                        agent=executed_agent.name,
-                        payload={"error": str(exc), "latency": duration, "planner_step": failed_step_metadata},
-                    )
-                    await self._capture_snapshot(
-                        run_tracker,
-                        ContextStage.EXECUTION,
-                        state,
-                        agent=executed_agent.name,
-                        extra={"event": "agent_failed", "error": str(exc), "planner_step": failed_step_metadata},
-                    )
-                    if not isinstance(exc, SafetyLimitExceeded):
-                        await self._finalize_run(run_tracker, state, status=OrchestratorStatus.FAILED, error=str(exc))
-                    raise
-                duration = time.perf_counter() - start_time
-                observe_agent_latency(agent=executed_agent.name, latency=duration)
-                increment_agent_event(agent=executed_agent.name, event="completed")
-                logger.info(
-                    "agent_completed",
-                    agent=executed_agent.name,
-                    task=task.get("id"),
-                    duration=duration,
-                    outputs=len(state.get("outputs", [])),
-                )
-                if step_metadata is not None:
-                    logger.info(
-                        "planner_step_completed",
-                        task=task.get("id"),
-                        step_index=step_index,
-                        executed_agent=step_metadata.get("executed_agent"),
-                        latency=duration,
-                        fallback_applied=step_metadata.get("fallback_applied"),
-                    )
-                latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
-                completed_step_metadata = dict(step_metadata) if step_metadata is not None else None
-                if completed_step_metadata is not None:
-                    completed_step_metadata["status"] = "completed"
-                await self._notify(
-                    progress_cb,
-                    self._ensure_run_id(
-                        run_tracker,
-                        {
-                            "event": "agent_completed",
-                            "agent": executed_agent.name,
-                            "task_id": task.get("id"),
-                            "latency": duration,
-                            "output": latest_output,
-                            "step_id": step_id,
-                            "planner_step": completed_step_metadata,
-                        },
-                    ),
-                )
-                await self._record_event(
-                    run_tracker,
-                    "agent_completed",
-                    agent=executed_agent.name,
-                    payload={"latency": duration, "output": latest_output, "planner_step": completed_step_metadata},
-                )
-                await self._record_lifecycle(
-                    run_tracker,
-                    task_id=task_id,
-                    step_id=step_id,
-                    event_type="agent_completed",
-                    status=LifecycleStatus.COMPLETED,
-                    agent=executed_agent.name,
-                    latency_ms=duration * 1000,
-                )
-                await self._capture_snapshot(
-                    run_tracker,
-                    ContextStage.EXECUTION,
-                    state,
-                    agent=executed_agent.name,
-                    extra={"event": "agent_completed", "output": latest_output, "planner_step": completed_step_metadata},
-                )
-                await self._update_state(run_tracker, state)
-                self._enforce_run_time_budget(run_tracker)
-                
-                # ────────────────────────────────────────────────────────────────
-                # Early Exit: Skip general_agent if specialist already responded
-                # with high confidence to avoid duplicate/redundant responses
-                # ────────────────────────────────────────────────────────────────
-                if self._should_early_exit(
-                    executed_agent=executed_agent,
-                    latest_output=latest_output,
-                    execution_plan=execution_plan,
-                    current_step_index=step_index,
-                ):
-                    skipped_remaining = [
-                        (idx, step, agent)
-                        for idx, step, agent in execution_plan
-                        if idx > step_index and agent.name == "general_agent"
-                    ]
-                    for skip_idx, skip_step, skip_agent in skipped_remaining:
-                        # Mark this index for skipping in subsequent iterations
-                        early_exit_skipped_indices.add(skip_idx)
+                        event_step_metadata = dict(step_metadata) if step_metadata is not None else None
+                        if event_step_metadata is not None:
+                            event_step_metadata["status"] = "started"
                         await self._record_event(
                             run_tracker,
-                            "agent_skipped",
-                            agent=skip_agent.name,
-                            payload={"reason": "early_exit_high_confidence_specialist"},
+                            "agent_started",
+                            agent=executed_agent.name,
+                            payload={"task_id": task.get("id"), "planner_step": event_step_metadata},
                         )
                         await self._notify(
                             progress_cb,
                             self._ensure_run_id(
                                 run_tracker,
                                 {
-                                    "event": "agent_skipped",
-                                    "agent": skip_agent.name,
+                                    "event": "agent_started",
+                                    "agent": executed_agent.name,
                                     "task_id": task.get("id"),
-                                    "reason": "Specialist agent provided high-confidence response",
+                                    "step_id": step_id,
+                                    "planner_step": event_step_metadata,
                                 },
                             ),
                         )
-                        logger.info(
-                            "agent_skipped_early_exit",
-                            task=task.get("id"),
-                            skipped_agent=skip_agent.name,
-                            reason="specialist_high_confidence",
-                            specialist=executed_agent.name,
-                            confidence=latest_output.get("confidence") if isinstance(latest_output, dict) else None,
+                        increment_agent_event(agent=executed_agent.name, event="started")
+                        logger.info("agent_started", agent=executed_agent.name, task=task.get("id"))
+                        start_time = time.perf_counter()
+                        await self._record_lifecycle(
+                            run_tracker,
+                            task_id=task_id,
+                            step_id=step_id,
+                            event_type="agent_started",
+                            status=LifecycleStatus.IN_PROGRESS,
+                            agent=executed_agent.name,
                         )
+                        await self._capture_snapshot(
+                            run_tracker,
+                            ContextStage.EXECUTION,
+                            state,
+                            agent=executed_agent.name,
+                            extra={"event": "agent_started", "planner_step": event_step_metadata},
+                        )
+                        try:
+                            tool_session = self._start_tool_session(
+                                agent=executed_agent,
+                                base_context=context,
+                                plan_step=step_context,
+                                run_tracker=run_tracker,
+                            )
+                            
+                            # Build collaboration handler for this agent
+                            async def collab_handler(target: str, request: str, ctx_data: dict[str, Any]) -> AgentOutput:
+                                return await self._handle_collaboration(
+                                    target_agent_name=target,
+                                    request=request,
+                                    context_data=ctx_data,
+                                    base_context=context,
+                                    run_tracker=run_tracker,
+                                    roster_index=roster_index,
+                                    state=state,
+                                )
+                            
+                            agent_context = self._clone_context(
+                                context,
+                                tool_session,
+                                step_context,
+                                agent_name=executed_agent.name,
+                                collaboration_handler=collab_handler,
+                            )
+                            agent_input = await self._prepare_agent_input(state, agent=executed_agent, context=agent_context)
+                            result = await executed_agent.handle(agent_input, context=agent_context)
+                            
+                            # Evaluate output quality
+                            tools_used = list(tool_session.used_tools) if tool_session else None
+                            tools_expected = list(plan_step.tools) if plan_step and plan_step.tools else None
+                            quality_acceptable, quality_info = await self._evaluate_output_quality(
+                                state=state,
+                                agent=executed_agent,
+                                result=result,
+                                tools_used=tools_used,
+                                tools_expected=tools_expected,
+                                run_tracker=run_tracker,
+                                progress_cb=progress_cb,
+                            )
+                            
+                            # Add quality info to result metadata
+                            if hasattr(result, 'metadata') and isinstance(result.metadata, dict):
+                                result.metadata["quality_score"] = quality_info.get("score")
+                                result.metadata["quality_breakdown"] = quality_info.get("breakdown")
+                            
+                            self._record_output(state, agent=executed_agent, result=result, planner_step=step_metadata)
+                            await self._enforce_tool_first_policy(
+                                tool_session,
+                                agent=executed_agent,
+                                state=state,
+                                run_tracker=run_tracker,
+                                progress_cb=progress_cb,
+                            )
+                        except Exception as exc:
+                            duration = time.perf_counter() - start_time
+                            observe_agent_latency(agent=executed_agent.name, latency=duration)
+                            increment_agent_event(agent=executed_agent.name, event="failed")
+                            
+                            # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                            # Dynamic Re-Planning: Try to recover from agent failure
+                            # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                            replan_result = await self._try_dynamic_replan(
+                                state=state,
+                                failed_agent=executed_agent,
+                                error=exc,
+                                context=context,
+                                run_tracker=run_tracker,
+                                progress_cb=progress_cb,
+                                roster_index=roster_index,
+                            )
+                            
+                            if replan_result is not None:
+                                # Re-planning succeeded - continue execution
+                                logger.info(
+                                    "dynamic_replan_success",
+                                    task=task.get("id"),
+                                    failed_agent=executed_agent.name,
+                                    recovery_agent=replan_result.get("recovery_agent"),
+                                )
+                                # Update state with re-planning result
+                                completed_agents.add(executed_agent.name)
+                                continue  # Move to next step
+                            
+                            # Re-planning failed - proceed with original failure handling
+                            failure = exc
+                            failed_step_metadata = dict(step_metadata) if step_metadata is not None else None
+                            if failed_step_metadata is not None:
+                                failed_step_metadata["status"] = "failed"
+                            await self._record_lifecycle(
+                                run_tracker,
+                                task_id=task_id,
+                                step_id=step_id,
+                                event_type="agent_failed",
+                                status=LifecycleStatus.FAILED,
+                                agent=executed_agent.name,
+                                latency_ms=duration * 1000,
+                            )
+                            await self._notify(
+                                progress_cb,
+                                self._ensure_run_id(
+                                    run_tracker,
+                                    {
+                                        "event": "agent_failed",
+                                        "agent": executed_agent.name,
+                                        "task_id": task.get("id"),
+                                        "error": str(exc),
+                                        "latency": duration,
+                                        "step_id": step_id,
+                                        "planner_step": failed_step_metadata,
+                                    },
+                                ),
+                            )
+                            logger.exception(
+                                "agent_failed",
+                                agent=executed_agent.name,
+                                task=task.get("id"),
+                                duration=duration,
+                            )
+                            if step_metadata is not None:
+                                logger.error(
+                                    "planner_step_failed",
+                                    task=task.get("id"),
+                                    step_index=step_index,
+                                    executed_agent=executed_agent.name,
+                                    error=str(exc),
+                                )
+                            state["status"] = "failed"
+                            state["error"] = str(exc)
+                            await self._record_event(
+                                run_tracker,
+                                "agent_failed",
+                                agent=executed_agent.name,
+                                payload={"error": str(exc), "latency": duration, "planner_step": failed_step_metadata},
+                            )
+                            await self._capture_snapshot(
+                                run_tracker,
+                                ContextStage.EXECUTION,
+                                state,
+                                agent=executed_agent.name,
+                                extra={"event": "agent_failed", "error": str(exc), "planner_step": failed_step_metadata},
+                            )
+                            if not isinstance(exc, SafetyLimitExceeded):
+                                await self._finalize_run(run_tracker, state, status=OrchestratorStatus.FAILED, error=str(exc))
+                            raise
+                        duration = time.perf_counter() - start_time
+                        observe_agent_latency(agent=executed_agent.name, latency=duration)
+                        increment_agent_event(agent=executed_agent.name, event="completed")
+                        logger.info(
+                            "agent_completed",
+                            agent=executed_agent.name,
+                            task=task.get("id"),
+                            duration=duration,
+                            outputs=len(state.get("outputs", [])),
+                        )
+                        if step_metadata is not None:
+                            logger.info(
+                                "planner_step_completed",
+                                task=task.get("id"),
+                                step_index=step_index,
+                                executed_agent=step_metadata.get("executed_agent"),
+                                latency=duration,
+                                fallback_applied=step_metadata.get("fallback_applied"),
+                            )
+                        latest_output = state.get("outputs", [])[-1] if state.get("outputs") else None
+                        completed_step_metadata = dict(step_metadata) if step_metadata is not None else None
+                        if completed_step_metadata is not None:
+                            completed_step_metadata["status"] = "completed"
+                        await self._notify(
+                            progress_cb,
+                            self._ensure_run_id(
+                                run_tracker,
+                                {
+                                    "event": "agent_completed",
+                                    "agent": executed_agent.name,
+                                    "task_id": task.get("id"),
+                                    "latency": duration,
+                                    "output": latest_output,
+                                    "step_id": step_id,
+                                    "planner_step": completed_step_metadata,
+                                },
+                            ),
+                        )
+                        await self._record_event(
+                            run_tracker,
+                            "agent_completed",
+                            agent=executed_agent.name,
+                            payload={"latency": duration, "output": latest_output, "planner_step": completed_step_metadata},
+                        )
+                        await self._record_lifecycle(
+                            run_tracker,
+                            task_id=task_id,
+                            step_id=step_id,
+                            event_type="agent_completed",
+                            status=LifecycleStatus.COMPLETED,
+                            agent=executed_agent.name,
+                            latency_ms=duration * 1000,
+                        )
+                        await self._capture_snapshot(
+                            run_tracker,
+                            ContextStage.EXECUTION,
+                            state,
+                            agent=executed_agent.name,
+                            extra={"event": "agent_completed", "output": latest_output, "planner_step": completed_step_metadata},
+                        )
+                        await self._update_state(run_tracker, state)
+                        self._enforce_run_time_budget(run_tracker)
+                        
+                        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                        # Early Exit: Skip general_agent if specialist already responded
+                        # with high confidence to avoid duplicate/redundant responses
+                        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+                        if self._should_early_exit(
+                            executed_agent=executed_agent,
+                            latest_output=latest_output,
+                            execution_plan=execution_plan,
+                            current_step_index=step_index,
+                        ):
+                            skipped_remaining = [
+                                (idx, step, agent)
+                                for idx, step, agent in execution_plan
+                                if idx > step_index and agent.name == "general_agent"
+                            ]
+                            for skip_idx, skip_step, skip_agent in skipped_remaining:
+                                # Mark this index for skipping in subsequent iterations
+                                early_exit_skipped_indices.add(skip_idx)
+                                await self._record_event(
+                                    run_tracker,
+                                    "agent_skipped",
+                                    agent=skip_agent.name,
+                                    payload={"reason": "early_exit_high_confidence_specialist"},
+                                )
+                                await self._notify(
+                                    progress_cb,
+                                    self._ensure_run_id(
+                                        run_tracker,
+                                        {
+                                            "event": "agent_skipped",
+                                            "agent": skip_agent.name,
+                                            "task_id": task.get("id"),
+                                            "reason": "Specialist agent provided high-confidence response",
+                                        },
+                                    ),
+                                )
+                                logger.info(
+                                    "agent_skipped_early_exit",
+                                    task=task.get("id"),
+                                    skipped_agent=skip_agent.name,
+                                    reason="specialist_high_confidence",
+                                    specialist=executed_agent.name,
+                                    confidence=latest_output.get("confidence") if isinstance(latest_output, dict) else None,
+                                )
 
             self._enforce_run_time_budget(run_tracker)
             if state.get("status") != "failed":
@@ -2012,6 +2628,27 @@ class Orchestrator:
             validated = validate_agent_response(agent.capability, result.model_dump())
         else:
             validated = validate_agent_response(agent.capability, result)
+        
+        # Skip recording outputs from agents that passed (confidence=0, or [PASS] summary)
+        output_confidence = validated.confidence if hasattr(validated, 'confidence') else 0
+        output_summary = validated.summary if hasattr(validated, 'summary') else ""
+        output_metadata = validated.metadata if hasattr(validated, 'metadata') else {}
+        
+        # Check if agent passed (zero confidence, [PASS] marker, or explicit passed flag)
+        is_pass_response = (
+            output_confidence == 0.0 or 
+            output_summary == "[PASS]" or 
+            output_metadata.get("passed") is True
+        )
+        
+        if is_pass_response:
+            logger.info(
+                "skipped_passed_agent_output",
+                agent=agent.name,
+                reason="agent_passed",
+            )
+            return state
+        
         output_dict = validated.model_dump()
         output_dict.setdefault("content", validated.summary)
         output_dict.setdefault("agent", agent.name)
@@ -2037,6 +2674,74 @@ class Orchestrator:
             del provenance[:-20]
         shared["last_writer"] = agent.name
         return state
+
+    async def _evaluate_output_quality(
+        self,
+        state: dict[str, Any],
+        agent: BaseAgent,
+        result: AgentOutput,
+        tools_used: list[str] | None = None,
+        tools_expected: list[str] | None = None,
+        run_tracker: _RunTracker | None = None,
+        progress_cb: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        """
+        Evaluate the quality of an agent's output.
+        
+        Returns:
+            Tuple of (is_acceptable, quality_info)
+            - is_acceptable: True if quality meets threshold
+            - quality_info: Quality scoring breakdown
+        """
+        request = state.get("request", state.get("input", ""))
+        
+        quality_result = self._output_quality_scorer.score(
+            response=getattr(result, "response", None) or result.summary or "",
+            request=request,
+            tools_used=tools_used,
+            tools_expected=tools_expected,
+            confidence=result.confidence,
+        )
+        
+        quality_info = quality_result.as_dict()
+        
+        logger.info(
+            "output_quality_evaluated",
+            agent=agent.name,
+            task=state.get("id"),
+            score=quality_result.score,
+            should_retry=quality_result.should_retry,
+            issues=quality_result.issues,
+        )
+        
+        await self._record_event(
+            run_tracker,
+            "output_quality_scored",
+            agent=agent.name,
+            payload={
+                "score": quality_result.score,
+                "breakdown": quality_info.get("breakdown", {}),
+                "issues": quality_result.issues,
+                "should_retry": quality_result.should_retry,
+            },
+        )
+        
+        if quality_result.should_retry and progress_cb:
+            await self._notify(
+                progress_cb,
+                self._ensure_run_id(
+                    run_tracker,
+                    {
+                        "event": "output_quality_low",
+                        "agent": agent.name,
+                        "task_id": state.get("id"),
+                        "quality_score": quality_result.score,
+                        "issues": quality_result.issues,
+                    },
+                ),
+            )
+        
+        return not quality_result.should_retry, quality_info
 
     @staticmethod
     def _serialize_prior_exchanges(outputs: list[Any]) -> list[dict[str, Any]]:

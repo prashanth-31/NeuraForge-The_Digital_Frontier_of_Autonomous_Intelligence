@@ -8,11 +8,12 @@ from datetime import UTC, datetime
 import math
 from typing import Any, Mapping, Sequence
 
-from ..agents.base import AgentContext
+from ..agents.base import AgentContext, ReasoningBuilder
 from ..core.logging import get_logger
 from ..core.metrics import observe_confidence_component
 from ..mcp.symbols import extract_symbols_from_text
-from ..schemas.agents import AgentCapability, AgentExchange, AgentInput, AgentOutput
+from ..schemas.agents import AgentCapability, AgentExchange, AgentInput, AgentOutput, ReasoningStepType
+from ..services.llm import is_llm_unavailable
 from ..services.tools import ToolDisabledError, ToolInvocationError, ToolInvocationResult
 
 logger = get_logger(name=__name__)
@@ -23,33 +24,39 @@ class FinanceAgent:
     name: str = "finance_agent"
     capability: AgentCapability = AgentCapability.FINANCE
     system_prompt: str = (
-        "You are NeuraForge's Finance Agent. Provide high-level forecasts, key risks, and actionable"
-        " next steps using available context. Respond with structured bullet points. When live tool"
-        " metrics are available, treat them as the source of truth, cite their timestamps, and avoid"
-        " repeating stale historical figures unless you explicitly flag them as legacy context."
-        " The finance tools provide real-time quotes, fundamentals data (PE ratio, revenue, EPS, etc.),"
-        " and up to 30 days of historical daily prices. Use historical data to describe price trends,"
-        " calculate returns, and provide context on recent price movements."
+        "You are NeuraForge's Finance Agent - a professional financial analyst. "
+        "Provide clear, data-driven financial analysis using the tool metrics provided. "
+        "When live tool metrics are available, treat them as the source of truth and cite their timestamps. "
+        "Structure your response with: 1) Headline Metrics, 2) Key Observations, 3) Market Context, 4) Analysis Summary. "
+        "Use professional financial language. Format numbers clearly (e.g., $451.45, 63.2M shares). "
+        "The finance tools provide real-time quotes, fundamentals data (PE ratio, revenue, EPS, etc.), "
+        "and up to 30 days of historical daily prices."
     )
     description: str = "Performs financial analysis, forecasting, and headline metric synthesis."
     tool_preference: list[str] = field(default_factory=lambda: ["finance.snapshot"])
     tool_candidates: tuple[str, ...] = (
-        "finance.snapshot",
-        "finance.snapshot.alpha",
-        "finance.snapshot.cached",
-        "finance.plot",
-        "finance.news",
-        "finance/coingecko_news",
-        "finance.analytics",
-        "finance/pandas",
+        # Primary market data (free/open APIs)
+        "finance.snapshot",           # Yahoo Finance - free
+        "finance.snapshot.alpha",     # Alpha Vantage - free tier
+        "finance.snapshot.cached",    # Stooq fallback - free
+        # Analysis & visualization
+        "finance.plot",               # Matplotlib charting
+        "finance.analytics",          # Pandas analytics
+        "finance/pandas",             # Data analysis
+        "finance/csv_analyzer",       # CSV processing
+        "finance/sentiment",          # FinBERT sentiment (HuggingFace - open source)
+        # Cross-domain research support
+        "research.search",            # DuckDuckGo for news context
+        "research.wikipedia",         # Company background info
     )
     tool_retry_config: dict[str, tuple[int, float]] = field(
         default_factory=lambda: {
             "finance.snapshot": (3, 0.75),
             "finance.snapshot.alpha": (2, 1.0),
             "finance.snapshot.cached": (1, 0.0),
-            "finance.news": (1, 0.0),
             "finance.plot": (1, 0.0),
+            "finance/sentiment": (1, 0.0),
+            "research.search": (2, 0.5),
         }
     )
     fallback_agent: str | None = "enterprise_agent"
@@ -57,25 +64,159 @@ class FinanceAgent:
 
     async def handle(self, task: AgentInput, *, context: AgentContext) -> AgentOutput:
         logger.info("finance_agent_task", task=task.model_dump())
+        
+        # Initialize reasoning builder for tracking thought process
+        reasoning = ReasoningBuilder(agent_name=self.name, context=context)
+        
+        # Check if this task is actually relevant to finance agent
+        if not self._is_relevant_task(task):
+            logger.info("finance_agent_pass", reason="not_a_finance_task", prompt=task.prompt[:100] if task.prompt else "")
+            await reasoning.think(
+                "Analyzed request - not relevant to financial data/analysis, passing to other agents",
+                step_type=ReasoningStepType.EVALUATION,
+            )
+            return AgentOutput(
+                agent=self.name,
+                capability=self.capability,
+                summary="[PASS]",  # Non-empty placeholder to pass validation
+                confidence=0.0,  # Zero confidence signals to skip this response
+                rationale="Task not relevant to finance agent - passing.",
+                metadata={"passed": True, "reason": "not_a_finance_task"},
+            )
+        
+        # Step 1: Analyze the incoming request
+        await reasoning.think(
+            f"Received financial analysis request: '{task.prompt[:100]}...'",
+            step_type=ReasoningStepType.OBSERVATION,
+        )
+        
         logger.info(
             "finance_agent_context",
             planned_tools=context.planned_tools,
             fallback_tools=context.fallback_tools,
         )
+        
+        # Wrap main logic in try-except to prevent exceptions from triggering replan
+        # This ensures we return a fallback response instead of raising
+        try:
+            return await self._execute_financial_analysis(task, context, reasoning)
+        except Exception as exc:
+            logger.error(
+                "finance_agent_exception",
+                error=str(exc),
+                task_id=task.task_id,
+                exc_info=True,
+            )
+            # Return a fallback response instead of raising
+            fallback_response = self._generate_fallback_response(task, None, None)
+            return AgentOutput(
+                agent=self.name,
+                capability=self.capability,
+                summary=fallback_response,
+                confidence=0.4,  # Lower confidence for fallback
+                rationale="Generated rule-based response due to internal error.",
+                metadata={"fallback": True, "error_recovered": True},
+            )
+
+    async def _execute_financial_analysis(
+        self,
+        task: AgentInput,
+        context: AgentContext,
+        reasoning: ReasoningBuilder,
+    ) -> AgentOutput:
+        """Execute the main financial analysis logic. Extracted for try-except wrapping."""
+        # Step 2: Build context
         context_section = task.context
         if context_section is None and context.context is not None:
+            await reasoning.think(
+                "Assembling financial context from knowledge base",
+                step_type=ReasoningStepType.ANALYSIS,
+            )
             bundle = await context.context.build(task=_serialize_agent_input(task), agent=self.name)
             context_section = bundle.as_prompt_section()
+            if context_section:
+                await reasoning.add_finding(
+                    claim="Retrieved relevant financial context",
+                    evidence=[context_section[:200] + "..."] if len(context_section) > 200 else [context_section],
+                    confidence=0.7,
+                    source="context_assembler",
+                )
+        
+        # Step 3: Extract symbols and invoke tools
+        symbols = extract_symbols_from_text(task.prompt or "")
+        if symbols:
+            await reasoning.think(
+                f"Detected ticker symbols: {', '.join(symbols)} - will fetch live market data",
+                step_type=ReasoningStepType.ANALYSIS,
+                evidence=f"Symbols found: {symbols}",
+            )
+        
         tool_result, tool_trace = await self._maybe_invoke_tool(task, context=context)
+        if tool_result is not None:
+            await reasoning.consider_tool(
+                tool_name=tool_result.tool,
+                reason="Financial data tool for market metrics",
+                selected=True,
+            )
+            metrics = self._extract_tool_metrics(tool_result)
+            if metrics:
+                # metrics is a list of dicts; format each dict as evidence
+                evidence_strs = []
+                for m in metrics[:5]:
+                    if isinstance(m, dict):
+                        evidence_strs.extend(f"{k}: {v}" for k, v in list(m.items())[:3])
+                await reasoning.add_finding(
+                    claim=f"Retrieved live market data with {len(metrics)} data points",
+                    evidence=evidence_strs[:10],
+                    confidence=0.9,
+                    source=tool_result.tool,
+                )
+        elif context.planned_tools:
+            await reasoning.consider_tool(
+                tool_name=context.planned_tools[0] if context.planned_tools else "finance.snapshot",
+                reason="Tool was planned but not invoked",
+                selected=False,
+                rejection_reason="No tool result obtained",
+            )
+        
+        # Step 4: Generate plot if applicable
         plot_result = await self._maybe_generate_plot(
             task,
             context=context,
             snapshot_result=tool_result,
             tool_trace=tool_trace,
         )
+        if plot_result is not None:
+            await reasoning.consider_tool(
+                tool_name="finance.plot",
+                reason="Generated price chart visualization",
+                selected=True,
+            )
+            await reasoning.add_finding(
+                claim="Generated price chart visualization",
+                confidence=0.85,
+                source="finance.plot",
+            )
+        
+        # Step 5: Generate analysis
         prompt = self._build_prompt(task, context_section=context_section, tool_result=tool_result)
+        
+        await reasoning.think(
+            "Synthesizing financial analysis from market data and context",
+            step_type=ReasoningStepType.SYNTHESIS,
+        )
+        
         forecast = await context.llm.generate(prompt=prompt, system_prompt=self.system_prompt, temperature=0.2)
 
+        # Handle LLM unavailability - generate fallback response from tool data
+        if is_llm_unavailable(forecast):
+            logger.warning("finance_agent_llm_unavailable", task_id=task.task_id)
+            forecast = self._generate_fallback_response(task, tool_result, context_section)
+            await reasoning.note_uncertainty(
+                "LLM temporarily unavailable - providing rule-based financial analysis"
+            )
+
+        # Step 6: Calculate confidence
         evidence_count = len(task.prior_exchanges)
         if context_section:
             evidence_count += 1
@@ -95,6 +236,22 @@ class FinanceAgent:
             confidence_breakdown = scoring.breakdown.as_dict()
             for component, value in confidence_breakdown.items():
                 observe_confidence_component(agent=self.name, component=component, value=value)
+
+        await reasoning.think(
+            f"Calculated confidence: {confidence:.2f} based on {evidence_count} evidence sources",
+            step_type=ReasoningStepType.EVALUATION,
+            confidence=confidence,
+        )
+
+        # Step 7: Note any uncertainties
+        if not tool_result:
+            await reasoning.note_uncertainty(
+                "No live market data available - analysis based on context only"
+            )
+        if confidence < 0.6:
+            await reasoning.note_uncertainty(
+                "Lower confidence - market conditions may require additional verification"
+            )
 
         metadata: dict[str, Any] = {"type": "financial_forecast"}
         tools_metadata: list[dict[str, Any]] = []
@@ -149,7 +306,194 @@ class FinanceAgent:
             confidence=confidence,
             rationale="Financial forecast generated from context and prior agent signals.",
             metadata=metadata,
+            # Include reasoning transparency
+            reasoning_steps=reasoning.steps,
+            key_findings=reasoning.findings,
+            tools_considered=reasoning.tools_considered,
+            uncertainties=reasoning.uncertainties,
         )
+
+    def _is_relevant_task(self, task: AgentInput) -> bool:
+        """Check if this task is relevant to finance agent - handles ALL financial matters."""
+        # ═══════════════════════════════════════════════════════════════════════
+        # FIRST: If planner explicitly selected this agent, trust it
+        # ═══════════════════════════════════════════════════════════════════════
+        metadata = task.metadata or {}
+        shared_ctx = metadata.get("_shared_context", {})
+        planner_data = shared_ctx.get("planner", {})
+        selected_agents = planner_data.get("selected_agents", [])
+        planner_steps = shared_ctx.get("planner_steps", [])
+        
+        # If planner explicitly selected finance_agent, accept the task
+        if "finance_agent" in selected_agents:
+            logger.debug("finance_agent_accept", reason="planner_selected", agents=selected_agents)
+            return True
+        
+        # Check if any planner step is for finance_agent
+        for step in planner_steps:
+            if step.get("planned_agent") == "finance_agent" or step.get("executed_agent") == "finance_agent":
+                logger.debug("finance_agent_accept", reason="planner_step_assigned")
+                return True
+        
+        prompt = (task.prompt or "").lower()
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # QUICK REJECTIONS - Things finance agent should NEVER handle
+        # Use word boundary checks to avoid false positives (e.g., "hi" in "highlight")
+        # ═══════════════════════════════════════════════════════════════════════
+        immediate_reject_phrases = {
+            # Meta questions (full phrases only)
+            "what are your capabilities", "what can you do", "what do you do",
+            "how can you help", "tell me about yourself", "who are you",
+            "what features", "your capabilities",
+            # Creative
+            "write a poem", "write a story", "creative writing",
+        }
+        if any(reject in prompt for reject in immediate_reject_phrases):
+            return False
+        
+        # Single-word rejections need word boundary check
+        import re
+        single_word_rejects = ["help", "hello", "hi", "greetings", "hey"]
+        for word in single_word_rejects:
+            # Use word boundary to avoid matching "hi" in "highlight"
+            if re.search(rf'\b{word}\b', prompt):
+                return False
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # FINANCE TRIGGERS - Any financial topic should be handled by finance_agent
+        # ═══════════════════════════════════════════════════════════════════════
+        finance_triggers = {
+            # General finance terms
+            "financial", "finance", "money", "monetary",
+            # Investment
+            "investment", "invest", "investing", "portfolio", "allocation",
+            "diversification", "diversify", "asset allocation",
+            # Personal finance
+            "salary", "income", "savings", "budget", "budgeting",
+            "retirement", "pension", "401k", "ira", "roth",
+            "tax", "taxes", "deduction", "exemption",
+            "lpa", "lakhs", "crores",  # Indian salary context
+            # Market data
+            "stock", "stocks", "share", "shares", "equity", "equities",
+            "ticker", "market cap", "pe ratio", "eps", "revenue",
+            "earnings", "dividend", "yield", "valuation",
+            "bull", "bear", "market",
+            # Indices
+            "nifty", "sensex", "dow", "nasdaq", "s&p",
+            # Analysis
+            "financial analysis", "financial health", "financial assessment",
+            "profitability", "liquidity", "solvency",
+            "cash flow", "burn rate", "runway",
+            "balance sheet", "income statement", "profit and loss",
+            "financial ratio", "debt ratio", "current ratio",
+            "roa", "roe", "roce", "return on",
+            # Planning
+            "financial planning", "financial advice", "financial advise",
+            "investment strategy", "investment advice",
+            "where to invest", "how to invest", "best investment",
+            "wealth", "wealth management", "wealth creation",
+            # Risk
+            "risk", "volatility", "hedging", "hedge",
+            # Banking/Credit
+            "loan", "emi", "interest rate", "credit", "debt",
+            "mortgage", "insurance", "premium",
+            # Crypto (if applicable)
+            "crypto", "bitcoin", "ethereum", "cryptocurrency",
+        }
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # Non-finance indicators - CHECK FIRST to reject business strategy tasks
+        # These tasks may contain "revenue", "growth" but are NOT finance tasks
+        # ═══════════════════════════════════════════════════════════════════════
+        non_finance_indicators = {
+            # Business strategy (not finance analysis)
+            "business proposal", "create a proposal", "write a proposal",
+            "pitch deck", "executive summary", "company background",
+            "business strategy", "startup pitch", "business idea",
+            "college project", "hackathon", "value proposition",
+            "target customers", "growth strategy", "revenue model",
+            "ai business strategy", "business strategy agent",
+            # Creative tasks
+            "poem", "story", "creative", "love story", "shakespeare",
+            "write a story", "write a poem", "compose",
+        }
+        
+        # Check non-finance FIRST - reject if this is a business strategy/creative task
+        if any(indicator in prompt for indicator in non_finance_indicators):
+            logger.debug("finance_agent_reject", reason="non_finance_indicator_found", prompt=prompt[:100])
+            return False
+        
+        # Now check finance triggers
+        if any(trigger in prompt for trigger in finance_triggers):
+            return True
+        
+        # Default to PASS for truly unrelated queries
+        return False
+
+    def _generate_fallback_response(
+        self,
+        task: AgentInput,
+        tool_result: ToolInvocationResult | None,
+        context_section: str | None,
+    ) -> str:
+        """Generate a rule-based fallback response when LLM is unavailable."""
+        prompt = (task.prompt or "").lower()
+        response_parts = []
+        
+        # Header
+        response_parts.append("## Financial Analysis (Rule-Based)\n")
+        
+        # If we have tool data, format it
+        if tool_result and tool_result.response:
+            response_parts.append("### Market Data Summary\n")
+            data = tool_result.response
+            
+            # Format stock data if available
+            if isinstance(data, dict):
+                if "currentPrice" in data:
+                    response_parts.append(f"- **Current Price**: ${data.get('currentPrice', 'N/A')}")
+                if "marketCap" in data:
+                    mc = data.get("marketCap", 0)
+                    if mc > 1e12:
+                        response_parts.append(f"- **Market Cap**: ${mc/1e12:.2f}T")
+                    elif mc > 1e9:
+                        response_parts.append(f"- **Market Cap**: ${mc/1e9:.2f}B")
+                    else:
+                        response_parts.append(f"- **Market Cap**: ${mc/1e6:.2f}M")
+                if "volume" in data:
+                    response_parts.append(f"- **Volume**: {data.get('volume', 'N/A'):,}")
+                if "52WeekHigh" in data:
+                    response_parts.append(f"- **52-Week High**: ${data.get('52WeekHigh', 'N/A')}")
+                if "52WeekLow" in data:
+                    response_parts.append(f"- **52-Week Low**: ${data.get('52WeekLow', 'N/A')}")
+            response_parts.append("")
+        
+        # Provide general advice based on query type
+        if any(k in prompt for k in ["salary", "income", "lpa", "lakhs"]):
+            response_parts.append("### General Investment Guidelines\n")
+            response_parts.append("Based on standard financial planning principles:\n")
+            response_parts.append("1. **Emergency Fund**: Maintain 6-12 months of expenses in liquid savings")
+            response_parts.append("2. **50-30-20 Rule**: 50% needs, 30% wants, 20% savings/investments")
+            response_parts.append("3. **Diversification**: Spread investments across asset classes")
+            response_parts.append("4. **Tax Planning**: Maximize tax-advantaged accounts (PPF, ELSS, NPS)")
+            response_parts.append("5. **Regular Review**: Rebalance portfolio quarterly\n")
+        
+        if any(k in prompt for k in ["investment", "invest", "portfolio"]):
+            response_parts.append("### Investment Considerations\n")
+            response_parts.append("- Risk tolerance varies by individual")
+            response_parts.append("- Time horizon affects asset allocation")
+            response_parts.append("- Consider consulting a certified financial advisor")
+            response_parts.append("- Past performance doesn't guarantee future results\n")
+        
+        if context_section:
+            response_parts.append("### Additional Context\n")
+            response_parts.append(f"{context_section[:500]}...")
+        
+        # Disclaimer
+        response_parts.append("\n---\n*Note: This is a rule-based response as the LLM is temporarily unavailable. For detailed analysis, please try again later.*")
+        
+        return "\n".join(response_parts)
 
     def _build_prompt(
         self,
@@ -189,13 +533,14 @@ class FinanceAgent:
             return None, attempts
 
         payload = self._build_snapshot_payload(task)
-        news_payload = self._build_news_payload(task)
+        news_payload = self._build_news_search_payload(task)
 
         tool_queue: list[tuple[str, dict[str, Any]]] = []
         if payload is not None:
             tool_queue.extend((alias, payload) for alias in self.tool_candidates)
+        # Use DuckDuckGo search for news instead of finance.news (which requires API key)
         if news_payload is not None:
-            tool_queue.append(("finance.news", news_payload))
+            tool_queue.append(("research.search", news_payload))
 
         for alias, candidate_payload in tool_queue:
             result = await self._invoke_finance_tool(context, alias, candidate_payload, attempts)
@@ -499,34 +844,58 @@ class FinanceAgent:
 
         return planned, fallback
 
-    def _build_news_payload(self, task: AgentInput) -> dict[str, Any] | None:
+    def _build_news_search_payload(self, task: AgentInput) -> dict[str, Any] | None:
+        """Build a DuckDuckGo search payload for financial news."""
         metadata: dict[str, Any] = task.metadata if isinstance(task.metadata, dict) else {}
-        limit = metadata.get("news_limit")
-        if not isinstance(limit, int) or limit <= 0:
-            limit = 5
-        payload: dict[str, Any] = {"limit": min(limit, 10)}
-        categories = metadata.get("news_categories")
-        if isinstance(categories, list):
-            cleaned = [str(category).strip() for category in categories if isinstance(category, str) and category.strip()]
-            if cleaned:
-                payload["categories"] = cleaned[:5]
-        return payload
+        
+        # Extract symbols/tickers for targeted news search
+        symbols = self._extract_symbols(metadata)
+        if not symbols:
+            symbols.extend(self._infer_symbols_from_prompt(task.prompt))
+        
+        # Build search query
+        prompt_text = (task.prompt or "").strip()
+        if symbols:
+            # Search for news about specific symbols
+            query = f"{' '.join(symbols[:3])} stock news financial analysis"
+        elif prompt_text:
+            # Generic financial news search based on prompt
+            query = f"{prompt_text[:100]} financial news"
+        else:
+            return None
+        
+        return {"query": query}
+
+    def _build_news_payload(self, task: AgentInput) -> dict[str, Any] | None:
+        """Legacy method - kept for compatibility."""
+        return self._build_news_search_payload(task)
 
     def _build_snapshot_payload(self, task: AgentInput) -> dict[str, Any] | None:
+        """
+        Build payload for finance snapshot tool.
+        
+        IMPORTANT: Only returns a payload if we have explicit symbols/tickers to look up.
+        We DO NOT try to derive company names from vague prompts - this prevents
+        unnecessary stock data lookups for generic questions.
+        """
         metadata: dict[str, Any] = task.metadata if isinstance(task.metadata, dict) else {}
         symbols = self._extract_symbols(metadata)
         if not symbols:
             symbols.extend(self._infer_symbols_from_prompt(task.prompt))
 
         unique_symbols = self._unique_upper(symbols)
-        payload: dict[str, Any] = {}
-        if unique_symbols:
-            payload["symbols"] = unique_symbols[:5]
-        else:
-            query = self._derive_company_query(task, metadata)
-            if query is None:
-                return None
-            payload["query"] = query
+        
+        # Only build payload if we have actual symbols to look up
+        # DO NOT fall back to company query - this causes unnecessary stock lookups
+        if not unique_symbols:
+            logger.debug(
+                "finance_snapshot_payload_skipped",
+                reason="no_symbols_found",
+                prompt_preview=task.prompt[:100] if task.prompt else "",
+            )
+            return None
+        
+        payload: dict[str, Any] = {"symbols": unique_symbols[:5]}
 
         fields = metadata.get("fields")
         if isinstance(fields, list):
@@ -551,20 +920,47 @@ class FinanceAgent:
         return symbols
 
     def _infer_symbols_from_prompt(self, prompt: str | None) -> list[str]:
+        """
+        Extract potential ticker symbols from prompt text.
+        
+        CONSERVATIVE approach: Only return symbols that are very likely to be tickers.
+        We require the symbol to be in a financial context or from a known list.
+        """
         if not prompt:
             return []
+        
+        # Use the centralized symbol extraction (more reliable)
         inferred = extract_symbols_from_text(prompt)
         unique: list[str] = []
         for symbol in inferred:
             if symbol and symbol not in unique:
                 unique.append(symbol)
-
-        ticker_candidates = re.findall(r"\b[A-Z]{1,5}\b", prompt)
-        for candidate in ticker_candidates:
-            if len(candidate) < 2:
-                continue
-            if candidate not in unique:
-                unique.append(candidate)
+        
+        # Common false positives to filter out
+        false_positives = {
+            "LPA", "CTC", "USD", "INR", "EUR", "GBP", "JPY", "AUD", "CAD",  # Salary/currency
+            "ETF", "IPO", "ROI", "ROE", "ROA", "EPS", "CEO", "CFO", "CTO",  # Finance terms
+            "FAQ", "API", "USA", "UK", "EU", "AI", "ML", "IT", "HR",  # Misc acronyms
+            "MBA", "PHD", "BBA", "CA", "CPA", "CFA",  # Degrees
+            "SIP", "PPF", "NPS", "FD", "RD", "MF",  # Investment products (India)
+            "AM", "PM", "ID", "TM", "OR", "AND", "NOT", "BUT",  # Common words
+        }
+        
+        # Filter out false positives
+        unique = [s for s in unique if s.upper() not in false_positives]
+        
+        # Only do regex extraction if there's strong context suggesting a ticker lookup
+        ticker_context_words = {"stock", "price", "ticker", "share", "shares", "quote", "trading"}
+        prompt_lower = prompt.lower()
+        has_ticker_context = any(word in prompt_lower for word in ticker_context_words)
+        
+        if has_ticker_context:
+            # More aggressive extraction only when context clearly indicates ticker lookup
+            ticker_candidates = re.findall(r"\b[A-Z]{2,5}\b", prompt)
+            for candidate in ticker_candidates:
+                if candidate not in unique and candidate not in false_positives:
+                    unique.append(candidate)
+        
         return unique
 
     def _derive_company_query(self, task: AgentInput, metadata: dict[str, Any]) -> str | None:

@@ -16,6 +16,7 @@ from ..schemas.agents import (
     AgentOutput,
     ReasoningStepType,
 )
+from ..services.llm import is_llm_unavailable
 from ..services.tools import ToolDisabledError, ToolInvocationError, ToolInvocationResult
 from ..mcp.symbols import extract_symbols_from_text
 
@@ -99,15 +100,27 @@ class ResearchAgent:
         "You are NeuraForge's Research Agent. Derive concise, well-sourced insights from the task "
         "description and prior agent outputs. Highlight 2-3 key findings, prioritize the most recent "
         "data available, and optionally surface a clearly labeled Historical Insight when older context "
-        "materially explains the story. Always note missing context."
+        "materially explains the story. Always note missing context. "
+        "IMPORTANT: When citing academic papers, ALWAYS include the full reference with authors, year, "
+        "title, and URL/link. Format references at the end of your response in a 'References' section."
     )
     description: str = "Finds factual, evidence-backed information and compiles concise briefings."
-    tool_preference: list[str] = field(default_factory=lambda: ["research.search", "research.summarizer"])
+    tool_preference: list[str] = field(default_factory=lambda: ["research.arxiv", "research.search", "research.wikipedia", "research.summarizer"])
     tool_candidates: tuple[str, ...] = (
-        "research.search",
-        "research.summarizer",
-        "research.doc_loader",
-        "research/doc_loader",
+        # Core research tools (all open source / free APIs)
+        "research.search",            # DuckDuckGo - anonymous, free
+        "research.summarizer",        # Text summarization
+        "research.wikipedia",         # Wikipedia REST API - free
+        "research.arxiv",             # arXiv API - open academic papers
+        "research.doc_loader",        # Document parsing
+        "research/doc_loader",        # Alias
+        "research.vector_search",     # Qdrant vector search
+        # Browser tools for web research
+        "browser.open",               # HTTP fetching
+        "browser.extract_text",       # HTML text extraction
+        # Data analysis
+        "dataframe.analyze",          # Pandas analytics
+        "dataframe.transform",        # Data transformations
     )
     fallback_agent: str | None = "enterprise_agent"
     confidence_bias: float = 0.9
@@ -238,6 +251,14 @@ class ResearchAgent:
             temperature=0.1,
         )
 
+        # Handle LLM unavailability with fallback
+        if is_llm_unavailable(summary):
+            logger.warning("research_agent_llm_unavailable", task_id=task.task_id)
+            summary = self._generate_fallback_response(task, tool_result, context_section, tool_section)
+            await reasoning.note_uncertainty(
+                "LLM temporarily unavailable - providing structured research data"
+            )
+
         await context.memory.store_working_memory(task.task_id, summary)
 
         # Step 6: Calculate confidence
@@ -291,6 +312,52 @@ class ResearchAgent:
             uncertainties=reasoning.uncertainties,
         )
 
+    def _generate_fallback_response(
+        self,
+        task: AgentInput,
+        tool_result: ToolInvocationResult | None,
+        context_section: str | None,
+        tool_section: str | None,
+    ) -> str:
+        """Generate a structured fallback response when LLM is unavailable."""
+        response_parts = []
+        
+        # Header
+        response_parts.append("## Research Summary (Structured Data)\n")
+        
+        # Include query
+        if task.prompt:
+            response_parts.append(f"**Query**: {task.prompt[:200]}\n")
+        
+        # Include tool data if available
+        if tool_section:
+            response_parts.append("### Search Results\n")
+            response_parts.append(tool_section)
+            response_parts.append("")
+        elif tool_result and tool_result.response:
+            response_parts.append("### Data Collected\n")
+            if isinstance(tool_result.response, dict):
+                for key, value in list(tool_result.response.items())[:10]:
+                    if isinstance(value, (str, int, float)):
+                        response_parts.append(f"- **{key}**: {value}")
+            elif isinstance(tool_result.response, list):
+                for i, item in enumerate(tool_result.response[:5]):
+                    if isinstance(item, dict):
+                        title = item.get("title") or item.get("name") or f"Result {i+1}"
+                        response_parts.append(f"- {title}")
+                        if item.get("description") or item.get("snippet"):
+                            response_parts.append(f"  - {(item.get('description') or item.get('snippet', ''))[:150]}")
+            response_parts.append("")
+        
+        # Context
+        if context_section:
+            response_parts.append("### Relevant Context\n")
+            response_parts.append(f"{context_section[:500]}...\n")
+        
+        response_parts.append("\n---\n*Note: This is structured data as the LLM is temporarily unavailable. For synthesized analysis, please try again later.*")
+        
+        return "\n".join(response_parts)
+
     def _build_prompt(self, task: AgentInput, context_section: str | None = None) -> str:
         metadata_payload = self._filtered_metadata(task.metadata)
         metadata = json.dumps(metadata_payload, indent=2, sort_keys=True)
@@ -307,18 +374,127 @@ class ResearchAgent:
             "that references the relevant year and source."
         )
 
+    def _get_planned_tools(self, task: AgentInput) -> list[str]:
+        """Extract planned tools from task metadata, falling back to defaults."""
+        metadata = task.metadata if isinstance(task.metadata, Mapping) else {}
+        shared_context = metadata.get("_shared_context", {})
+        planner = shared_context.get("planner", {})
+        steps = planner.get("steps", [])
+        
+        # Find our step in the plan
+        for step in steps:
+            if step.get("agent") == self.name:
+                tools = step.get("tools", [])
+                fallback_tools = step.get("fallback_tools", [])
+                if tools or fallback_tools:
+                    return list(tools) + list(fallback_tools)
+        
+        # If no tools from planner, detect query type and select appropriate tool
+        prompt_lower = (task.prompt or "").lower()
+        
+        # Academic paper indicators → use arXiv
+        academic_indicators = {
+            "research paper", "research papers", "academic paper", "academic papers",
+            "scientific paper", "journal article", "preprint", "arxiv",
+            "literature review", "latest paper", "recent paper",
+            "find papers", "search papers", "papers about", "papers on",
+            "key findings", "multi-ai research", "ai research",
+            "ml research", "machine learning research", "deep learning research",
+        }
+        if any(indicator in prompt_lower for indicator in academic_indicators):
+            return ["research.arxiv", "research.search"]
+        
+        # Wikipedia indicators
+        wiki_indicators = {
+            "history of", "what is", "who is", "who was", "biography",
+            "tell me about", "explain", "describe",
+        }
+        if any(indicator in prompt_lower for indicator in wiki_indicators):
+            return ["research.wikipedia", "research.search"]
+        
+        # Default research tools
+        return ["research.search"]
+
+    def _build_tool_payload(self, tool_name: str, task: AgentInput) -> dict[str, Any] | None:
+        """Build appropriate payload for the given tool."""
+        prompt_text = (task.prompt or "").strip()
+        if len(prompt_text) < 3:
+            return None
+        
+        # Wikipedia expects {"title": ...}
+        if "wikipedia" in tool_name.lower():
+            # Extract the main topic from the prompt
+            # Remove common prefixes like "Give me history of", "What is", etc.
+            title = prompt_text
+            prefixes_to_remove = [
+                "give me history of",
+                "give me the history of", 
+                "what is the history of",
+                "tell me about",
+                "what is",
+                "who is",
+                "who was",
+                "explain",
+                "describe",
+            ]
+            title_lower = title.lower()
+            for prefix in prefixes_to_remove:
+                if title_lower.startswith(prefix):
+                    title = title[len(prefix):].strip()
+                    break
+            # Remove trailing punctuation
+            title = title.rstrip("?.!")
+            return {"title": title[:200]} if title else None
+        
+        # ArXiv expects {"query": ...}
+        if "arxiv" in tool_name.lower():
+            return {"query": prompt_text[:512]}
+        
+        # Default search payload
+        return self._build_search_payload(task)
+
     async def _maybe_invoke_tool(self, task: AgentInput, *, context: AgentContext) -> ToolInvocationResult | None:
         if context.tools is None:
             return None
-        payload = self._build_search_payload(task)
-        if payload is None:
-            logger.debug("research_search_payload_skipped", task_id=task.task_id)
-            return None
-        try:
-            return await context.tools.invoke("research.search", payload)
-        except (ToolDisabledError, ToolInvocationError) as exc:
-            logger.warning("research_tool_failure", error=str(exc))
-            return None
+        
+        # Get planned tools from planner
+        planned_tools = self._get_planned_tools(task)
+        logger.info(
+            "research_agent_planned_tools",
+            task_id=task.task_id,
+            planned_tools=planned_tools,
+        )
+        
+        # Try planned tools in order with appropriate payloads
+        for tool_name in planned_tools:
+            payload = self._build_tool_payload(tool_name, task)
+            if payload is None:
+                logger.debug("research_payload_skipped", tool=tool_name, task_id=task.task_id)
+                continue
+            try:
+                logger.info(
+                    "research_agent_invoking_tool",
+                    tool=tool_name,
+                    task_id=task.task_id,
+                    payload_keys=list(payload.keys()),
+                )
+                result = await context.tools.invoke(tool_name, payload)
+                if result:
+                    return result
+            except (ToolDisabledError, ToolInvocationError) as exc:
+                logger.warning("research_tool_failure", tool=tool_name, error=str(exc))
+                continue
+        
+        # Fallback to research.search if none of the planned tools worked
+        if "research.search" not in planned_tools:
+            payload = self._build_search_payload(task)
+            if payload:
+                try:
+                    return await context.tools.invoke("research.search", payload)
+                except (ToolDisabledError, ToolInvocationError) as exc:
+                    logger.warning("research_tool_failure", tool="research.search", error=str(exc))
+        
+        return None
 
     def _requested_metrics_from_prompt(self, task: AgentInput) -> list[str]:
         metadata = task.metadata if isinstance(task.metadata, Mapping) else {}
@@ -757,13 +933,62 @@ class ResearchAgent:
                 base_lines = [serialized]
             else:
                 base_lines = []
-                for item in items:
-                    summary = item.get("summary") or item.get("title") or item.get("content", "(no summary)")
-                    source = item.get("source")
-                    line = f"- {summary}"
-                    if source:
-                        line = f"{line} [{source}]"
-                    base_lines.append(line)
+                tool_name = (tool_result.tool or "").lower()
+                
+                # Check if this is arXiv results - format with full academic citation
+                is_arxiv = "arxiv" in tool_name
+                
+                for i, item in enumerate(items, 1):
+                    if is_arxiv:
+                        # Format arXiv papers with full citation
+                        title = item.get("title", "Untitled")
+                        authors_list = item.get("authors", [])
+                        if isinstance(authors_list, list):
+                            author_names = [a.get("name", "") if isinstance(a, dict) else str(a) for a in authors_list[:3]]
+                            authors = ", ".join(author_names)
+                            if len(authors_list) > 3:
+                                authors += " et al."
+                        else:
+                            authors = "Unknown authors"
+                        
+                        published = item.get("published")
+                        if published:
+                            if isinstance(published, str):
+                                year = published[:4]
+                            else:
+                                year = str(published)[:4]
+                        else:
+                            year = "n.d."
+                        
+                        pdf_url = item.get("pdf_url") or item.get("identifier", "")
+                        summary = (item.get("summary") or "")[:300]
+                        if len(item.get("summary", "")) > 300:
+                            summary += "..."
+                        category = item.get("primary_category", "")
+                        
+                        base_lines.append(f"\n**[{i}] {title}**")
+                        base_lines.append(f"   Authors: {authors}")
+                        base_lines.append(f"   Published: {year} | Category: {category}")
+                        base_lines.append(f"   URL: {pdf_url}")
+                        base_lines.append(f"   Abstract: {summary}")
+                    else:
+                        # Standard format for other tools
+                        summary = item.get("summary") or item.get("title") or item.get("content", "(no summary)")
+                        source = item.get("source") or item.get("url") or item.get("link")
+                        line = f"- {summary}"
+                        if source:
+                            line = f"{line} [{source}]"
+                        base_lines.append(line)
+                        
+                # Add references section for arXiv
+                if is_arxiv and items:
+                    base_lines.append("\n---")
+                    base_lines.append("**References:**")
+                    for i, item in enumerate(items, 1):
+                        title = item.get("title", "Untitled")
+                        pdf_url = item.get("pdf_url") or item.get("identifier", "")
+                        base_lines.append(f"[{i}] {title} - {pdf_url}")
+                        
         if resolved_metrics:
             base_lines.append("Finance metrics:")
             for key, value in resolved_metrics.items():

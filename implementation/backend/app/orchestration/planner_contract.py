@@ -48,8 +48,10 @@ class PlannerStepPayload(BaseModel):
     tools: list[str] = Field(default_factory=list)
     fallback_tools: list[str] = Field(default_factory=list)
     confidence: float | None = Field(default=None)
+    parallel_group: int | None = Field(default=None)  # Steps with same group can run in parallel
+    depends_on: list[str] = Field(default_factory=list)  # Agent names this step depends on
 
-    @field_validator("tools", "fallback_tools", mode="before")
+    @field_validator("tools", "fallback_tools", "depends_on", mode="before")
     @classmethod
     def _coerce_tool_list(cls, value: Any) -> list[str]:
         if value is None:
@@ -113,6 +115,8 @@ class PlannedAgentStep:
     fallback_tools: list[str] = field(default_factory=list)
     reason: str = ""
     confidence: float = 1.0
+    parallel_group: int | None = None  # Steps with same group can run in parallel
+    depends_on: list[str] = field(default_factory=list)  # Agent names this step depends on
 
 
 @dataclass(slots=True)
@@ -156,6 +160,8 @@ class PlanGatekeeper:
                 fallback_tools=list(step.fallback_tools),
                 reason=step.reason,
                 confidence=step.confidence if step.confidence is not None else 1.0,
+                parallel_group=step.parallel_group,
+                depends_on=list(step.depends_on),
             )
             for step in plan_model.steps
         ]

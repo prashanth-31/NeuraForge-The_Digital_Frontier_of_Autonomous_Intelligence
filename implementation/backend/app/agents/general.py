@@ -13,6 +13,7 @@ from ..schemas.agents import (
     AgentOutput,
     ReasoningStepType,
 )
+from ..services.llm import is_llm_unavailable
 
 logger = get_logger(name=__name__)
 
@@ -29,7 +30,20 @@ class GeneralistAgent:
         "or acknowledge the specialists have handled the request. Keep responses under 200 words, professional and action-oriented."
     )
     description: str = "First-responder agent that greets users, answers simple prompts, and routes work to specialists."
-    tool_preference: list[str] = field(default_factory=list)
+    tool_preference: list[str] = field(default_factory=lambda: ["research.search", "research.wikipedia"])
+    tool_candidates: tuple[str, ...] = (
+        # Research tools for basic information retrieval
+        "research.search",            # DuckDuckGo - free
+        "research.summarizer",        # Text summarization
+        "research.wikipedia",         # Wikipedia - free
+        # Browser tools
+        "browser.open",               # HTTP fetching
+        "browser.extract_text",       # HTML extraction
+        # Memory tools
+        "memory.store",
+        "memory.retrieve",
+        "memory.timeline",
+    )
     fallback_agent: str | None = None
     confidence_bias: float = 0.75
 
@@ -82,6 +96,14 @@ class GeneralistAgent:
             system_prompt=self.system_prompt,
             temperature=0.2,
         )
+
+        # Handle LLM unavailability with fallback
+        if is_llm_unavailable(summary):
+            logger.warning("general_agent_llm_unavailable", task_id=task.task_id)
+            summary = self._generate_fallback_response(task, context_section)
+            await reasoning.note_uncertainty(
+                "LLM temporarily unavailable - providing basic greeting/acknowledgment"
+            )
 
         await context.memory.store_working_memory(task.task_id, summary)
 
@@ -136,6 +158,45 @@ class GeneralistAgent:
             key_findings=reasoning.findings,
             tools_considered=reasoning.tools_considered,
             uncertainties=reasoning.uncertainties,
+        )
+
+    def _generate_fallback_response(
+        self,
+        task: AgentInput,
+        context_section: str | None,
+    ) -> str:
+        """Generate a simple fallback response when LLM is unavailable."""
+        prompt = (task.prompt or "").lower().strip()
+        
+        # Handle common greetings
+        if any(g in prompt for g in ["hello", "hi", "hey", "greetings"]):
+            return "Hello! I'm NeuraForge's assistant. The language model is currently restarting. Please try your request again in a moment."
+        
+        # Handle meta questions
+        if any(m in prompt for m in ["what can you do", "capabilities", "help"]):
+            return (
+                "I'm NeuraForge's multi-agent assistant. I can help with:\n"
+                "- **Financial analysis** (investments, stocks, budgeting)\n"
+                "- **Research** (web searches, information gathering)\n"
+                "- **Enterprise content** (proposals, strategies)\n"
+                "- **Creative writing** (poems, taglines, stories)\n\n"
+                "*Note: The language model is temporarily unavailable. Please try again shortly.*"
+            )
+        
+        # If specialists already responded
+        specialist_agents = {"finance_agent", "research_agent", "creative_agent", "enterprise_agent"}
+        specialist_responses = [ex for ex in task.prior_exchanges if ex.agent in specialist_agents]
+        if specialist_responses:
+            agent_names = ", ".join(set(ex.agent.replace("_agent", "") for ex in specialist_responses))
+            return f"Your request has been processed by our specialist agents ({agent_names}). Their responses are shown above."
+        
+        # Generic fallback
+        return (
+            "I've received your request. The language model is temporarily restarting.\n\n"
+            "Please try again in a few moments, or I can route your request to a specialist agent:\n"
+            "- Ask about **finances** for financial analysis\n"
+            "- Ask to **research** a topic for web searches\n"
+            "- Ask for a **proposal** for business documents"
         )
 
     def _build_prompt(self, task: AgentInput, *, context_section: str | None = None) -> str:

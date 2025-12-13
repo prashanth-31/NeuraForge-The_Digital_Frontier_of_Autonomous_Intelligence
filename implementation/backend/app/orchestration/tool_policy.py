@@ -37,74 +37,146 @@ class AgentToolPolicy:
 
 
 _POLICY_DEFINITIONS: Mapping[str, Mapping[str, Sequence[str]]] = {
+    # ════════════════════════════════════════════════════════════════════════════
+    # GENERAL AGENT: First-line responder, handles greetings, clarifications,
+    # and routes to specialists. Has access to basic research and summarization.
+    # ════════════════════════════════════════════════════════════════════════════
     "general_agent": {
         "allowed": (
+            # Research & Information
             "research.search",
             "research.summarizer",
-            "creative.tonecheck",
+            "research.wikipedia",
+            "research.arxiv",
+            # Browser & Web
             "browser.open",
-            "browser.summarize",
+            "browser.extract_text",
+            # Creative (basic tone checking)
+            "creative.tonecheck",
+            "creative.tone_checker",
+            # Memory & Context
             "memory.*",
+            # Utils
+            "utils.*",
         ),
         "denied": (
             "terminal.*",
             "code.*",
             "finance.*",
+            "enterprise.*",
         ),
     },
+    # ════════════════════════════════════════════════════════════════════════════
+    # RESEARCH AGENT: Deep research, citations, document analysis, knowledge synthesis
+    # ════════════════════════════════════════════════════════════════════════════
     "research_agent": {
         "allowed": (
-            "research.search",
-            "research.summarizer",
-            "research.doc_loader",
-            "browser.*",
-            "pdf.*",
-            "text.*",
-            "finance.snapshot",
-            "finance.snapshot.alpha",
-            "finance.snapshot.cached",
+            # Core Research Tools (Open Source)
+            "research.search",           # DuckDuckGo - anonymous web search
+            "research.summarizer",       # Text summarization
+            "research.wikipedia",        # Wikipedia API - free
+            "research.arxiv",            # arXiv - open academic papers
+            "research.doc_loader",       # Document loading/parsing
+            "research.vector_search",    # Qdrant vector search
+            # Browser Tools
+            "browser.open",              # HTTP fetching
+            "browser.extract_text",      # HTML text extraction
+            # Data Analysis
+            "dataframe.*",               # Pandas-based analytics
+            # Financial Data (read-only for research context)
+            "finance.snapshot",          # Yahoo Finance - free
+            "finance.snapshot.alpha",    # Alpha Vantage - free tier
+            "finance.snapshot.cached",   # Cached quotes
+            # Memory & Context
+            "memory.*",
+            # Utils
+            "utils.*",
         ),
         "denied": (
-            "finance.indicators.*",
             "creative.*",
             "terminal.*",
+            "enterprise.*",
         ),
     },
+    # ════════════════════════════════════════════════════════════════════════════
+    # FINANCE AGENT: Financial analysis, market data, portfolio insights
+    # All tools use open-source or free-tier APIs
+    # ════════════════════════════════════════════════════════════════════════════
     "finance_agent": {
         "allowed": (
-            "finance.snapshot",
-            "finance.snapshot.alpha",
-            "finance.snapshot.cached",
-            "finance.indicators.*",
-            "finance.plot",
-            "dataframe.*",
+            # Core Finance Tools (Free/Open APIs)
+            "finance.snapshot",          # Yahoo Finance - free
+            "finance.snapshot.alpha",    # Alpha Vantage - free tier (5 calls/min)
+            "finance.snapshot.cached",   # Stooq fallback - free
+            "finance.indicators.*",      # Technical indicators
+            "finance.plot",              # Matplotlib charting - open source
+            "finance.analytics",         # Pandas analytics - open source
+            "finance/pandas",            # Pandas data analysis
+            "finance/csv_analyzer",      # CSV analysis
+            "finance/sentiment",         # FinBERT sentiment - open source model
+            "finance/finbert",           # FinBERT alias
+            # Data Processing
+            "dataframe.*",               # Pandas operations
+            # Research Support (for news via DuckDuckGo)
+            "research.search",           # DuckDuckGo for news context
+            "research.wikipedia",        # Company background
+            # Memory & Context
             "memory.*",
+            # Utils
+            "utils.*",
         ),
         "denied": (
             "creative.*",
-            "research.vector_search",
             "terminal.*",
+            "enterprise.*",
         ),
     },
+    # ════════════════════════════════════════════════════════════════════════════
+    # CREATIVE AGENT: Content creation, tone styling, prompt crafting
+    # ════════════════════════════════════════════════════════════════════════════
     "creative_agent": {
         "allowed": (
-            "creative.*",
-            "browser.*",
+            # Creative Tools
+            "creative.*",                # All creative adapters
+            # Browser & Research (for inspiration/reference)
+            "browser.open",
+            "browser.extract_text",
+            "research.search",           # DuckDuckGo for research
+            "research.wikipedia",        # Background info
+            # Text Processing
             "text.*",
+            # Memory
+            "memory.*",
+            # Utils
+            "utils.*",
         ),
         "denied": (
             "finance.*",
-            "research.*",
             "terminal.*",
-            "code.*",
+            "enterprise.*",
         ),
     },
+    # ════════════════════════════════════════════════════════════════════════════
+    # ENTERPRISE AGENT: Business strategy, playbooks, compliance, CRM
+    # ════════════════════════════════════════════════════════════════════════════
     "enterprise_agent": {
         "allowed": (
-            "enterprise.*",
-            "browser.*",
-            "memory.*",
+            # Enterprise Tools
+            "enterprise.*",              # All enterprise adapters
+            # Browser & Research (for business intelligence)
+            "browser.open",
+            "browser.extract_text",
+            "research.search",           # Market research
+            "research.wikipedia",        # Industry background
+            "research.arxiv",            # Academic business research
+            # Data Analysis
             "dataframe.*",
+            # Memory & Context
+            "memory.*",
+            # Planning
+            "planning.*",
+            # Utils
+            "utils.*",
         ),
         "denied": (
             "finance.*",

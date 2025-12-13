@@ -53,6 +53,9 @@ class AgentContext:
     # NEW: Tool chain executor for multi-step tool pipelines
     _tool_chain_executor: "ToolChainExecutor | None" = None
     
+    # NEW: Agent collaboration - allows agents to request help from other agents
+    _collaboration_handler: Callable[[str, str, dict[str, Any]], Awaitable[AgentOutput]] | None = None
+    
     async def emit_thinking(
         self,
         agent: str,
@@ -72,6 +75,65 @@ class AgentContext:
             metadata=metadata or {},
         )
         await self.thinking_emitter(event)
+    
+    async def request_collaboration(
+        self,
+        requesting_agent: str,
+        target_agent: str,
+        request: str,
+        context_data: dict[str, Any] | None = None,
+    ) -> AgentOutput | None:
+        """
+        Request collaboration from another agent during task execution.
+        
+        This allows an agent to dynamically request help from a specialist
+        when it encounters a sub-task outside its expertise.
+        
+        Args:
+            requesting_agent: Name of the agent making the request
+            target_agent: Name of the agent to request help from
+            request: The specific request/question for the target agent
+            context_data: Additional context to pass to the target agent
+            
+        Returns:
+            AgentOutput from the target agent, or None if collaboration unavailable
+        """
+        if self._collaboration_handler is None:
+            return None
+        
+        await self.emit_thinking(
+            agent=requesting_agent,
+            thought=f"Requesting collaboration from {target_agent}: {request[:100]}...",
+            event_type=ThinkingEventType.COLLABORATION,
+            metadata={"target_agent": target_agent},
+        )
+        
+        try:
+            result = await self._collaboration_handler(
+                target_agent,
+                request,
+                context_data or {},
+            )
+            
+            await self.emit_thinking(
+                agent=requesting_agent,
+                thought=f"Received collaboration response from {target_agent} (confidence: {result.confidence:.2f})",
+                event_type=ThinkingEventType.COLLABORATION,
+                metadata={
+                    "target_agent": target_agent,
+                    "confidence": result.confidence,
+                },
+            )
+            
+            return result
+        except Exception as exc:
+            await self.emit_thinking(
+                agent=requesting_agent,
+                thought=f"Collaboration request to {target_agent} failed: {str(exc)}",
+                event_type=ThinkingEventType.UNCERTAINTY,
+                metadata={"error": str(exc)},
+            )
+            return None
     
     def create_tool_chain(self, agent_name: str = "tool_chain") -> "ToolChainBuilder":
         """
@@ -128,11 +190,18 @@ class BaseAgent(Protocol):
 
 
 def get_agent_schema(agents: list[BaseAgent]) -> list[dict[str, Any]]:
+    """
+    Generate agent schema for the LLM planner including ALL available tools.
+    
+    The planner needs to see tool_candidates (full list) not just tool_preference
+    (default tools) to make intelligent tool selection decisions.
+    """
     return [
         {
             "name": agent.name,
             "description": agent.description,
-            "tools": list(agent.tool_preference),
+            "tools": list(agent.tool_preference),  # Default tools
+            "all_tools": list(getattr(agent, "tool_candidates", agent.tool_preference)),  # ALL available tools
             "fallback_agent": agent.fallback_agent,
             "confidence_bias": agent.confidence_bias,
         }

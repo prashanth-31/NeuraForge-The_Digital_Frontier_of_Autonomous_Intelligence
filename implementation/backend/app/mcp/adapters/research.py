@@ -300,17 +300,30 @@ class WikipediaSummaryAdapter(MCPToolAdapter):
     async def _invoke(self, payload_model: WikipediaSummaryInput) -> dict[str, Any]:
         from urllib.parse import quote
 
-        encoded = quote(payload_model.title, safe="")
         language = payload_model.language.lower()
-        url = f"https://{language}.wikipedia.org/api/rest_v1/page/summary/{encoded}"
         headers = {
             "User-Agent": "NeuraForge-MCP-Research/1.0",
             "Accept": "application/json",
         }
         if not payload_model.redirect:
             headers["Accept"] = "application/json; redirect=false"
-        async with httpx.AsyncClient(timeout=8.0, headers=headers) as client:
+
+        async with httpx.AsyncClient(timeout=10.0, headers=headers) as client:
+            # Try direct title lookup first
+            encoded = quote(payload_model.title, safe="")
+            url = f"https://{language}.wikipedia.org/api/rest_v1/page/summary/{encoded}"
             response = await client.get(url)
+            
+            # If 404, try Wikipedia search API to find the correct title
+            if response.status_code == 404:
+                search_title = await self._search_wikipedia_title(
+                    client, payload_model.title, language
+                )
+                if search_title:
+                    encoded = quote(search_title, safe="")
+                    url = f"https://{language}.wikipedia.org/api/rest_v1/page/summary/{encoded}"
+                    response = await client.get(url)
+            
             response.raise_for_status()
             data = response.json()
 
@@ -324,6 +337,28 @@ class WikipediaSummaryAdapter(MCPToolAdapter):
             or data.get("content_urls", {}).get("mobile", {}).get("page"),
             "last_modified": self._parse_timestamp(last_modified),
         }
+
+    async def _search_wikipedia_title(
+        self, client: httpx.AsyncClient, query: str, language: str
+    ) -> str | None:
+        """Search Wikipedia for the best matching article title."""
+        from urllib.parse import quote
+        
+        search_url = (
+            f"https://{language}.wikipedia.org/w/api.php"
+            f"?action=query&list=search&srsearch={quote(query)}"
+            f"&format=json&srlimit=1"
+        )
+        try:
+            response = await client.get(search_url)
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get("query", {}).get("search", [])
+                if results:
+                    return results[0].get("title")
+        except Exception:
+            pass  # Fall through to return None
+        return None
 
     @staticmethod
     def _parse_timestamp(raw: str | None) -> datetime | None:

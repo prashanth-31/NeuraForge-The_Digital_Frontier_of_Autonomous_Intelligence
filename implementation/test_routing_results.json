@@ -1,0 +1,1525 @@
+[
+  {
+    "test": {
+      "prompt": "Find research papers on transformer architecture in deep learning",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.arxiv"
+      ],
+      "fallback_tools": [
+        "research.search"
+      ],
+      "description": "Research: Academic papers (arxiv)"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "research_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "research.arxiv"
+      ],
+      "fallback_tools": [
+        "research.search",
+        "research.wikipedia"
+      ],
+      "executed_tools": [
+        "research.search",
+        "finance.snapshot.cached"
+      ],
+      "planner_reason": "find academic papers",
+      "raw_response": "Based on the task prompt \"Find research papers on transformer architecture in deep learning\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Identify the relevant agent based on the task intent.\nThe task involves finding research papers, which falls under the category of external information retrieval. According to the Agent Selection Rules, this is handled by the `research_agent`.\n\n**Step 2:** Select the appropriate tool for the research_agent.\nFor academic papers, specifically research papers on transformer architecture in deep learning, we should use `research.arxiv`. This is because `research.arxiv` is specifically designed for searching academic papers and is a high-priority tool for this task.\n\n**Step 3:** Determine the fallback tools in case the primary tool fails or is not available.\nThe fallback tools are specified as `research.search` and `research.wikipedia`, which can be used if `research.arxiv` is unavailable.\n\n**Step 4:** Calculate the confidence level of the plan.\nBased on the task prompt, I would assign a high confidence level (0.95) to this plan since it directly addresses the task intent.\n\nHere's the resulting JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"find academic papers\",\n      \"tools\": [\"research.arxiv\"],\n      \"fallback_tools\": [\"research.search\", \"research.wikipedia\"],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"academic research query\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the `research_agent` to find academic papers on transformer architecture in deep learning, using `research.arxiv` as the primary tool and `research.search` and `research.wikipedia` as fallback tools."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "What is the history of artificial intelligence?",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.wikipedia",
+        "research.search"
+      ],
+      "fallback_tools": [
+        "research.search",
+        "research.arxiv"
+      ],
+      "description": "Research: General knowledge"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "research_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "research.wikipedia"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "retrieve factual/encyclopedic information about the history of artificial intelligence",
+      "raw_response": "Based on the task prompt \"What is the history of artificial intelligence?\" and the provided metadata, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the agent based on the task intent.\nThe task prompt contains the phrase \"history of,\" which suggests that we need to retrieve factual/encyclopedic information. According to the Agent Selection Rules, this is a good fit for the `research_agent`.\n\n**Step 2:** Select tools for the chosen agent.\nFor the `research_agent`, we can use the following tools:\n- `research.wikipedia` for retrieving factual/encyclopedic information about the history of artificial intelligence.\n\n**Step 3:** Determine the confidence level and handoff strategy.\nBased on the task prompt, I will assign a confidence level of 0.95 to this step, as it is a well-defined research query. The handoff strategy will be sequential, as we are retrieving information from multiple sources.\n\nHere is the resulting JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"retrieve factual/encyclopedic information about the history of artificial intelligence\",\n      \"tools\": [\"research.wikipedia\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"history of AI\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the `research_agent` and uses the `research.wikipedia` tool to retrieve information about the history of artificial intelligence. The confidence level is set to 0.95, indicating a high degree of certainty in this step."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Search for recent news about quantum computing breakthroughs",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.search"
+      ],
+      "fallback_tools": [],
+      "description": "Research: News/web search"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "research_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [
+        "research.search",
+        "finance.snapshot.cached"
+      ],
+      "planner_reason": "find recent news about quantum computing breakthroughs",
+      "raw_response": "Based on the task prompt \"Search for recent news about quantum computing breakthroughs\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nThe task involves searching for recent news, which falls under the category of \"news\" or \"current events\". According to the Agent Selection Rules, this is a use case for the `research_agent`.\n\n**Tool Selection**\n\nFor searching for news, the `research.search` tool is suitable. However, since we are looking for recent news about quantum computing breakthroughs, it's better to use a more specific search engine like `search/tavily`. \n\n**Plan**\n\nHere is the JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"find recent news about quantum computing breakthroughs\",\n      \"tools\": [\"search/tavily\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"news search query\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the `research_agent` to perform a specific search using the `search/tavily` tool, which is more suitable for searching recent news about quantum computing breakthroughs."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected tools ['research.search'], got []"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Summarize the key points about machine learning algorithms",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.summarizer",
+        "research.search"
+      ],
+      "fallback_tools": [
+        "research.search"
+      ],
+      "description": "Research: Summarization"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "research_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "research.search"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        "research.search",
+        "finance.snapshot.cached"
+      ],
+      "planner_reason": "find factual information about machine learning algorithms",
+      "raw_response": "Based on the task prompt \"Summarize the key points about machine learning algorithms\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the agent to use based on the task intent.\nThe task is about summarizing key points, which implies research and explanation. The `research_agent` is suitable for this task as it can find factual information and compile concise briefings.\n\n**Step 2:** Select the tool(s) to use with the chosen agent.\nFor a research task like this, we need to retrieve external information. The `research.search` tool is suitable for web search and retrieving recent developments.\n\n**Step 3:** Determine the confidence level of the plan.\nBased on the task prompt, I will assign a high confidence level (0.95) as the task is well-defined and requires specific research.\n\nHere's the JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"find factual information about machine learning algorithms\",\n      \"tools\": [\"research.search\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"machine learning research query\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the `research_agent` with a high confidence level (0.95) and uses the `research.search` tool to retrieve external information about machine learning algorithms."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "What are the best practices for software testing?",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.search"
+      ],
+      "fallback_tools": [],
+      "description": "Research: Best practices inquiry"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "general_agent"
+      ],
+      "skipped_agents": [
+        "research_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "provide general knowledge about software testing",
+      "raw_response": "Based on the task prompt \"What are the best practices for software testing?\" and the provided metadata, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the agent based on the task intent.\nThe task is about software testing, which falls under general knowledge. The `general_agent` is suitable for this task as it can handle simple explanations and provide basic information.\n\n**Step 2:** Select tools for the chosen agent.\nFor the `general_agent`, no external tools are required as it handles conversational tasks directly.\n\n**Step 3:** Determine the confidence level of the plan.\nBased on the task prompt, I will assign a confidence level of 0.95, indicating high confidence in the plan's accuracy.\n\nHere is the generated JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"general_agent\",\n      \"reason\": \"provide general knowledge about software testing\",\n      \"tools\": [],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"software testing best practices\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the `general_agent` to provide general knowledge about software testing, with no external tools required. The confidence level is set to 0.95, indicating high confidence in the plan's accuracy."
+    },
+    "evaluation": {
+      "agent_correct": false,
+      "tools_correct": false,
+      "issues": [
+        "Expected research_agent, got ['general_agent']",
+        "Expected tools ['research.search'], got []"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Find academic papers about stock market prediction using AI",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.arxiv"
+      ],
+      "fallback_tools": [
+        "research.search"
+      ],
+      "description": "Research: Academic finance papers"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [],
+      "skipped_agents": [],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "",
+      "raw_response": ""
+    },
+    "evaluation": {
+      "agent_correct": false,
+      "tools_correct": false,
+      "issues": [
+        "Expected research_agent, got []",
+        "Expected tools ['research.arxiv'], got []"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "What is the current stock price of Tesla?",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "finance.snapshot.alpha"
+      ],
+      "description": "Finance: Stock price query"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        null,
+        "finance.snapshot"
+      ],
+      "planner_reason": "find current stock price of Tesla",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"finance_agent\", \"reason\": \"find current stock price of Tesla\", \"tools\": [\"finance.snapshot\"], \"fallback_tools\": [], \"confidence\": 0.95}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"stock market query\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Give me a financial analysis of Apple Inc earnings",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot",
+        "finance.analytics"
+      ],
+      "fallback_tools": [],
+      "description": "Finance: Company analysis"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        null,
+        "finance.snapshot"
+      ],
+      "planner_reason": "perform financial analysis",
+      "raw_response": "Based on the task prompt \"Give me a financial analysis of Apple Inc earnings\" and the provided metadata, I will create a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nThe action verb is \"Give\", which does not directly determine an agent. However, based on the task prompt, we can infer that the user wants a financial analysis, which falls under the finance domain. Therefore, I will select the `finance_agent` as the primary agent for this task.\n\n**Tool Selection**\n\nFor the `finance_agent`, the tool selection rule is to use `finance.snapshot` when performing financial analysis. This tool provides access to real market data, including stock prices and earnings reports.\n\n**Plan**\n\nHere is the deterministic JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"perform financial analysis\",\n      \"tools\": [\"finance.snapshot\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"financial analysis of Apple Inc earnings\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the `finance_agent` as the primary agent, uses the `finance.snapshot` tool for financial analysis, and has a confidence level of 0.95. The handoff strategy is set to sequential, indicating that this task will be executed sequentially with any subsequent tasks."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "What are the latest market trends for NVIDIA stock?",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot",
+        "finance.news"
+      ],
+      "fallback_tools": [],
+      "description": "Finance: Market trends"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        null,
+        "finance.snapshot"
+      ],
+      "planner_reason": "find latest market trends for NVIDIA stock",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"finance_agent\", \"reason\": \"find latest market trends for NVIDIA stock\", \"tools\": [\"finance.snapshot\"], \"fallback_tools\": [], \"confidence\": 0.95}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"financial analysis query\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Compare the P/E ratios of Microsoft and Google",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "description": "Finance: Comparative analysis"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "retrieve market data and compare P/E ratios",
+      "raw_response": "Based on the task prompt \"Compare the P/E ratios of Microsoft and Google\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nThe action verb is \"Compare\" which implies that we need to analyze data. The topic is financial, specifically comparing stock metrics (P/E ratio). Therefore, the finance_agent should be used for this task.\n\n**Tool Selection**\n\nFor financial analysis, the finance.snapshot tool is suitable for retrieving market data, including P/E ratios.\n\n**Plan**\n\nHere is the JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"retrieve market data and compare P/E ratios\",\n      \"tools\": [\"finance.snapshot\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"financial analysis\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the finance_agent to retrieve market data and compare P/E ratios using the finance.snapshot tool. The confidence level is set to 0.95, indicating a high degree of certainty in this selection."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "How is AAPL performing today?",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "description": "Finance: Ticker symbol query"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "retrieve market data for AAPL",
+      "raw_response": "Based on the task prompt \"How is AAPL performing today?\" and the provided metadata, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nThe action verb in the task prompt is \"performing\", which indicates that we need to analyze financial data. Therefore, we should use the `finance_agent`.\n\n**Tool Selection**\n\nFor this task, we need to retrieve market data for AAPL (Apple Inc.). The `finance_snapshot` tool is suitable for retrieving stock prices and other market data.\n\n**Plan Generation**\n\nHere is the generated JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"retrieve market data for AAPL\",\n      \"tools\": [\"finance.snapshot\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"AAPL market performance\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the `finance_agent` to retrieve market data for AAPL using the `finance.snapshot` tool.\n\nNote that this plan does not include any prior outputs or additional tools, as they are not relevant to this specific task."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "What's the dividend yield for Microsoft stock?",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "description": "Finance: Dividend query"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot.alpha"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        null,
+        "finance.snapshot"
+      ],
+      "planner_reason": "financial analysis",
+      "raw_response": "Based on the task prompt \"What's the dividend yield for Microsoft stock?\" and the provided metadata, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nThe task involves financial analysis, specifically asking for the dividend yield of Microsoft stock. According to the agent selection rules, this falls under the finance_agent capability.\n\n**Tool Selection**\n\nFor finance_agent, the default tool is finance.snapshot. However, since we're looking for a specific metric (dividend yield), we'll use finance.snapshot.alpha as it provides more detailed financial data.\n\n**Plan Generation**\n\nHere's the generated JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"financial analysis\",\n      \"tools\": [\"finance.snapshot.alpha\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"financial analysis query\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the finance_agent to perform financial analysis, using the finance.snapshot.alpha tool to retrieve the dividend yield for Microsoft stock."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected tools ['finance.snapshot'], got ['finance.snapshot.alpha']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Should I invest in cryptocurrency right now?",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot",
+        "finance.news"
+      ],
+      "fallback_tools": [],
+      "description": "Finance: Investment advice"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "financial analysis for investment decision",
+      "raw_response": "Based on the task prompt \"Should I invest in cryptocurrency right now?\" and the provided metadata, tools, and agent capabilities, here is a deterministic JSON plan selecting agents and tools:\n\n```\n{\n  \"steps\": [\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"financial analysis for investment decision\",\n      \"tools\": [\"finance.snapshot\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"cryptocurrency investment query\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the `finance_agent` to perform financial analysis for the investment decision, using the `finance.snapshot` tool. The confidence level is set to 0.95, indicating a high degree of certainty in this selection.\n\nThe reasoning behind this plan is as follows:\n\n1. The task prompt asks about investing in cryptocurrency, which falls under the domain of finance.\n2. The `finance_agent` has expertise in financial analysis and can provide data-driven insights for investment decisions.\n3. The `finance.snapshot` tool is suitable for retrieving real-time market data, such as stock prices, ticker symbols, P/E ratios, earnings reports, and market trends with actual data.\n\nThis plan adheres to the agent selection rules, which prioritize the `finance_agent` for tasks related to financial analysis and investment decisions."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "What's the stock outlook for AMD?",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "description": "Finance: Stock outlook"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        null,
+        "finance.snapshot"
+      ],
+      "planner_reason": "find stock outlook",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"finance_agent\", \"reason\": \"find stock outlook\", \"tools\": [\"finance.snapshot\"], \"fallback_tools\": [], \"confidence\": 0.95}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"stock market analysis\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Write a short poem about the sunset",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Creative: Poetry writing"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        "creative.tonecheck"
+      ],
+      "planner_reason": "write a poem about the sunset",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"creative_agent\", \"reason\": \"write a poem about the sunset\", \"tools\": [\"creative.tonecheck\"], \"fallback_tools\": [], \"confidence\": 0.95}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"poem writing task\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Help me brainstorm ideas for a mobile app startup",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Creative: Brainstorming"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "brainstorm app ideas",
+      "raw_response": "Based on the task prompt \"Help me brainstorm ideas for a mobile app startup\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the user, which is to brainstorm ideas for a mobile app startup. The ACTION verb in this case is \"Brainstorm\".\n\n**Agent Selection:**\nBased on the MIXED INTENT PRIORITY (ACTION WORD WINS) rule, since the ACTION verb is \"Brainstorm\", we will use the **creative_agent**.\n\n**Tool Selection:**\nSince creative_agent is used for writing and content creation tasks, we will select the tool **creative.tonecheck** to help with brainstorming ideas.\n\n**Plan:**\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"brainstorm app ideas\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"app idea brainstorming\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan will use the creative_agent to help with brainstorming ideas for a mobile app startup, and select the tool creative.tonecheck to aid in this process."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Create a marketing slogan for an eco-friendly water bottle",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Creative: Marketing content"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        "creative.tonecheck"
+      ],
+      "planner_reason": "create a marketing slogan",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"creative_agent\", \"reason\": \"create a marketing slogan\", \"tools\": [\"creative.tonecheck\"], \"fallback_tools\": [], \"confidence\": 0.95}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"marketing slogan creation\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Write a short story about a robot learning to feel emotions",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Creative: Story writing"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        "creative.tonecheck"
+      ],
+      "planner_reason": "write a story about robots",
+      "raw_response": "{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"write a story about robots\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"story writing query\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Compose lyrics for a song about friendship",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Creative: Song lyrics"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        "creative.tonecheck"
+      ],
+      "planner_reason": "compose lyrics for a song about friendship",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"creative_agent\", \"reason\": \"compose lyrics for a song about friendship\", \"tools\": [\"creative.tonecheck\"], \"fallback_tools\": [], \"confidence\": 0.95}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"lyrics composition\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Write a catchy tagline for a fitness app",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Creative: Tagline creation"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [
+        "creative.tonecheck"
+      ],
+      "planner_reason": "write a catchy tagline",
+      "raw_response": "{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"write a catchy tagline\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"tagline generation\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Draft a creative product description for wireless headphones",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Creative: Product description"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "draft creative product description",
+      "raw_response": "Based on the task prompt \"Draft a creative product description for wireless headphones\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nGiven the task prompt, we need to select an agent that can assist with writing and content creation. According to the rules, the **creative_agent** is the primary choice for writing tasks, including drafting creative product descriptions.\n\n**Tool Selection**\n\nFor the creative_agent, we will use the **creative.tonecheck** tool to ensure the tone of the description is suitable for a product like wireless headphones.\n\n**Plan**\n\nHere is the deterministic JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"draft creative product description\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"wireless headphones product description\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the creative_agent to draft a creative product description for wireless headphones, using the creative.tonecheck tool to ensure the tone is suitable for the product."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Hello, how are you today?",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [],
+      "description": "General: Greeting"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "general_agent"
+      ],
+      "skipped_agents": [
+        "research_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "greeting detected",
+      "raw_response": "fast_path:greeting"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "What can you help me with?",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [],
+      "description": "General: Capabilities inquiry"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "general_agent"
+      ],
+      "skipped_agents": [
+        "research_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "meta question about system capabilities",
+      "raw_response": "fast_path:meta_question"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Explain how to calculate compound interest",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [],
+      "description": "General: Educational explanation"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "financial analysis",
+      "raw_response": "Based on the task prompt \"Explain how to calculate compound interest\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the agent based on the task intent.\nThe ACTION verb is \"Explain\", which corresponds to the general_agent. However, since the task involves financial analysis, we should consider using the finance_agent instead.\n\n**Agent Selection:**\nfinance_agent (confidence: 0.90)\n\n**Tool Selection:**\nfinance.snapshot (default tool for finance_agent)\n\n**Step 2:** Determine if any additional tools are needed.\nSince the task only requires explaining how to calculate compound interest, no additional tools are necessary.\n\n**Plan:**\n{\n  \"steps\": [\n    {\"agent\": \"finance_agent\", \"reason\": \"financial analysis\", \"tools\": [\"finance.snapshot\"], \"fallback_tools\": [], \"confidence\": 0.90}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"compound interest calculation\"},\n  \"confidence\": 0.92\n}\n\nThis plan selects the finance_agent and uses the finance.snapshot tool to provide a clear, data-driven explanation of how to calculate compound interest."
+    },
+    "evaluation": {
+      "agent_correct": false,
+      "tools_correct": true,
+      "issues": [
+        "Expected general_agent, got ['finance_agent']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Convert 100 miles to kilometers",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [],
+      "description": "General: Unit conversion"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "general_agent"
+      ],
+      "skipped_agents": [
+        "research_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "unit conversion",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"general_agent\", \"reason\": \"unit conversion\", \"tools\": [], \"fallback_tools\": [], \"confidence\": 1.0}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"unit conversion\"},\n  \"confidence\": 1.0\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "What's the capital of France?",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [],
+      "description": "General: Simple factual question"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "general_agent"
+      ],
+      "skipped_agents": [
+        "research_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "greeting and simple explanation",
+      "raw_response": "{\n  \"steps\": [\n    {\"agent\": \"general_agent\", \"reason\": \"greeting and simple explanation\", \"tools\": [], \"fallback_tools\": [], \"confidence\": 0.95}\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"capital of France query\"},\n  \"confidence\": 0.92\n}"
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Thank you for your help!",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [],
+      "description": "General: Gratitude"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "general_agent"
+      ],
+      "skipped_agents": [
+        "research_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "handle greeting and simple explanation",
+      "raw_response": "Based on the provided instructions and rules, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Task Prompt:** Thank you for your help!\n\n**Metadata:**\n\n* conversation.latest_task_id = bf5ec08e-80f6-4ca3-b804-896e4449460f\n* conversation.root_task_id = bf5ec08e-80f6-4ca3-b804-896e4449460f\n\nSince there are no prior outputs, we will start from scratch.\n\n**Agent Selection:**\n\nBased on the task prompt \"Thank you for your help!\", I will select the **general_agent** as it is the first-responder agent that handles greetings and simple explanations. The reason for selecting this agent is to provide a polite response to the user's gratitude.\n\n**Tool Selection:**\n\nSince we are using the general_agent, no tools are required for this task.\n\n**Plan:**\n\nHere is the deterministic JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"general_agent\",\n      \"reason\": \"handle greeting and simple explanation\",\n      \"tools\": [],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"greeting response\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the general_agent to respond with a polite message, and since no tools are required for this task, there is no tool selection.\n\nPlease note that this plan assumes that the user's gratitude does not require any further action or research. If additional context or requirements were provided, the plan might change accordingly."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Generate a quarterly business report for our sales data",
+      "expected_agent": "enterprise_agent",
+      "expected_tools": [
+        "enterprise.playbook",
+        "enterprise.report"
+      ],
+      "fallback_tools": [
+        "enterprise.playbook"
+      ],
+      "description": "Enterprise: Business reporting"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "finance.snapshot.alpha",
+        "finance.snapshot.cached"
+      ],
+      "executed_tools": [],
+      "planner_reason": "financial report requested",
+      "raw_response": "Based on the task prompt \"Generate a quarterly business report for our sales data\" and the provided metadata, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the task. The task involves generating a quarterly business report for sales data, which implies a need for financial analysis and reporting.\n\n**Agent Selection:**\nBased on the agent selection rules, the finance_agent is the most suitable choice for this task, as it specializes in financial analysis and reporting.\n\n**Tool Selection:**\nThe finance_snapshot tool is the primary tool required for this task, as it provides access to real-time market data and can be used to generate reports.\n\n**Step 2:** Determine if any additional tools or agents are needed. In this case, we may need to use research_agent to gather additional information about sales trends or industry benchmarks.\n\n**Agent Selection:**\nThe research_agent is a secondary choice for this task, as it can provide additional insights and data points to support the financial analysis.\n\n**Tool Selection:**\nThe research.search tool can be used in conjunction with finance_snapshot to gather more comprehensive data on sales trends and industry benchmarks.\n\n**Step 3:** Determine if any creative or writing tasks are involved. In this case, we may need to use creative_agent to generate a report summary or executive summary.\n\n**Agent Selection:**\nThe creative_agent is not the primary choice for this task, but it can be used as a secondary agent to generate a report summary or executive summary.\n\n**Tool Selection:**\nThe creative.tonecheck tool can be used in conjunction with finance_snapshot and research.search to generate a well-written and engaging report summary.\n\nHere is the resulting JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"financial analysis and reporting\",\n      \"tools\": [\"finance.snapshot\"],\n      \"fallback_tools\": [\"research.search\"]\n    },\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"gather additional information on sales trends and industry benchmarks\",\n      \"tools\": [\"research.search\"],\n      \"fallback_tools\": []\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"quarterly business report for sales data\"},\n  \"confidence\": 0.95\n}\n```\n\nThis plan selects the finance_agent as the primary agent, with finance_snapshot as the primary tool. The research_agent is selected as a secondary agent to gather additional information on sales trends and industry benchmarks, using research.search as the tool."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected enterprise_agent as primary, got finance_agent",
+        "Expected tools ['enterprise.playbook', 'enterprise.report'], got ['finance.snapshot']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Analyze our company's CRM data for customer trends",
+      "expected_agent": "enterprise_agent",
+      "expected_tools": [
+        "enterprise.playbook",
+        "enterprise.analytics"
+      ],
+      "fallback_tools": [
+        "enterprise.playbook"
+      ],
+      "description": "Enterprise: CRM data analytics"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "analyze CRM data for customer trends",
+      "raw_response": "Based on the task prompt \"Analyze our company's CRM data for customer trends\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the task, which is to analyze CRM data. This suggests that we need an agent with expertise in data analysis and research.\n\n**Agent Selection:**\nBased on the Agent Selection Rules, since the task involves analyzing CRM data for customer trends, I will select `research_agent` as the primary agent.\n\n**Tool Selection:**\nFor `research_agent`, the default tools are `research.arxiv`, `research.search`, `research.summarizer`, and `research.wikipedia`. However, since we're dealing with CRM data, which is not typically found on academic papers or Wikipedia, I will select `research.search` as the primary tool for web search.\n\n**Fallback Tools:**\nAs a fallback, if `research.search` fails to provide relevant results, I will use `research.arxiv` to search for related academic papers.\n\n**Step 2:** Since we're dealing with CRM data, which is likely stored in an enterprise system, I will also select `enterprise_agent` as a secondary agent to assist with accessing the CRM data.\n\n**Tool Selection:**\nFor `enterprise_agent`, the default tool is `enterprise.playbook`. However, since we're not creating a business plan or proposal, I will use `enterprise.crm` to access the CRM data.\n\n**Step 3:** To analyze the CRM data for customer trends, I will also select `finance_agent` as a tertiary agent to assist with financial analysis and trend identification.\n\n**Tool Selection:**\nFor `finance_agent`, the default tool is `finance.snapshot`. However, since we're dealing with CRM data, which may not have direct financial metrics, I will use `finance.csv` to load the CRM data into a Pandas dataframe for further analysis.\n\nHere's the deterministic JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"search web for CRM data\",\n      \"tools\": [\"research.search\"],\n      \"fallback_tools\": [\"research.arxiv\"],\n      \"confidence\": 0.95\n    },\n    {\n      \"agent\": \"enterprise_agent\",\n      \"reason\": \"access CRM data\",\n      \"tools\": [\"enterprise.crm\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.90\n    },\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"analyze CRM data for customer trends\",\n      \"tools\": [\"finance.csv\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.85\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"CRM data analysis\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects `research_agent` as the primary agent, with `enterprise_agent` and `finance_agent` as secondary and tertiary agents, respectively. The tools selected are `research.search`, `enterprise.crm`, and `finance.csv`."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected enterprise_agent as primary, got finance_agent",
+        "Expected tools ['enterprise.playbook', 'enterprise.analytics'], got []"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Help me draft a professional business proposal",
+      "expected_agent": "enterprise_agent",
+      "expected_tools": [
+        "enterprise.playbook"
+      ],
+      "fallback_tools": [],
+      "description": "Enterprise: Business proposal"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "enterprise_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "creative_agent"
+      ],
+      "planned_tools": [
+        "enterprise.playbook"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "draft business proposal",
+      "raw_response": "Based on the task prompt \"Help me draft a professional business proposal\" and the provided metadata, I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the user's request. In this case, the user wants to draft a professional business proposal, which falls under the category of writing a business document.\n\n**Agent Selection:**\nBased on the agent selection rules, we should use the `enterprise_agent` for business documents like proposals and strategy documents.\n\n**Tool Selection:**\nFor an enterprise-level tool, we will use `enterprise.playbook`.\n\n**Step 2:** Determine the secondary intent of the user's request. Since the primary intent is to draft a proposal, we can assume that the user may also want to research relevant information for the proposal.\n\n**Agent Selection (Secondary):**\nBased on the agent selection rules, we should use the `research_agent` for external information retrieval and academic papers.\n\n**Tool Selection (Secondary):**\nFor research purposes, we will use `research.arxiv`.\n\n**Step 3:** Combine the primary and secondary agents and tools into a single plan.\n\nHere is the resulting JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"enterprise_agent\",\n      \"reason\": \"draft business proposal\",\n      \"tools\": [\"enterprise.playbook\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    },\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"research relevant information for proposal\",\n      \"tools\": [\"research.arxiv\"],\n      \"fallback_tools\": [\"research.search\", \"research.wikipedia\"],\n      \"confidence\": 0.90\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"draft business proposal and research relevant information\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the `enterprise_agent` as the primary agent for drafting a professional business proposal, using the `enterprise.playbook` tool. The secondary agent is the `research_agent`, which will be used to research relevant information for the proposal, using the `research.arxiv` tool."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Create a go-to-market strategy for our new product",
+      "expected_agent": "enterprise_agent",
+      "expected_tools": [
+        "enterprise.playbook"
+      ],
+      "fallback_tools": [],
+      "description": "Enterprise: GTM strategy"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "enterprise_agent",
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent"
+      ],
+      "planned_tools": [
+        "enterprise.playbook"
+      ],
+      "fallback_tools": [
+        "enterprise.policy"
+      ],
+      "executed_tools": [
+        "enterprise.playbook"
+      ],
+      "planner_reason": "business strategy requested",
+      "raw_response": "Based on the provided instructions and rules, I will create a go-to-market strategy plan for the new product.\n\n**Plan:**\n\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"create marketing copy\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    },\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"financial analysis\",\n      \"tools\": [\"finance.snapshot\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.90\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"go-to-market strategy\"},\n  \"confidence\": 0.92\n}\n\n**Rationale:**\n\n1. The task is to create a go-to-market strategy for the new product, which involves writing and financial analysis.\n2. According to the rules, creative_agent should be used when the action verb is 'write', 'poem', 'story', 'blog', 'slogan', 'tagline', 'marketing', 'brainstorm', 'creative', 'compose', or 'draft content'. In this case, we need marketing copy, so creative_agent is chosen.\n3. The tool for creative_agent should be creative.tonecheck, as it is used for poems, stories, slogans, marketing copy, blog posts, brainstorming, and other creative writing tasks.\n4. For financial analysis, finance_agent should be used, with the tool being finance.snapshot, which provides stock price, ticker, P/E ratio, earnings, market data, and other financial information.\n\n**Note:** This plan assumes that the task is a mixed intent task (writing and financial analysis) and prioritizes the action verb 'write' to determine the agent."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Build an executive summary for the board meeting",
+      "expected_agent": "enterprise_agent",
+      "expected_tools": [
+        "enterprise.playbook"
+      ],
+      "fallback_tools": [],
+      "description": "Enterprise: Executive summary"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "enterprise_agent",
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent"
+      ],
+      "planned_tools": [
+        "enterprise.playbook"
+      ],
+      "fallback_tools": [
+        "enterprise.policy"
+      ],
+      "executed_tools": [
+        "enterprise.playbook"
+      ],
+      "planner_reason": "business strategy requested",
+      "raw_response": "Based on the task prompt \"Build an executive summary for the board meeting\" and the provided metadata, I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the task. Since the task is to build an executive summary for the board meeting, it involves writing and summarizing information. This suggests that the creative_agent should be used for this task.\n\n**Step 2:** Identify the necessary tools for the creative_agent. Based on the tool selection rules, the creative.tonecheck tool is required for writing tasks.\n\n**Step 3:** Determine the fallback agent in case the primary agent fails or is not suitable. In this case, the research_agent can be used as a fallback if the creative_agent fails to provide a suitable summary.\n\n**Step 4:** Select the necessary tools for the research_agent (fallback). Based on the tool selection rules, the research.search and research.wikipedia tools are required for general web information and factual/encyclopedic info, respectively.\n\nHere is the deterministic JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"build executive summary\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [\"research.search\", \"research.wikipedia\"],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"executive summary for board meeting\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the creative_agent as the primary agent, with the creative.tonecheck tool required for writing tasks. The research_agent is selected as a fallback in case the creative_agent fails to provide a suitable summary, with the research.search and research.wikipedia tools used for general web information and factual/encyclopedic info, respectively."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Help me create a pitch deck for investors",
+      "expected_agent": "enterprise_agent",
+      "expected_tools": [
+        "enterprise.playbook"
+      ],
+      "fallback_tools": [],
+      "description": "Enterprise: Pitch deck"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent",
+        "enterprise_agent",
+        "creative_agent",
+        "research_agent"
+      ],
+      "skipped_agents": [
+        "general_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "analyze data and create visualizations",
+      "raw_response": "Based on the task prompt \"Help me create a pitch deck for investors\", I will generate a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the user, which is to create a pitch deck. The action word here is \"create\".\n\n**Agent Selection:**\nGiven that the ACTION verb determines the agent, we select the **creative_agent**, as it is responsible for writing tasks, including creating content like a pitch deck.\n\n**Tool Selection:**\nFor creative tasks, we use **creative.tonecheck** to ensure the tone and style of the pitch deck are suitable for investors.\n\n**Step 2:** Determine the secondary intent of the user, which is to create a pitch deck that is informative and engaging. We need to gather information about the company and its products or services.\n\n**Agent Selection:**\nTo gather this information, we select the **research_agent**, as it is responsible for finding external information, including academic papers, web search, and Wikipedia.\n\n**Tool Selection:**\nFor research tasks, we use **research.search** (web) to find relevant information about the company and its products or services.\n\n**Step 3:** Determine the tertiary intent of the user, which is to present the pitch deck in a clear and concise manner. We need to analyze the data and create visualizations.\n\n**Agent Selection:**\nTo analyze the data and create visualizations, we select the **finance_agent**, as it is responsible for financial analysis and forecasting.\n\n**Tool Selection:**\nFor finance tasks, we use **finance.snapshot** (market data) to gather relevant information about the company's market performance.\n\nHere is the deterministic JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"create pitch deck content\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    },\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"gather information about company and products/services\",\n      \"tools\": [\"research.search\"],\n      \"fallback_tools\": [\"research.wikipedia\", \"research.arxiv\"],\n      \"confidence\": 0.90\n    },\n    {\n      \"agent\": \"finance_agent\",\n      \"reason\": \"analyze data and create visualizations\",\n      \"tools\": [\"finance.snapshot\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.85\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"pitch deck creation\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the creative_agent for writing tasks, research_agent for gathering information, and finance_agent for analyzing data and creating visualizations. The tools selected are creative.tonecheck, research.search, and finance.snapshot, respectively."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected enterprise_agent as primary, got finance_agent",
+        "Expected tools ['enterprise.playbook'], got ['finance.snapshot']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Research Tesla stock performance and write a summary report",
+      "expected_agent": "finance_agent",
+      "expected_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "research.search"
+      ],
+      "description": "Mixed: Finance + Research (finance primary)"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "finance.snapshot.alpha"
+      ],
+      "executed_tools": [
+        null,
+        "finance.snapshot"
+      ],
+      "planner_reason": "financial data requested",
+      "raw_response": "Based on the task prompt \"Research Tesla stock performance and write a summary report\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nThe action verb is \"Research\" which indicates that we need to use the `research_agent`. However, since the task also involves writing a summary report, we need to use the `creative_agent` for the writing part. We can't use `finance_agent` because it's forbidden for writing tasks.\n\n**Tool Selection**\n\nFor research, we will use `research.search` and `research.wikipedia` as they are suitable for finding information about Tesla stock performance.\n\nFor writing the summary report, we will use `creative.tonecheck`.\n\n**Plan**\n\nHere is the deterministic JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"find information about Tesla stock performance\",\n      \"tools\": [\"research.search\", \"research.wikipedia\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    },\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"write a summary report\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.90\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"research and writing task\"},\n  \"confidence\": 0.92\n}\n```\nThis plan uses the `research_agent` to find information about Tesla stock performance using `research.search` and `research.wikipedia`. Then, it uses the `creative_agent` to write a summary report using `creative.tonecheck`.\n\nNote that this plan assumes that the task prompt is clear and unambiguous. If there are any ambiguities or uncertainties in the task prompt, additional planning steps may be required."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Write a creative blog post about investing in tech stocks",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Mixed: Creative + Finance (creative primary)"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent",
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "finance.snapshot.alpha",
+        "finance.snapshot.cached"
+      ],
+      "executed_tools": [],
+      "planner_reason": "financial report requested",
+      "raw_response": "Based on the task prompt \"Write a creative blog post about investing in tech stocks\" and following the provided instructions, I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the task. The action verb is \"Write\", which indicates that we should use the `creative_agent`.\n\n**Step 2:** Identify the specific content type required for the task. Since it's a blog post, we'll need to use the `creative.tonecheck` tool.\n\n**Step 3:** Select the agent and tools based on the rules provided:\n\n* Agent: `creative_agent`\n* Tools: `creative.tonecheck`\n\nHere is the JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"write a creative blog post about investing in tech stocks\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"blog post on tech stock investing\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the `creative_agent` to write a creative blog post about investing in tech stocks, using the `creative.tonecheck` tool for tone and style guidance."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected creative_agent as primary, got finance_agent",
+        "Expected tools ['creative.tonecheck'], got ['finance.snapshot']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Analyze the latest AI trends and summarize key findings",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.search",
+        "research.summarizer"
+      ],
+      "fallback_tools": [],
+      "description": "Mixed: Research + Summarize"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "finance.snapshot.alpha"
+      ],
+      "executed_tools": [],
+      "planner_reason": "financial data requested",
+      "raw_response": "Based on the task prompt \"Analyze the latest AI trends and summarize key findings\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the task\nThe task involves analyzing the latest AI trends, which requires research and summarization. The action verb is \"analyze\" and \"summarize\".\n\n**Step 2:** Select the most suitable agent based on the primary intent\nBased on the agent selection rules, for tasks involving research and summarization, the `research_agent` is the best choice.\n\n**Step 3:** Choose tools for the selected agent\nFor the `research_agent`, we need to select tools that can help with research and summarization. Based on the tool selection rules, we will use:\n\n* `research.search`: For general web info and recent developments.\n* `research.wikipedia`: For factual/encyclopedic information.\n\n**Step 4:** Determine the confidence level for each step\nBased on the task prompt, I assign a high confidence level (0.95) to the research steps.\n\nHere is the JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"find latest AI trends and summarize key findings\",\n      \"tools\": [\"research.search\", \"research.wikipedia\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"AI trend analysis\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the `research_agent` and uses the `research.search` and `research.wikipedia` tools to analyze the latest AI trends and summarize key findings."
+    },
+    "evaluation": {
+      "agent_correct": false,
+      "tools_correct": false,
+      "issues": [
+        "Expected research_agent, got ['finance_agent']",
+        "Expected tools ['research.search', 'research.summarizer'], got ['finance.snapshot']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "Draft a creative company newsletter about our Q3 results",
+      "expected_agent": "creative_agent",
+      "expected_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "description": "Mixed: Creative + Enterprise"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent",
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "finance.snapshot.alpha",
+        "finance.snapshot.cached"
+      ],
+      "executed_tools": [],
+      "planner_reason": "financial report requested",
+      "raw_response": "Based on the task prompt \"Draft a creative company newsletter about our Q3 results\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the task, which is to draft a creative company newsletter. The ACTION verb in this case is \"draft\" or \"write\".\n\n**Agent Selection:**\nBased on the MIXED INTENT PRIORITY (ACTION WORD WINS) rule, since the ACTION verb is \"draft\" or \"write\", we should use the **creative_agent**.\n\n**Tool Selection:**\nSince the creative_agent is used for writing tasks, we will select the **creative.tonecheck** tool to ensure the tone and style of the newsletter are suitable for a company publication.\n\n**Plan:**\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"draft a creative company newsletter\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"drafting a creative company newsletter\"},\n  \"confidence\": 0.92\n}\n```\n\nThis plan selects the creative_agent to draft a creative company newsletter, using the creative.tonecheck tool to ensure the tone and style are suitable for a company publication."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected creative_agent as primary, got finance_agent",
+        "Expected tools ['creative.tonecheck'], got ['finance.snapshot']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "I need help with something",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [],
+      "description": "Edge: Vague request"
+    },
+    "status": "completed",
+    "routing_info": {
+      "status": "completed",
+      "selected_agents": [
+        "general_agent"
+      ],
+      "skipped_agents": [
+        "research_agent",
+        "finance_agent",
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "First-responder agent for greeting and routing work",
+      "raw_response": "Based on the provided instructions and rules, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Task Prompt:** \"I need help with something\"\n\nSince there is no specific task prompt or intent mentioned, we'll follow the general agent selection rules. The first-responder agent that greets users, answers simple prompts, and routes work to specialists is the **general_agent**.\n\n**Agent Selection:**\n\n* Agent: `general_agent`\n* Reason: \"First-responder agent for greeting and routing work\"\n\n**Tool Selection:**\n\nSince there are no specific tools required for this task, we'll use the default tools for the general agent. The default tools for the general agent are:\n\n`research.search`, `research.wikipedia`\n\nHowever, since there is no specific intent or task prompt mentioned, we can't determine which tool to use. In this case, I will select a default tool that is commonly used in conversational tasks.\n\n**Tool:** `research.search`\n\n**Plan:**\n\nHere's the deterministic JSON plan:\n\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"general_agent\",\n      \"reason\": \"First-responder agent for greeting and routing work\",\n      \"tools\": [\"research.search\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"General conversation\"},\n  \"confidence\": 0.92\n}\n```\n\nPlease note that this plan is based on the general agent selection rules and default tools. If a specific task prompt or intent is provided, the plan may change accordingly."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": true,
+      "issues": []
+    }
+  },
+  {
+    "test": {
+      "prompt": "Tell me about NVIDIA's new GPU",
+      "expected_agent": "research_agent",
+      "expected_tools": [
+        "research.search"
+      ],
+      "fallback_tools": [],
+      "description": "Edge: Product info (not finance)"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "finance_agent",
+        "general_agent",
+        "research_agent"
+      ],
+      "skipped_agents": [
+        "creative_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "finance.snapshot"
+      ],
+      "fallback_tools": [
+        "finance.snapshot.alpha",
+        "finance.snapshot.cached"
+      ],
+      "executed_tools": [],
+      "planner_reason": "financial report requested",
+      "raw_response": "Based on the task prompt \"Tell me about NVIDIA's new GPU\", I will create a deterministic JSON plan selecting agents and tools.\n\n**Agent Selection**\n\nThe task prompt does not contain any action words like \"write\", \"research\", or \"explain\". However, it is asking for information about a specific topic (\"NVIDIA's new GPU\"). Based on the agent selection rules, this falls under the category of general information retrieval. Therefore, I will select the **general_agent** as the primary agent.\n\n**Tool Selection**\n\nThe general_agent does not require any external tools to handle conversational tasks directly. However, since we are dealing with a specific topic (NVIDIA's new GPU), it would be beneficial to use some research tools to gather more information. The **research_agent** is suitable for this task, and I will select it as the secondary agent.\n\nThe primary tool for the research_agent is **research.search**, which can be used to search for general web info about NVIDIA's new GPU.\n\n**Plan**\n\nHere is the deterministic JSON plan:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"general_agent\",\n      \"reason\": \"handle conversational task directly\",\n      \"tools\": [],\n      \"fallback_tools\": []\n    },\n    {\n      \"agent\": \"research_agent\",\n      \"reason\": \"gather information about NVIDIA's new GPU\",\n      \"tools\": [\"research.search\"],\n      \"fallback_tools\": [\"research.wikipedia\"]\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"information retrieval\"},\n  \"confidence\": 0.95\n}\n```\nThis plan selects the general_agent to handle the initial conversational task and then hands off to the research_agent to gather more information about NVIDIA's new GPU using the research.search tool."
+    },
+    "evaluation": {
+      "agent_correct": true,
+      "tools_correct": false,
+      "issues": [
+        "Expected research_agent as primary, got finance_agent",
+        "Expected tools ['research.search'], got ['finance.snapshot']"
+      ]
+    }
+  },
+  {
+    "test": {
+      "prompt": "How do I write better code?",
+      "expected_agent": "general_agent",
+      "expected_tools": [],
+      "fallback_tools": [
+        "research.search"
+      ],
+      "description": "Edge: Self-improvement question"
+    },
+    "status": "failed",
+    "routing_info": {
+      "status": "failed",
+      "selected_agents": [
+        "creative_agent"
+      ],
+      "skipped_agents": [
+        "general_agent",
+        "research_agent",
+        "finance_agent",
+        "enterprise_agent"
+      ],
+      "planned_tools": [
+        "creative.tonecheck"
+      ],
+      "fallback_tools": [],
+      "executed_tools": [],
+      "planner_reason": "create expressive content for code writing",
+      "raw_response": "Based on the task prompt \"How do I write better code?\" and the provided metadata, I will generate a deterministic JSON plan selecting agents and tools.\n\n**Step 1:** Determine the primary intent of the user's question. In this case, the user is asking about writing better code, which falls under the category of creative writing or content creation.\n\n**Agent Selection:**\n\nBased on the agent selection rules, since the user is asking about writing better code, we should use the `creative_agent` for this task. The `creative_agent` is responsible for creating expressive, poetic, or stylistic content tailored to the brief.\n\n**Tool Selection:**\n\nFor creative writing tasks, the `creative.tonecheck` tool is recommended. This tool helps with tone and style suggestions for creative writing.\n\n**Plan Generation:**\n\nHere's a JSON plan that matches the required structure:\n```json\n{\n  \"steps\": [\n    {\n      \"agent\": \"creative_agent\",\n      \"reason\": \"create expressive content for code writing\",\n      \"tools\": [\"creative.tonecheck\"],\n      \"fallback_tools\": [],\n      \"confidence\": 0.95\n    }\n  ],\n  \"metadata\": {\"handoff_strategy\": \"sequential\", \"notes\": \"code writing improvement\"},\n  \"confidence\": 0.92\n}\n```\nThis plan selects the `creative_agent` as the primary agent for this task, with a confidence level of 0.95. The recommended tool is `creative.tonecheck`, which will help improve the tone and style of the code writing content.\n\nPlease note that this plan assumes that the user's question is primarily focused on creative writing or content creation related to code improvement. If there are any additional requirements or nuances in the task prompt, please let me know, and I'll be happy to adjust the plan accordingly!"
+    },
+    "evaluation": {
+      "agent_correct": false,
+      "tools_correct": true,
+      "issues": [
+        "Expected general_agent, got ['creative_agent']"
+      ]
+    }
+  }
+]
