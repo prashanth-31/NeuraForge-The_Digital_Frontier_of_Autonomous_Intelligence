@@ -553,6 +553,149 @@ class LLMOrchestrationPlanner:
             )
         
         # ─────────────────────────────────────────────────────────────────────
+        # WIKIPEDIA / ENCYCLOPEDIA QUERIES → research_agent with research.wikipedia
+        # For factual/biographical/historical queries
+        # ─────────────────────────────────────────────────────────────────────
+        wikipedia_indicators = [
+            "who was", "who is", "what was", "what is the",
+            "history of", "biography of", "tell me about",
+            "give me history", "give a short biography",
+            "explain what", "describe the", "when was",
+            "where is", "where was", "define ",
+        ]
+        is_wikipedia_query = any(indicator in normalized for indicator in wikipedia_indicators)
+        
+        # Exclude if it looks like a creative request
+        creative_exclusions = ["poem", "story", "song", "creative", "fun way", "simple way"]
+        has_creative_intent = any(exc in normalized for exc in creative_exclusions)
+        
+        if is_wikipedia_query and not has_creative_intent:
+            return PlannerPlan(
+                steps=[
+                    PlannedAgentStep(
+                        agent="research_agent",
+                        tools=["research.wikipedia"],
+                        fallback_tools=["research.search"],
+                        reason="factual/encyclopedic query",
+                        confidence=1.0,
+                    ),
+                ],
+                raw_response="fast_path:wikipedia",
+                metadata={"fast_path": "wikipedia", "handoff_strategy": "sequential"},
+                confidence=1.0,
+            )
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # CRM / OPS / DIAGNOSTIC TASKS → enterprise_agent ONLY (no tools needed)
+        # These are knowledge-based strategy tasks, NOT stock ticker queries
+        # ─────────────────────────────────────────────────────────────────────
+        crm_ops_indicators = [
+            "crm data", "lead-to-close", "conversion rate", "sales pipeline",
+            "customer data", "lead data", "sales funnel", "churn rate",
+            "diagnostic plan", "recovery plan", "30-day plan", "90-day plan",
+            "hypotheses", "data needed", "structured diagnostic",
+        ]
+        is_crm_ops_query = any(indicator in normalized for indicator in crm_ops_indicators)
+        
+        if is_crm_ops_query:
+            return PlannerPlan(
+                steps=[
+                    PlannedAgentStep(
+                        agent="enterprise_agent",
+                        tools=[],  # Strategy tasks don't need tools
+                        fallback_tools=[],
+                        reason="CRM/ops diagnostic - strategy task",
+                        confidence=1.0,
+                    ),
+                ],
+                raw_response="fast_path:crm_ops_diagnostic",
+                metadata={"fast_path": "crm_ops_diagnostic", "handoff_strategy": "sequential", "strategy_task": True},
+                confidence=1.0,
+            )
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # PROJECT PLANNING / ARCHITECTURE → enterprise_agent (no tools)
+        # For software architecture, project breakdown, tech stack recommendations
+        # These are knowledge-based tasks, not data retrieval tasks
+        # ─────────────────────────────────────────────────────────────────────
+        project_planning_indicators = [
+            "break this into", "break it into", "break into tasks",
+            "technical tasks", "clear tasks", "assign agents", "assign suitable",
+            "tech stack", "technology stack", "suggest the stack",
+            "system architecture", "software architecture", "system design",
+            "project breakdown", "project tasks", "implementation plan",
+            "build a system", "build an app", "develop a system",
+            "ai-powered", "ai powered", "machine learning system",
+            "attendance management", "management system",
+        ]
+        is_project_planning = any(indicator in normalized for indicator in project_planning_indicators)
+        
+        # Also check for combined signals
+        has_build_verb = any(v in normalized for v in ["build", "develop", "create", "design"])
+        has_planning_noun = any(n in normalized for n in ["system", "app", "application", "platform", "solution"])
+        has_breakdown_request = any(b in normalized for b in ["break", "tasks", "steps", "phases"])
+        
+        if is_project_planning or (has_build_verb and has_planning_noun and has_breakdown_request):
+            return PlannerPlan(
+                steps=[
+                    PlannedAgentStep(
+                        agent="enterprise_agent",
+                        tools=[],  # Project planning is knowledge-based, no tools needed
+                        fallback_tools=[],
+                        reason="project planning/architecture task",
+                        confidence=1.0,
+                    ),
+                ],
+                raw_response="fast_path:project_planning",
+                metadata={"fast_path": "project_planning", "handoff_strategy": "sequential", "strategy_task": True},
+                confidence=1.0,
+            )
+        
+        # ─────────────────────────────────────────────────────────────────────
+        # CREATIVE WRITING → creative_agent ONLY
+        # For poems, stories, creative writing, brainstorming, marketing copy, etc.
+        # These are pure creative tasks that don't need data retrieval
+        # ─────────────────────────────────────────────────────────────────────
+        creative_writing_indicators = [
+            "write something", "write me", "write a",
+            "creative writing", "something creative",
+            "sounds like", "written by a human", "thoughtful human", "not an ai",
+            "write a poem", "write a story", "write a song", "write lyrics",
+            "write a blog", "blog post", "write an essay",
+            "write a slogan", "write a tagline", "marketing copy",
+            "brainstorm", "help me brainstorm", "brainstorm ideas",
+            "compose a", "draft a", "create a story", "create a poem",
+            "storytelling", "creative piece", "creative content",
+            "make it sound", "make this sound", "rewrite this",
+            "human touch", "more human", "less robotic", "less ai",
+        ]
+        is_creative_writing = any(indicator in normalized for indicator in creative_writing_indicators)
+        
+        # Also check for action verb + creative intent
+        has_creative_verb = any(v in cleaned.split()[:3] for v in ["write", "compose", "draft", "create", "brainstorm"])
+        has_creative_noun = any(n in normalized for n in ["poem", "story", "song", "blog", "essay", "slogan", "tagline", "creative"])
+        
+        # Exclude if it looks like a research/data task
+        research_exclusions = ["research", "papers", "academic", "scientific", "stock", "price", "financial", "analysis"]
+        has_research_intent = any(exc in normalized for exc in research_exclusions)
+        
+        if (is_creative_writing or (has_creative_verb and has_creative_noun)) and not has_research_intent:
+            return PlannerPlan(
+                steps=[
+                    PlannedAgentStep(
+                        agent="creative_agent",
+                        tools=["creative.tonecheck"],
+                        fallback_tools=[],
+                        reason="creative writing task",
+                        confidence=1.0,
+                    ),
+                ],
+                raw_response="fast_path:creative_writing",
+                metadata={"fast_path": "creative_writing", "handoff_strategy": "sequential", "strategy_task": True},
+                confidence=1.0,
+            )
+        
+        # ─────────────────────────────────────────────────────────────────────
         # BUSINESS PROPOSALS → enterprise_agent ONLY
         # Only for VERY SHORT, simple proposal requests (<40 chars).
         # Complex or multi-part requests go through LLM planner.

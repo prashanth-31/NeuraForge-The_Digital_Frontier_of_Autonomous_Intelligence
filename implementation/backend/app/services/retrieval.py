@@ -142,7 +142,24 @@ class RetrievalService:
 
         episodic_hits: list[dict[str, Any]] = []
         try:
-            episodic_hits = await self._memory.fetch_recent_context(agent=agent, limit=self._config.episodic_limit)
+            # ═══════════════════════════════════════════════════════════════════════
+            # NOTE: Don't filter by agent for episodic memory - task results aren't
+            # stored with agent-specific tagging and we want cross-agent context
+            # (e.g., enterprise_agent result should be available to follow-up queries)
+            # ═══════════════════════════════════════════════════════════════════════
+            raw_episodic = await self._memory.fetch_recent_context(agent=None, limit=self._config.episodic_limit)
+            logger.info("episodic_raw_fetch", count=len(raw_episodic), query=query[:50] if query else "")
+            # ═══════════════════════════════════════════════════════════════════════
+            # CONTEXT BLEEDING FIX: Filter episodic hits by semantic relevance
+            # Only include episodic context if it's semantically related to current query
+            # This prevents unrelated previous conversation context from bleeding through
+            # ═══════════════════════════════════════════════════════════════════════
+            episodic_hits = await self._filter_relevant_episodic(
+                query=query,
+                query_vector=vector_record.vector if vector_record else None,
+                episodic_hits=raw_episodic,
+            )
+            logger.info("episodic_filtered", raw_count=len(raw_episodic), filtered_count=len(episodic_hits))
         except Exception as exc:  # pragma: no cover - downstream store failures
             logger.exception("episodic_retrieval_failed", error=str(exc))
             episodic_hits = []
@@ -163,6 +180,135 @@ class RetrievalService:
             episodic_hits=episodic_hits,
             document_hits=document_hits,
         )
+
+    async def _filter_relevant_episodic(
+        self,
+        *,
+        query: str,
+        query_vector: list[float] | None,
+        episodic_hits: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """
+        Filter episodic hits by semantic relevance to current query.
+        
+        This prevents context bleeding where unrelated previous conversation
+        context gets included in the current prompt's context.
+        
+        Relevance is determined by:
+        1. Explicit reference indicators ("the above", "based on that", etc.)
+        2. Semantic similarity between query and episodic content
+        """
+        if not episodic_hits:
+            return []
+        
+        query_lower = query.lower()
+        
+        # Check for explicit continuation indicators - always include context if present
+        continuation_indicators = {
+            # Direct reference indicators
+            "the above", "above business", "above proposal", "above plan",
+            "that proposal", "that business", "that plan", "that company",
+            "based on that", "from that", "using that", "with that",
+            # Action continuations
+            "continue", "expand on", "expand upon", "more about", "tell me more",
+            "explain further", "elaborate on", "elaborate", "go deeper",
+            "as mentioned", "you said", "you mentioned", "you created",
+            # Temporal references
+            "previous", "earlier", "before", "last", "recent",
+            "follow up", "follow-up", "followup",
+            # Pronoun references that imply prior context
+            "about it", "about them", "about this", "for it", "for them",
+            "what are the", "what is the",  # Often followed by "risks", "benefits", etc.
+            "key risks", "main risks", "potential risks",  # Risk analysis follow-ups
+        }
+        
+        # Also check for pronoun-heavy short queries (likely referential)
+        short_referential = len(query.split()) <= 10 and any(
+            ref in query_lower for ref in ["it", "this", "that", "these", "those", "the proposal", "the business"]
+        )
+        
+        if any(indicator in query_lower for indicator in continuation_indicators) or short_referential:
+            logger.debug("episodic_context_included_continuation", query=query[:50], matched="continuation_or_referential")
+            return episodic_hits
+        
+        # If no query vector, can't compute similarity - exclude episodic context
+        # for unambiguous standalone queries
+        if query_vector is None:
+            logger.debug("episodic_context_excluded_no_vector", query=query[:50])
+            return []
+        
+        # Compute semantic similarity for each episodic hit
+        relevance_threshold = max(self._config.relevance_threshold, 0.3)  # Minimum 0.3 for episodic
+        relevant_hits: list[dict[str, Any]] = []
+        
+        for hit in episodic_hits:
+            # Extract text from episodic hit
+            text = hit.get("text") or hit.get("content") or hit.get("summary") or ""
+            if not text:
+                continue
+            
+            # Check for keyword overlap as a quick relevance check
+            if self._has_keyword_overlap(query_lower, text.lower()):
+                hit["_score"] = 0.5  # Moderate score for keyword match
+                relevant_hits.append(hit)
+                continue
+            
+            # Compute embedding similarity
+            try:
+                hit_record = await self._embedder.embed_text(
+                    text[:500],  # Limit text length for efficiency
+                    metadata={"purpose": "episodic_relevance"},
+                    store=False,
+                )
+                similarity = self._cosine_similarity(query_vector, hit_record.vector)
+                if similarity >= relevance_threshold:
+                    hit["_score"] = similarity
+                    relevant_hits.append(hit)
+                else:
+                    logger.debug(
+                        "episodic_context_filtered",
+                        similarity=f"{similarity:.3f}",
+                        threshold=f"{relevance_threshold:.3f}",
+                        text=text[:50],
+                    )
+            except Exception as exc:
+                logger.debug("episodic_similarity_failed", error=str(exc))
+                continue
+        
+        return relevant_hits
+    
+    @staticmethod
+    def _has_keyword_overlap(query: str, content: str) -> bool:
+        """Check if query and content share significant keywords."""
+        # Extract significant words (>3 chars, not common words)
+        common_words = {
+            "the", "and", "for", "that", "with", "this", "from", "have",
+            "will", "what", "about", "which", "when", "where", "how",
+            "can", "could", "would", "should", "some", "other", "your",
+            "they", "their", "there", "been", "more", "were", "being",
+        }
+        query_words = {w for w in query.split() if len(w) > 3 and w not in common_words}
+        content_words = {w for w in content.split() if len(w) > 3 and w not in common_words}
+        
+        if not query_words or not content_words:
+            return False
+        
+        overlap = query_words & content_words
+        # Require at least 2 overlapping keywords or 30% overlap
+        overlap_ratio = len(overlap) / min(len(query_words), len(content_words))
+        return len(overlap) >= 2 or overlap_ratio >= 0.3
+    
+    @staticmethod
+    def _cosine_similarity(vec1: list[float], vec2: list[float]) -> float:
+        """Compute cosine similarity between two vectors."""
+        if len(vec1) != len(vec2) or not vec1:
+            return 0.0
+        dot_product = sum(a * b for a, b in zip(vec1, vec2))
+        norm1 = sum(a * a for a in vec1) ** 0.5
+        norm2 = sum(b * b for b in vec2) ** 0.5
+        if norm1 == 0 or norm2 == 0:
+            return 0.0
+        return dot_product / (norm1 * norm2)
 
     async def _gather_documents(self, document_ids: Any) -> list[dict[str, Any]]:
         if self._document_chunk_limit <= 0:
@@ -243,9 +389,11 @@ class ContextAssembler:
         seen_hashes: set[str] = set()
         threshold = self._retrieval._config.relevance_threshold
         for source, hits in ("semantic", result.semantic_hits), ("episodic", result.episodic_hits), ("document", result.document_hits):
+            logger.debug("context_assembler_source", source=source, hit_count=len(hits))
             for item in hits:
                 text = self._extract_text(item)
                 if not text:
+                    logger.debug("context_assembler_empty_text", source=source, item_keys=list(item.keys()) if isinstance(item, dict) else "not_dict")
                     continue
                 unique_key = f"{source}:{hash(text)}"
                 if unique_key in seen_hashes:
@@ -262,14 +410,25 @@ class ContextAssembler:
                         score=score,
                     )
                 )
+        logger.info("context_assembler_snippets_created", count=len(snippets))
         return snippets
 
     @staticmethod
     def _extract_text(item: dict[str, Any]) -> str:
+        # Check common text fields
         if "text" in item and isinstance(item["text"], str):
             return item["text"]
         if "content" in item and isinstance(item["content"], str):
             return item["content"]
+        # Handle direct summary field
+        if "summary" in item and isinstance(item["summary"], str):
+            return item["summary"]
+        # Handle episodic memory structure: {"result": {"meta": {"summary": "..."}}}
+        if "meta" in item and isinstance(item["meta"], dict):
+            meta = item["meta"]
+            if "summary" in meta and isinstance(meta["summary"], str):
+                return meta["summary"]
+        # Recurse into nested result structures
         if "result" in item and isinstance(item["result"], dict):
             return ContextAssembler._extract_text(item["result"])
         return ""

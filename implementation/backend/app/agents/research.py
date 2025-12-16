@@ -457,13 +457,28 @@ class ResearchAgent:
         if context.tools is None:
             return None
         
-        # Get planned tools from planner
-        planned_tools = self._get_planned_tools(task)
-        logger.info(
-            "research_agent_planned_tools",
-            task_id=task.task_id,
-            planned_tools=planned_tools,
-        )
+        # PRIORITY 1: Use tools from context (set by orchestrator from current planner step)
+        # This is the authoritative source for the current task's planned tools
+        planned_tools: list[str] = []
+        if context.planned_tools:
+            planned_tools = list(context.planned_tools)
+            if context.fallback_tools:
+                planned_tools.extend(context.fallback_tools)
+            logger.info(
+                "research_agent_using_context_tools",
+                task_id=task.task_id,
+                planned_tools=planned_tools,
+                source="context",
+            )
+        else:
+            # PRIORITY 2: Fall back to metadata extraction (for backward compatibility)
+            planned_tools = self._get_planned_tools(task)
+            logger.info(
+                "research_agent_planned_tools",
+                task_id=task.task_id,
+                planned_tools=planned_tools,
+                source="metadata_fallback",
+            )
         
         # Try planned tools in order with appropriate payloads
         for tool_name in planned_tools:
@@ -577,20 +592,49 @@ class ResearchAgent:
         return self._has_symbol_hint(metadata, prompt)
 
     def _has_symbol_hint(self, metadata: Mapping[str, Any], prompt: str | None) -> bool:
+        """
+        Check if the prompt/metadata contains hints of stock symbols.
+        
+        IMPORTANT: We must be conservative to avoid false positives like "AI", "ML", "LLM"
+        which are common tech acronyms, NOT stock tickers.
+        """
+        # Common tech/AI acronyms that should NOT trigger finance enrichment
+        NON_TICKER_ACRONYMS = {
+            "ai", "ml", "llm", "nlp", "api", "ui", "ux", "db", "sql", "css", "html",
+            "sdk", "ide", "gpu", "cpu", "ram", "ssd", "hdd", "iot", "ar", "vr", "xr",
+            "crm", "erp", "saas", "paas", "iaas", "devops", "cicd", "qa", "pm", "hr",
+            "b2b", "b2c", "roi", "kpi", "mvp", "poc", "rfp", "rfi", "sla", "nda",
+        }
+        
         keys = ("symbol", "ticker", "entity", "company")
         list_keys = ("symbols", "tickers", "companies")
         for key in keys:
             value = metadata.get(key)
             if isinstance(value, str) and value.strip():
-                return True
+                # Check if it's a known non-ticker acronym
+                if value.strip().lower() not in NON_TICKER_ACRONYMS:
+                    return True
         for key in list_keys:
             value = metadata.get(key)
-            if isinstance(value, Sequence) and any(isinstance(item, str) and item.strip() for item in value):
+            if isinstance(value, Sequence):
+                real_symbols = [
+                    item for item in value 
+                    if isinstance(item, str) and item.strip() and item.strip().lower() not in NON_TICKER_ACRONYMS
+                ]
+                if real_symbols:
+                    return True
+        
+        # Use the symbol extractor but filter out non-ticker acronyms
+        extracted = extract_symbols_from_text(prompt)
+        if extracted:
+            real_symbols = [s for s in extracted if s.lower() not in NON_TICKER_ACRONYMS]
+            if real_symbols:
                 return True
-        if extract_symbols_from_text(prompt):
-            return True
-        prompt_str = prompt or ""
-        return bool(re.search(r"\b[A-Z]{2,5}\b", prompt_str))
+        
+        # DO NOT use the aggressive regex fallback - it causes too many false positives
+        # The old code: return bool(re.search(r"\b[A-Z]{2,5}\b", prompt_str))
+        # This would match "AI", "ML", "LLM" etc. which are NOT stock tickers
+        return False
 
     def _metrics_from_text(self, text: str | None) -> list[str]:
         if not text:

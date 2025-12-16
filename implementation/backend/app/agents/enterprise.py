@@ -207,7 +207,7 @@ class EnterpriseAgent:
             "business plan", "business case", "white paper", "report",
             # Strategy
             "strategy", "strategic", "swot", "competitive analysis",
-            "market analysis", "business model", "go to market",
+            "market analysis", "business model", "go to market", "gtm",
             # Operations
             "operational", "workflow", "process", "implementation",
             # Persona triggers
@@ -215,6 +215,21 @@ class EnterpriseAgent:
             # Corporate/Enterprise
             "enterprise", "corporate", "organizational", "board",
             "stakeholder", "transformation", "expansion",
+            # CRM/Ops diagnostic tasks
+            "crm data", "lead-to-close", "conversion rate", "sales pipeline",
+            "customer data", "lead data", "sales funnel", "churn",
+            "diagnostic plan", "recovery plan", "action plan",
+            "30-day", "90-day", "roadmap", "hypotheses",
+            # Analysis frameworks
+            "root cause", "gap analysis", "risk assessment",
+            "kpi", "metrics framework", "success criteria",
+            # PROJECT PLANNING / ARCHITECTURE TASKS
+            "break this into", "break into tasks", "technical tasks", "clear tasks",
+            "assign agents", "assign suitable", "tech stack", "technology stack",
+            "system architecture", "software architecture", "system design",
+            "project breakdown", "project tasks", "build a system",
+            "attendance management", "management system", "ai-powered system",
+            "ai powered system", "machine learning system",
         }
         
         if any(trigger in prompt for trigger in enterprise_triggers):
@@ -238,6 +253,13 @@ class EnterpriseAgent:
                 rationale="Task not relevant to enterprise agent - passing.",
                 metadata={"passed": True, "reason": "not_an_enterprise_task"},
             )
+        
+        # ═════════════════════════════════════════════════════════════════════════
+        # SYNTHESIS TASK DETECTION
+        # If we have substantial prior outputs and this looks like a synthesis request,
+        # we can produce output without invoking tools (just synthesize existing data)
+        # ═════════════════════════════════════════════════════════════════════════
+        is_synthesis_task = self._is_synthesis_task(task)
         
         # Initialize reasoning builder for tracking thought process
         reasoning = ReasoningBuilder(agent_name=self.name, context=context)
@@ -265,8 +287,8 @@ class EnterpriseAgent:
                     source="context_assembler",
                 )
         
-        # Step 3: Check for tool usage
-        tool_result = await self._maybe_invoke_tool(task, context=context)
+        # Step 3: Check for tool usage (synthesis tasks can skip tools)
+        tool_result = await self._maybe_invoke_tool(task, context=context, is_synthesis=is_synthesis_task)
         if tool_result is not None:
             await reasoning.consider_tool(
                 tool_name=tool_result.tool,
@@ -277,6 +299,12 @@ class EnterpriseAgent:
                 claim=f"Tool '{tool_result.tool}' provided additional data",
                 confidence=0.8,
                 source=tool_result.tool,
+            )
+        elif is_synthesis_task:
+            # For synthesis tasks, note that we're using prior outputs instead of tools
+            await reasoning.think(
+                f"Synthesis task detected with {len(task.prior_exchanges)} prior agent outputs - synthesizing without additional tools",
+                step_type=ReasoningStepType.DECISION,
             )
         
         prompt = self._build_prompt(task, context_section=context_section, tool_result=tool_result)
@@ -368,6 +396,14 @@ class EnterpriseAgent:
             metadata["tool"] = self._tool_metadata(tool_result)
         if confidence_breakdown is not None:
             metadata["confidence_breakdown"] = confidence_breakdown
+        
+        # Signal to orchestrator that synthesis tasks can skip tool enforcement
+        if is_synthesis_task:
+            metadata["synthesis_task"] = True
+            metadata["tool_policy_override"] = {
+                "allow_skip": True,
+                "reason": "synthesis_task_with_prior_outputs",
+            }
 
         return AgentOutput(
             agent=self.name,
@@ -506,7 +542,12 @@ Real investors expect:
                 f"Deliver a numbered action plan (max 5 steps) with expected impact and confidence."
             )
 
-    async def _maybe_invoke_tool(self, task: AgentInput, *, context: AgentContext) -> ToolInvocationResult | None:
+    async def _maybe_invoke_tool(self, task: AgentInput, *, context: AgentContext, is_synthesis: bool = False) -> ToolInvocationResult | None:
+        # For synthesis tasks with prior outputs, tool invocation is optional
+        if is_synthesis and task.prior_exchanges:
+            logger.info("enterprise_agent_synthesis_mode", prior_count=len(task.prior_exchanges))
+            return None  # Skip tool for synthesis - we'll use LLM to combine prior outputs
+        
         if context.tools is None:
             return None
         payload = {
@@ -518,7 +559,82 @@ Real investors expect:
             return await context.tools.invoke("enterprise.playbook", payload)
         except (ToolDisabledError, ToolInvocationError) as exc:
             logger.warning("enterprise_tool_failure", error=str(exc))
+            # For synthesis tasks, tool failure is acceptable
+            if is_synthesis:
+                return None
             return None
+    
+    def _is_synthesis_task(self, task: AgentInput) -> bool:
+        """
+        Detect if this is a synthesis task OR a standalone strategy task
+        that doesn't need tool invocations.
+        
+        These tasks rely on:
+        - Prior agent outputs (synthesis)
+        - General business knowledge (strategy/diagnostic plans)
+        """
+        prompt_lower = (task.prompt or "").lower()
+        
+        # ═════════════════════════════════════════════════════════════════════════
+        # STANDALONE STRATEGY TASKS - Don't need tools, just knowledge
+        # These are knowledge-based writing tasks, not data retrieval tasks
+        # ═════════════════════════════════════════════════════════════════════════
+        strategy_task_indicators = {
+            # Diagnostic/planning tasks
+            "diagnostic plan", "recovery plan", "action plan", "implementation plan",
+            "hypotheses", "30-day", "90-day", "roadmap",
+            # Strategy documents
+            "gtm strategy", "go-to-market", "business strategy", "growth strategy",
+            "competitive strategy", "pricing strategy", "marketing strategy",
+            # Proposals and pitches
+            "pitch deck", "investor pitch", "executive summary", "business case",
+            "grant proposal", "project proposal", "budget proposal",
+            # Operational frameworks
+            "diagnostic framework", "assessment framework", "evaluation criteria",
+            "kpis", "metrics framework", "success criteria",
+            # Analysis requests (without needing live data)
+            "root cause analysis", "gap analysis", "swot analysis",
+            "risk assessment", "impact analysis",
+            # PROJECT PLANNING / ARCHITECTURE TASKS (knowledge-based)
+            "break this into", "break into tasks", "technical tasks", "clear tasks",
+            "assign agents", "assign suitable", "tech stack", "technology stack",
+            "system architecture", "software architecture", "system design",
+            "project breakdown", "project tasks", "build a system",
+            "attendance management", "management system", "ai-powered",
+        }
+        
+        if any(indicator in prompt_lower for indicator in strategy_task_indicators):
+            return True
+        
+        # Also detect CRM/ops analytics framing (not stock ticker CRM)
+        crm_ops_indicators = [
+            "crm data", "lead-to-close", "conversion rate", "sales pipeline",
+            "customer data", "lead data", "funnel", "churn",
+        ]
+        if any(indicator in prompt_lower for indicator in crm_ops_indicators):
+            return True
+        
+        # ═════════════════════════════════════════════════════════════════════════
+        # SYNTHESIS TASKS - Combine prior agent outputs
+        # ═════════════════════════════════════════════════════════════════════════
+        # Must have prior outputs to synthesize
+        if task.prior_exchanges and len(task.prior_exchanges) >= 1:
+            synthesis_indicators = {
+                "executive brief", "executive summary", "summarize", "combine",
+                "synthesize", "distinguish facts", "facts vs sentiment",
+                "produce a brief", "create a summary", "write a summary",
+                "consolidate", "compile", "bring together",
+            }
+            
+            if any(indicator in prompt_lower for indicator in synthesis_indicators):
+                return True
+            
+            # If task has significant prior outputs (2+) and mentions "brief" or "summary"
+            if len(task.prior_exchanges) >= 2:
+                if any(word in prompt_lower for word in ["brief", "summary", "report"]):
+                    return True
+        
+        return False
 
     def _format_tool_actions(self, tool_result: ToolInvocationResult | None) -> str:
         actions = self._extract_actions(tool_result) if tool_result else []

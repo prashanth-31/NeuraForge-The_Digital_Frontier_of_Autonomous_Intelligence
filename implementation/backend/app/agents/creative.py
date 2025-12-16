@@ -240,7 +240,38 @@ class CreativeAgent:
         """Check if this task requires creative agent's expertise."""
         prompt = (task.prompt or "").lower()
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # CHECK FOR EXPLICIT CREATIVE WRITING REQUESTS FIRST
+        # These should ALWAYS be handled by creative agent
+        # ═══════════════════════════════════════════════════════════════════════
+        explicit_creative_requests = {
+            "write something creative", "something creative", "sounds like",
+            "written by a human", "thoughtful human", "not an ai",
+            "human touch", "more human", "less robotic", "less ai",
+            "make it sound", "rewrite this", "creative writing",
+        }
+        if any(phrase in prompt for phrase in explicit_creative_requests):
+            return True
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # QUICK REJECTIONS - Things creative agent should NEVER handle
+        # These should go to research_agent instead
+        # ═══════════════════════════════════════════════════════════════════════
+        factual_indicators = {
+            "who was", "who is", "what was", "what is the",
+            "history of", "biography", "tell me about",
+            "when was", "where is", "where was", "define",
+            "explain what", "describe the", "give sources",
+            "with sources", "with citations", "cite sources",
+        }
+        if any(indicator in prompt for indicator in factual_indicators):
+            # Check if there's also a creative modifier - if not, reject
+            creative_modifiers = {"poem", "story", "song", "creative", "fun", "simple way", "creatively"}
+            if not any(mod in prompt for mod in creative_modifiers):
+                return False
+        
         # Check if planner explicitly selected this agent - respect the planner's decision
+        # BUT only for creative tasks, not factual queries
         metadata = task.metadata if isinstance(task.metadata, dict) else {}
         shared_context = metadata.get("_shared_context", {})
         planner = shared_context.get("planner", {})
@@ -262,6 +293,7 @@ class CreativeAgent:
             "write a poem", "compose", "creative brief",
             "creative way", "creatively", "fun way", "simple way",
             "explain simply", "easy to understand",
+            "brainstorm", "ideas for", "blog post", "marketing copy",
         }
         
         if any(trigger in prompt for trigger in creative_triggers):

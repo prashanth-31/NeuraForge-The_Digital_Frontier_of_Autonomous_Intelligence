@@ -1261,6 +1261,18 @@ class Orchestrator:
 
         planner_expected = bool(summary["planned_tools"] or summary["fallback_tools"])
         override = self._extract_tool_policy_override(state, agent_name=agent.name)
+        
+        # Also check for synthesis task conditions (prior outputs + synthesis keywords in prompt)
+        is_synthesis_task = self._is_synthesis_task_from_state(state, agent_name=agent.name)
+        if is_synthesis_task:
+            logger.info(
+                "tool_policy_synthesis_skip",
+                agent=agent.name,
+                reason="synthesis_task_with_prior_outputs",
+            )
+            record_agent_tool_policy(agent=agent.name, outcome="synthesis_skipped")
+            return
+        
         if not tool_session.successful:
             if override and bool(override.get("allow_skip")):
                 outcome = "override_allowed"
@@ -1408,6 +1420,128 @@ class Orchestrator:
         else:
             outcome = "compliant"
         record_agent_tool_policy(agent=agent.name, outcome=outcome)
+
+    @staticmethod
+    def _is_synthesis_task_from_state(state: Mapping[str, Any], *, agent_name: str | None = None) -> bool:
+        """
+        Detect if this is a synthesis task OR standalone strategy task 
+        that should skip tool enforcement.
+        
+        These tasks don't need new tool invocations because they either:
+        - Combine prior agent outputs (synthesis)
+        - Rely on general business knowledge (strategy/diagnostic plans)
+        - Are project planning/architecture tasks (knowledge-based)
+        - Are pure creative writing tasks (poems, stories, etc.)
+        """
+        prompt = str(state.get("prompt") or "").lower()
+        outputs = state.get("outputs", [])
+        
+        # ═════════════════════════════════════════════════════════════════════════
+        # CHECK PLANNER METADATA for strategy_task flag (fast path)
+        # ═════════════════════════════════════════════════════════════════════════
+        planner_metadata = state.get("planner_metadata") or state.get("metadata", {}).get("planner", {})
+        if isinstance(planner_metadata, dict):
+            attributes = planner_metadata.get("attributes", {})
+            if attributes.get("strategy_task") is True:
+                return True
+        
+        # ═════════════════════════════════════════════════════════════════════════
+        # CREATIVE WRITING TASKS (creative_agent)
+        # These are pure creative tasks, not data retrieval tasks
+        # ═════════════════════════════════════════════════════════════════════════
+        if agent_name == "creative_agent":
+            creative_task_indicators = (
+                # Explicit creative requests
+                "write something creative", "something creative", "sounds like",
+                "written by a human", "thoughtful human", "not an ai", "not an a.i.",
+                "human touch", "more human", "less robotic", "less ai",
+                "make it sound", "rewrite this", "creative writing",
+                # Creative content types
+                "write a poem", "write a story", "write a song", "write lyrics",
+                "write a blog", "blog post", "write an essay", "marketing copy",
+                "write a slogan", "write a tagline", "brainstorm",
+                "compose a", "draft a", "create a story", "create a poem",
+            )
+            
+            if any(indicator in prompt for indicator in creative_task_indicators):
+                return True
+        
+        # ═════════════════════════════════════════════════════════════════════════
+        # STANDALONE STRATEGY TASKS (enterprise_agent)
+        # These are knowledge-based writing tasks, not data retrieval tasks
+        # ═════════════════════════════════════════════════════════════════════════
+        if agent_name == "enterprise_agent":
+            strategy_task_indicators = (
+                # Diagnostic/planning tasks
+                "diagnostic plan", "recovery plan", "action plan", "implementation plan",
+                "hypotheses", "30-day", "90-day", "roadmap",
+                # Strategy documents
+                "gtm strategy", "go-to-market", "business strategy", "growth strategy",
+                "competitive strategy", "pricing strategy", "marketing strategy",
+                # Proposals and pitches
+                "pitch deck", "investor pitch", "executive summary", "business case",
+                "grant proposal", "project proposal", "budget proposal",
+                # Operational frameworks
+                "diagnostic framework", "assessment framework", "evaluation criteria",
+                "kpis", "metrics framework", "success criteria",
+                # Analysis requests (without needing live data)
+                "root cause analysis", "gap analysis", "swot analysis",
+                "risk assessment", "impact analysis",
+                # PROJECT PLANNING / ARCHITECTURE TASKS (knowledge-based)
+                "break this into", "break into tasks", "technical tasks", "clear tasks",
+                "assign agents", "assign suitable", "tech stack", "technology stack",
+                "system architecture", "software architecture", "system design",
+                "project breakdown", "project tasks", "build a system",
+                "attendance management", "management system", "ai-powered",
+            )
+            
+            if any(indicator in prompt for indicator in strategy_task_indicators):
+                return True
+            
+            # CRM/ops analytics framing (not stock ticker CRM)
+            crm_ops_indicators = (
+                "crm data", "lead-to-close", "conversion rate", "sales pipeline",
+                "customer data", "lead data", "funnel", "churn",
+            )
+            if any(indicator in prompt for indicator in crm_ops_indicators):
+                return True
+        
+        # ═════════════════════════════════════════════════════════════════════════
+        # SYNTHESIS TASKS - Combine prior agent outputs
+        # ═════════════════════════════════════════════════════════════════════════
+        if not outputs or len(outputs) < 1:
+            return False
+        
+        # Check for synthesis indicators in the prompt
+        synthesis_indicators = (
+            "executive brief", "executive summary", "summarize", "combine",
+            "synthesize", "distinguish facts", "facts vs sentiment",
+            "produce a brief", "create a summary", "write a summary",
+            "consolidate", "compile", "bring together", "finally produce",
+        )
+        
+        if any(indicator in prompt for indicator in synthesis_indicators):
+            # Check if there are meaningful prior outputs (not just passes)
+            meaningful_outputs = [
+                o for o in outputs 
+                if isinstance(o, dict) and o.get("confidence", 0) > 0.5
+            ]
+            if meaningful_outputs:
+                return True
+        
+        # Also check output metadata for synthesis_task flag
+        for entry in reversed(outputs):
+            if not isinstance(entry, dict):
+                continue
+            if agent_name and entry.get("agent") != agent_name:
+                continue
+            metadata = entry.get("metadata", {})
+            if metadata.get("synthesis_task"):
+                return True
+            if agent_name:
+                break
+        
+        return False
 
     @staticmethod
     def _should_allow_optional_tool_skip(*, summary: Mapping[str, Any], state: Mapping[str, Any], agent_name: str | None = None) -> bool:
