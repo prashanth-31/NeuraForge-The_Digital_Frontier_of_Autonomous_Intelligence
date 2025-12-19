@@ -1,7 +1,7 @@
-import { useCallback } from "react";
+import { useCallback, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
-import { Activity, Brain, Zap, Users, Loader2 } from "lucide-react";
+import { Activity, Brain, Zap, CheckCircle, Loader2 } from "lucide-react";
 
 import AppLayout from "@/components/AppLayout";
 import { Card } from "@/components/ui/card";
@@ -17,6 +17,10 @@ interface RecentActivityItem {
   timestamp?: string | null;
 }
 
+interface HealthStatus {
+  status: string;
+}
+
 const RECENT_ACTIVITY_LIMIT = 5;
 
 const fetchRecentActivity = async (limit: number): Promise<RecentActivityItem[]> => {
@@ -25,6 +29,14 @@ const fetchRecentActivity = async (limit: number): Promise<RecentActivityItem[]>
     throw new Error(`Failed to load recent activity (${response.status})`);
   }
   return response.json() as Promise<RecentActivityItem[]>;
+};
+
+const fetchHealthStatus = async (): Promise<HealthStatus> => {
+  const response = await fetch(`${API_BASE_URL}/api/v1/health`);
+  if (!response.ok) {
+    throw new Error("Health check failed");
+  }
+  return response.json();
 };
 
 const formatRelativeTime = (iso?: string | null) => {
@@ -54,12 +66,7 @@ const getStatusAccent = (status?: string | null) => {
   return "bg-primary-500";
 };
 
-const stats = [
-  { label: "Active Sessions", value: "12", icon: Activity, color: "text-primary-600", bg: "bg-primary-50" },
-  { label: "Agents Deployed", value: "4", icon: Brain, color: "text-violet-600", bg: "bg-violet-50" },
-  { label: "Tasks Completed", value: "47", icon: Zap, color: "text-amber-600", bg: "bg-amber-50" },
-  { label: "Collaborators", value: "3", icon: Users, color: "text-emerald-600", bg: "bg-emerald-50" },
-];
+const AGENT_COUNT = 5; // finance, research, enterprise, creative, general
 
 const Dashboard = () => {
   const navigate = useNavigate();
@@ -70,6 +77,33 @@ const Dashboard = () => {
     queryFn: () => fetchRecentActivity(RECENT_ACTIVITY_LIMIT),
     staleTime: 30_000,
   });
+
+  const { data: healthData } = useQuery({
+    queryKey: ["health-status"],
+    queryFn: fetchHealthStatus,
+    staleTime: 60_000,
+    retry: 1,
+  });
+
+  // Compute stats from real activity data
+  const stats = useMemo(() => {
+    const completedTasks = recentActivity.filter(
+      (a) => a.status?.toLowerCase().includes("complete")
+    ).length;
+    const inProgressTasks = recentActivity.filter(
+      (a) => a.status?.toLowerCase().includes("progress") || a.status?.toLowerCase().includes("running")
+    ).length;
+    const uniqueAgents = new Set(recentActivity.map((a) => a.agent).filter(Boolean)).size;
+
+    return [
+      { label: "Tasks in Progress", value: inProgressTasks.toString(), icon: Activity, color: "text-primary-600", bg: "bg-primary-50" },
+      { label: "Agents Available", value: AGENT_COUNT.toString(), icon: Brain, color: "text-violet-600", bg: "bg-violet-50" },
+      { label: "Recent Completed", value: completedTasks.toString(), icon: Zap, color: "text-amber-600", bg: "bg-amber-50" },
+      { label: "Agents Active", value: uniqueAgents.toString(), icon: CheckCircle, color: "text-emerald-600", bg: "bg-emerald-50" },
+    ];
+  }, [recentActivity]);
+
+  const isHealthy = healthData?.status === "ok";
 
   const handleActivitySelect = useCallback(async (taskId: string) => {
     await loadTaskById(taskId);
@@ -87,8 +121,8 @@ const Dashboard = () => {
               <p className="text-muted-foreground">Monitor your AI collaboration metrics</p>
             </div>
             <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400 bg-white border border-slate-200/60 px-3 py-1.5 rounded-full shadow-xs">
-              <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-              <span>All systems operational</span>
+              <div className={`w-2 h-2 rounded-full ${isHealthy ? "bg-emerald-400 animate-pulse" : "bg-rose-400"}`} />
+              <span>{isHealthy ? "All systems operational" : "System degraded"}</span>
             </div>
           </div>
 

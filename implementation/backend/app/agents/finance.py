@@ -313,10 +313,71 @@ class FinanceAgent:
             uncertainties=reasoning.uncertainties,
         )
 
+    def _is_meta_prompt(self, prompt: str) -> bool:
+        """
+        Detect if the prompt is a meta-prompt (role description/instruction)
+        rather than an actual query to be processed.
+        
+        Meta-prompts like "You are FinResearch Agent, responsible for..." are
+        instructions describing what the agent should be, not actual queries.
+        """
+        normalized = (prompt or "").lower().strip()
+        if not normalized:
+            return False
+        
+        # Meta-prompt patterns (role descriptions, instructions)
+        meta_patterns = [
+            r'^you are\s+\w+\s*(agent|assistant)',  # "You are X Agent..."
+            r'^act as\s+',  # "Act as a..."
+            r'^assume the role',  # "Assume the role of..."
+            r'^your role is',  # "Your role is..."
+            r'^you should be',  # "You should be..."
+            r'^behave as',  # "Behave as..."
+            r'^pretend you are',  # "Pretend you are..."
+            r'^i want you to act',  # "I want you to act..."
+            r'^from now on',  # "From now on, you are..."
+        ]
+        
+        for pattern in meta_patterns:
+            if re.search(pattern, normalized):
+                # Check if this contains ONLY instructions without an actual query
+                # If it has "first analyze", "then perform", etc., it's still just instructions
+                instruction_only_indicators = [
+                    "assume missing details",
+                    "state all assumptions",
+                    "present reasoning step",
+                    "conclude with",
+                    "structure your response",
+                    "follow these guidelines",
+                ]
+                if any(indicator in normalized for indicator in instruction_only_indicators):
+                    logger.info(
+                        "finance_agent_meta_prompt_detected",
+                        prompt_preview=normalized[:100],
+                        pattern=pattern,
+                    )
+                    return True
+        
+        return False
+
     def _is_relevant_task(self, task: AgentInput) -> bool:
         """Check if this task is relevant to finance agent - handles ALL financial matters."""
+        prompt = (task.prompt or "").lower()
+        
         # ═══════════════════════════════════════════════════════════════════════
-        # FIRST: If planner explicitly selected this agent, trust it
+        # FIRST: Check for meta-prompts (role descriptions) - these need special handling
+        # Even if planner selected us, we should not process pure instructions as queries
+        # ═══════════════════════════════════════════════════════════════════════
+        if self._is_meta_prompt(task.prompt):
+            logger.info(
+                "finance_agent_reject_meta_prompt",
+                reason="prompt_is_role_description_not_query",
+                prompt_preview=prompt[:100] if prompt else "",
+            )
+            return False
+        
+        # ═══════════════════════════════════════════════════════════════════════
+        # SECOND: If planner explicitly selected this agent, trust it
         # ═══════════════════════════════════════════════════════════════════════
         metadata = task.metadata or {}
         shared_ctx = metadata.get("_shared_context", {})
@@ -335,8 +396,6 @@ class FinanceAgent:
                 logger.debug("finance_agent_accept", reason="planner_step_assigned")
                 return True
         
-        prompt = (task.prompt or "").lower()
-        
         # ═══════════════════════════════════════════════════════════════════════
         # QUICK REJECTIONS - Things finance agent should NEVER handle
         # Use word boundary checks to avoid false positives (e.g., "hi" in "highlight")
@@ -353,7 +412,6 @@ class FinanceAgent:
             return False
         
         # Single-word rejections need word boundary check
-        import re
         single_word_rejects = ["help", "hello", "hi", "greetings", "hey"]
         for word in single_word_rejects:
             # Use word boundary to avoid matching "hi" in "highlight"

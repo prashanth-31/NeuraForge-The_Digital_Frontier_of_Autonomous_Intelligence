@@ -1205,12 +1205,36 @@ class Orchestrator:
     ) -> None:
         if tool_session is None:
             return
+        
+        # ════════════════════════════════════════════════════════════════════════════
+        # SKIP TOOL POLICY FOR AGENTS THAT PASSED
+        # When an agent returns confidence=0.0 with metadata.passed=True, it signals
+        # that the task is not relevant to this agent. In this case, we should NOT
+        # enforce tool-first policy since the agent correctly chose to pass.
+        # ════════════════════════════════════════════════════════════════════════════
+        outputs = state.get("outputs", [])
+        latest_output = outputs[-1] if outputs else None
+        if isinstance(latest_output, dict):
+            confidence = latest_output.get("confidence", 1.0)
+            metadata = latest_output.get("metadata")
+            is_passed = (
+                confidence == 0.0 and
+                isinstance(metadata, dict) and
+                metadata.get("passed") is True
+            )
+            if is_passed:
+                logger.info(
+                    "tool_policy_agent_passed",
+                    agent=agent.name,
+                    reason="agent_returned_pass_with_zero_confidence",
+                )
+                record_agent_tool_policy(agent=agent.name, outcome="passed_skipped")
+                return
+        
         summary = tool_session.adherence_summary()
         enforcement_required = TOOL_ENFORCEMENT_POLICY.get(agent.name, False)
         policy_mode = "enforced" if enforcement_required else "optional"
 
-        outputs = state.get("outputs", [])
-        latest_output = outputs[-1] if outputs else None
         if isinstance(latest_output, dict):
             metadata = latest_output.get("metadata")
             if not isinstance(metadata, dict):
