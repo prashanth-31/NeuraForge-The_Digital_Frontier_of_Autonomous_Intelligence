@@ -840,6 +840,7 @@ class LLMOrchestrationPlanner:
 
         allowed_tools = self._allowed_tool_names(tool_aliases)
         simple_greeting = self._is_simple_greeting(prompt)
+        meta_prompt = self._is_meta_prompt(prompt)
         updated_steps = [
             PlannedAgentStep(
                 agent=step.agent,
@@ -851,8 +852,76 @@ class LLMOrchestrationPlanner:
             for step in steps
         ]
 
+        # ────────────────────────────────────────────────────────────────────────
+        # Meta-prompt handling: Route to general_agent for role descriptions
+        # ────────────────────────────────────────────────────────────────────────
+        meta_prompt_selected = False
+        if meta_prompt and updated_steps:
+            general_step = next((step for step in updated_steps if step.agent == "general_agent"), None)
+            if general_step is None:
+                # Create a general_agent step for meta-prompts
+                general_step = PlannedAgentStep(
+                    agent="general_agent",
+                    tools=[],
+                    fallback_tools=[],
+                    reason="meta_prompt_handling",
+                    confidence=0.8,
+                )
+            removed_agents = [step.agent for step in updated_steps if step.agent != "general_agent"]
+            if removed_agents:
+                logger.info(
+                    "planner_trimmed_agents",
+                    reason="meta_prompt",
+                    prompt=prompt.strip()[:100],
+                    selected_agent="general_agent",
+                    removed_agents=removed_agents,
+                )
+            adjustments = {
+                "reason": "meta_prompt",
+                "selected_agent": "general_agent",
+                "removed_agents": removed_agents,
+            }
+            updated_steps = [general_step]
+            meta_prompt_selected = True
+
+        # ────────────────────────────────────────────────────────────────────────
+        # Vague follow-up handling: Route to creative_agent for idea generation
+        # ────────────────────────────────────────────────────────────────────────
+        vague_followup = self._is_vague_followup(prompt)
+        vague_followup_selected = False
+        if not meta_prompt_selected and vague_followup and updated_steps:
+            # For vague follow-ups requesting ideas, prefer creative_agent
+            creative_step = next((step for step in updated_steps if step.agent == "creative_agent"), None)
+            general_step = next((step for step in updated_steps if step.agent == "general_agent"), None)
+            if creative_step is None:
+                # Create a creative_agent step for vague idea requests
+                creative_step = PlannedAgentStep(
+                    agent="creative_agent",
+                    tools=[],
+                    fallback_tools=[],
+                    reason="vague_followup_idea_request",
+                    confidence=0.7,
+                )
+            selected = creative_step
+            removed_agents = [step.agent for step in updated_steps if step.agent != selected.agent]
+            if removed_agents:
+                logger.info(
+                    "planner_trimmed_agents",
+                    reason="vague_followup",
+                    prompt=prompt.strip()[:100],
+                    selected_agent=selected.agent,
+                    removed_agents=removed_agents,
+                )
+            adjustments = {
+                "reason": "vague_followup",
+                "selected_agent": selected.agent,
+                "removed_agents": removed_agents,
+            }
+            updated_steps = [selected]
+            vague_followup_selected = True
+
         simple_greeting_selected = False
-        if simple_greeting and updated_steps:
+        if not meta_prompt_selected and not vague_followup_selected and simple_greeting and updated_steps:
             general_step = next((step for step in updated_steps if step.agent == "general_agent"), None)
             selected = general_step or updated_steps[0]
             removed_agents = [step.agent for step in updated_steps if step is not selected]
@@ -1452,6 +1521,88 @@ class LLMOrchestrationPlanner:
 
         return False
 
+    def _is_vague_followup(self, prompt: str) -> bool:
+        """
+        Detect vague follow-up prompts that need creative/general handling.
+        
+        These are short prompts like "give another idea", "more", "continue", etc.
+        that don't have enough context for specialist agents.
+        """
+        normalized = (prompt or "").lower().strip()
+        if not normalized:
+            return False
+        
+        # Very short prompts are likely follow-ups
+        words = normalized.split()
+        if len(words) <= 5:
+            vague_patterns = {
+                # Idea/suggestion requests
+                "another idea", "other idea", "more ideas", "give idea",
+                "any other idea", "give any other", "another one",
+                "one more", "more options", "other options",
+                "another suggestion", "more suggestions",
+                # Continuation requests
+                "continue", "go on", "keep going", "more", "elaborate",
+                "tell me more", "what else", "anything else",
+                # Simple affirmatives/negatives
+                "yes", "no", "ok", "okay", "sure", "thanks", "thank you",
+            }
+            if any(pattern in normalized for pattern in vague_patterns):
+                return True
+        
+        return False
+
+    def _is_meta_prompt(self, prompt: str) -> bool:
+        """
+        Detect if the prompt is a meta-prompt (role description/instruction)
+        rather than an actual query to be processed.
+        
+        Meta-prompts like "You are FinResearch Agent, responsible for..." are
+        instructions describing what the agent should be, not actual queries.
+        These should be routed to general_agent for handling.
+        """
+        import re
+        normalized = (prompt or "").lower().strip()
+        if not normalized:
+            return False
+        
+        # Meta-prompt patterns (role descriptions, instructions)
+        meta_patterns = [
+            r'^you are\s+\w+\s*(agent|assistant)',  # "You are X Agent..."
+            r'^act as\s+',  # "Act as a..."
+            r'^assume the role',  # "Assume the role of..."
+            r'^your role is',  # "Your role is..."
+            r'^you should be',  # "You should be..."
+            r'^behave as',  # "Behave as..."
+            r'^pretend you are',  # "Pretend you are..."
+            r'^i want you to act',  # "I want you to act..."
+            r'^from now on',  # "From now on, you are..."
+        ]
+        
+        for pattern in meta_patterns:
+            if re.search(pattern, normalized):
+                # Check if this contains ONLY instructions without an actual query
+                # If it has "assume missing details", "conclude with", etc., it's still just instructions
+                instruction_only_indicators = [
+                    "assume missing details",
+                    "state all assumptions",
+                    "present reasoning step",
+                    "conclude with",
+                    "structure your response",
+                    "follow these guidelines",
+                    "provide detailed",
+                    "be thorough",
+                ]
+                if any(indicator in normalized for indicator in instruction_only_indicators):
+                    logger.info(
+                        "planner_meta_prompt_detected",
+                        prompt_preview=normalized[:100],
+                        pattern=pattern,
+                    )
+                    return True
+        
+        return False
+
     def _select_finance_tools(self, prompt: str) -> dict[str, Any]:
         """Select appropriate finance tools based on the query type."""
         normalized = (prompt or "").lower()
@@ -1514,6 +1665,8 @@ class LLMOrchestrationPlanner:
 
     def _prompt_mentions_finance(self, prompt: str) -> bool:
         if self._is_simple_greeting(prompt):
+            return False
+        if self._is_meta_prompt(prompt):
             return False
         original = (prompt or "").strip()
         normalized = original.lower()
@@ -1588,6 +1741,8 @@ class LLMOrchestrationPlanner:
         route to finance_agent without other agents.
         """
         if self._is_simple_greeting(prompt):
+            return False
+        if self._is_meta_prompt(prompt):
             return False
         normalized = (prompt or "").strip().lower()
         if not normalized:
